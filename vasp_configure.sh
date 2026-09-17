@@ -209,7 +209,21 @@ _shorten() { case "$1" in "$HOME"/*) printf '~%s\n' "${1#"$HOME"}";; *) printf '
 detect_custom_vasp() {
     local roots r meta exe ver feats dd
     if [[ -n "${WP_VASP_BUILD_ROOTS:-}" ]]; then roots="${WP_VASP_BUILD_ROOTS//:/ }"
-    else roots="$HOME/Vasp $HOME/vasp $HOME/VASP $HOME/.local $HOME/opt $HOME/builds $HOME/src"; fi
+    else
+        # $HOME is not the only place a build lives. On many clusters the home is
+        # small and VASP is compiled in a project or scratch area, so those are
+        # scanned too when they exist and belong to this user.
+        roots="$HOME/Vasp $HOME/vasp $HOME/VASP $HOME/.local $HOME/opt $HOME/builds $HOME/src"
+        local extra
+        for extra in "$HOME"/* /scratch/"$USER" /scratch*/"$USER" /prj/*/"$USER" \
+                     /work/"$USER" /lustre/"$USER" /gpfs/*/"$USER"; do
+            [[ -d "$extra" ]] || continue
+            case "$(basename "$extra")" in
+                [Vv]asp|VASP|vasp*|*[Vv]asp*|opt|builds|src|sw|software|apps|local)
+                    roots="$roots $extra" ;;
+            esac
+        done
+    fi
     local -A seen=()
     for r in $roots; do                                  # (1) .wpmeta-described builds
         [[ -d "$r" ]] || continue
@@ -221,7 +235,7 @@ detect_custom_vasp() {
             ver="$(printf '%s' "$exe" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
             printf '%s\t[custom] vasp %s%s -> %s\n' "$exe" "${ver:-?}" \
                    "${feats:+  ($feats)}" "$(_shorten "$exe")"
-        done < <(find "$r" -maxdepth 6 -name '*.wpmeta' 2>/dev/null)
+        done < <(find -L "$r" -maxdepth 8 -name '*.wpmeta' 2>/dev/null)
     done
     for r in $roots; do                                  # (2) bare binaries / wrappers
         [[ -d "$r" ]] || continue
@@ -234,8 +248,10 @@ detect_custom_vasp() {
             seen[$exe]=1
             ver="$(printf '%s' "$exe" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
             printf '%s\t[custom] vasp %s -> %s\n' "$exe" "${ver:-?}" "$(_shorten "$exe")"
-        done < <(find "$r" -maxdepth 6 -type f -perm -u+x \
-                      \( -name 'vasp_*_w90' -o -name 'vasp_std' \) 2>/dev/null)
+        done < <(find -L "$r" -maxdepth 8 \( -type f -o -type l \) -perm -u+x \
+                      -name 'vasp_*' ! -name '*.o' ! -name '*.a' ! -name '*.so*' \
+                      ! -name '*.f90' ! -name '*.F' ! -name '*.mod' ! -name '*.wpmeta' \
+                      2>/dev/null)
     done
 }
 
