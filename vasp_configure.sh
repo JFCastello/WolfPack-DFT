@@ -213,16 +213,36 @@ detect_custom_vasp() {
         # $HOME is not the only place a build lives. On many clusters the home is
         # small and VASP is compiled in a project or scratch area, so those are
         # scanned too when they exist and belong to this user.
-        roots="$HOME/Vasp $HOME/vasp $HOME/VASP $HOME/.local $HOME/opt $HOME/builds $HOME/src"
-        local extra
-        for extra in "$HOME"/* /scratch/"$USER" /scratch*/"$USER" /prj/*/"$USER" \
-                     /work/"$USER" /lustre/"$USER" /gpfs/*/"$USER"; do
-            [[ -d "$extra" ]] || continue
-            case "$(basename "$extra")" in
-                [Vv]asp|VASP|vasp*|*[Vv]asp*|opt|builds|src|sw|software|apps|local)
-                    roots="$roots $extra" ;;
-            esac
+        # $HOME is only ONE of the places to look, and on many clusters it is the
+        # wrong one. Santos Dumont gives a user $HOME=/prj/<proj>/<user> while
+        # the work area is /scratch/<proj>/<user> -- a DIFFERENT directory with
+        # the same basename. Scanning $HOME there finds nothing while the build
+        # sits in plain sight next to where the user is standing. So the bases
+        # are: $HOME, the directory vasp-configure was invoked from and its
+        # parent (people run it from their work tree), and the usual
+        # project/scratch layouts INCLUDING the <area>/<project>/<user> form.
+        local bases base extra
+        bases="$HOME $PWD $(dirname "$PWD")"
+        for base in /scratch /scratch[0-9]* /prj /work /lustre /gpfs /home /store /data; do
+            [[ -d "$base" ]] || continue
+            for extra in "$base/$USER" "$base"/*/"$USER"; do
+                [[ -d "$extra" ]] && bases="$bases $extra"
+            done
         done
+        roots=""
+        for base in $bases; do
+            [[ -d "$base" ]] || continue
+            # the conventional names directly under a base ...
+            for extra in Vasp vasp VASP .local opt builds src sw software apps; do
+                [[ -d "$base/$extra" ]] && roots="$roots $base/$extra"
+            done
+            # ... plus anything under it whose name mentions vasp
+            for extra in "$base"/*[Vv][Aa][Ss][Pp]*; do
+                [[ -d "$extra" ]] && roots="$roots $extra"
+            done
+        done
+        # de-duplicate: the same directory can be reached by several bases
+        roots="$(printf '%s\n' $roots | sort -u | tr '\n' ' ')"
     fi
     local -A seen=()
     for r in $roots; do                                  # (1) .wpmeta-described builds
