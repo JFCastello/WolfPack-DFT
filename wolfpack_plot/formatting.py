@@ -155,7 +155,7 @@ def format_kpt_label(label) -> str:
 
 
 def mathify_title(raw: str) -> str:
-    r"""Render a light TeX-ish title in journal style (e.g. "CuVS_3 - G_0W_0")."""
+    r"""Render a light TeX-ish title in journal style (e.g. "MoS_2 - G_0W_0")."""
     if not raw:
         return ""
     if "$" in raw:
@@ -190,7 +190,7 @@ def mathify_title(raw: str) -> str:
 
 
 def _auto_formula_tex(formula: str) -> str:
-    """Subscript digit groups in a plain formula, then render. CuVS3 -> CuVS3."""
+    """Subscript digit groups in a plain formula, then render. MoS2 -> MoS₂."""
     return mathify_title(re.sub(r"(\d+)", r"_{\1}", formula))
 
 

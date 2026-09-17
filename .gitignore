@@ -102,7 +102,7 @@ slurm.sh
 slurm_job.sh
 slurm_job_*.sh
 INCAR.parallel
-# self-contained job scripts rendered (and submitted) by vasp-dry-run / vasp-test:
+# self-contained job scripts rendered by vasp-dry-run / vasp-test:
 slurm_dryrun.sh
 slurm_vasptest.sh
 
@@ -111,3 +111,27 @@ slurm_vasptest.sh
 /*.pdf
 /*.svg
 /*.csv
+
+# ============================================================================
+# Test data -- NEVER versioned, in EITHER repo.
+# Test/ holds real VASP calculations. Two independent reasons to keep all of it
+# out, not just selected file types:
+#   * POTCARs are licensed. Their own header says
+#       COPYR = ... regulated by the VASP license agreement
+#     so redistributing them is a licence violation, and the public repo is the
+#     kind of place that gets a repo taken down.
+#   * The rest is unpublished research (structures, parameters, results), which
+#     should be published by its authors, not leaked by a toolkit commit.
+# Whole tree, at any depth, plus the licensed/bulky VASP files anywhere else.
+# ============================================================================
+Test/
+**/Test/
+POTCAR
+**/POTCAR
+POTCAR.spin
+WAVECAR.chi
+WAVEDER
+QP_audit.png
+
+# Stray file produced by a shell redirect typo (a memory figure used as a name):
+554308

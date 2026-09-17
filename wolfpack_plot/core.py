@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import pickle
 import sys
+import textwrap
 import warnings
 from pathlib import Path
 
@@ -27,11 +28,16 @@ from .formatting import format_kpt_label
 from .physics import (analyze_band_gap, auto_select_units, classify_material,
                       contribution_table, units_to_projection_string,
                       write_report, _group_raw_weight)
-from .plotting import build_figure
+from .detect import detect_layout
+from .w90 import (describe as w90_describe, read_w90_bands,
+                  read_w90_dos)
+from .plotting import (build_bands_figure, build_dos_figure,
+                       build_figure)
 from .structure import (_auto_projection_groups, _partition, _reduced_formula,
                         _site_grouping, _species_counts, assign_channels,
                         parse_projection_spec)
-from .vaspio import (_assign_labels, auto_energy_window, read_bands, read_dos,
+from .vaspio import (_assign_labels, auto_energy_window,
+                     auto_energy_window_dos, read_bands, read_dos,
                      read_fermi, resolve_dos_smearing)
 
 try:
@@ -55,7 +61,7 @@ def _make_cfg(**overrides):
         auto_projections=0, name=DEFAULT_OUT_NAME, subdir=None,
         overlay_plain=True,
         group=GROUP_MODE, symprec=SYMPREC,
-        smear=None, dpi=DPI, figw=FIG_W, figh=FIG_H,
+        smear=None, efermi=None, dpi=DPI, figw=FIG_W, figh=FIG_H,
         font=FONT_FAMILY, formats=",".join(OUT_FORMATS), pickle=False,
         verbose=False)
     for k, v in overrides.items():
@@ -100,7 +106,10 @@ def _spin_jobs(cfg, bands_data, spins, show_both):
     ISPIN=2 --spin both-> spin-up + spin-down PLUS the overlaid blue/orange plain
                           plot (suffix "overlay"), unless cfg.overlay_plain=False.
     """
-    if not bands_data["is_spin"]:
+    # A DOS-only folder has no band data; fall back to the spins resolved from
+    # the DOS itself (show_both) so --spin still selects up/down/both.
+    is_spin = bands_data["is_spin"] if bands_data is not None else bool(show_both)
+    if not is_spin:
         return [(spins, "", None, False)]
     if cfg.spin == "up":
         return [([Spin.up], "up", r"\uparrow", False)]
@@ -155,7 +164,7 @@ def _resolve_groups(cfg, bands_data, dos_data, structure, n_orb, grouping, eferm
 
     if spec:
         groups = parse_projection_spec(spec, structure, n_orb, grouping)
-        if n_orb:
+        if n_orb and bands_data is not None:
             for g in groups:
                 if (_group_raw_weight(g, bands_data) or 0.0) <= 1e-8:
                     el, orb = g["plain"].split("-")[0], g["plain"].split("-", 1)[-1]
@@ -194,44 +203,140 @@ def _resolve_groups(cfg, bands_data, dos_data, structure, n_orb, grouping, eferm
     return assign_channels(groups, method)
 
 
-def load_all(cfg):
-    """Read VASP output and resolve projection groups from a config namespace."""
+def resolve_layout(cfg):
+    """Where the data lives and what can be plotted from it.
+
+    Accepts BOTH the classic workflow tree (<root>/Scf, /Bands, /Dos -> one
+    combined figure) and a bare calculation folder, whose kind is read off the
+    INCAR/KPOINTS (see wolfpack_plot.detect) so that standing inside a DOS run
+    produces DOS plots only, and inside a band run, band plots only.
+    """
     root = cfg.root.expanduser().resolve()
-    bands_dir, dos_dir, scf_dir = root / BANDS_DIR, root / DOS_DIR, root / SCF_DIR
-    for d in (bands_dir, dos_dir):
-        if not d.is_dir():
-            raise FileNotFoundError(f"expected sub-folder not found: {d}")
+    lay = detect_layout(root, bands_dir=BANDS_DIR, dos_dir=DOS_DIR,
+                        scf_dir=SCF_DIR)
+    if lay["kind"] is None:
+        raise FileNotFoundError(
+            f"nothing to plot in {root}: no {BANDS_DIR}/+{DOS_DIR}/ workflow tree, "
+            f"and this folder is not a recognisable VASP calculation "
+            f"({lay['why']}). Run the plotter inside a calculation folder or "
+            f"one containing {SCF_DIR}/ {BANDS_DIR}/ {DOS_DIR}/.")
+
+    # Physics problems that make the DATA wrong rather than the plot ugly. These
+    # are printed LOUDLY and unconditionally (not gated on --verbose): VASP
+    # produced the numbers without complaining and the resulting figure looks
+    # entirely normal, so a quiet note would be read as "fine".
+    for msg in lay.get("problems") or []:
+        print("\n" + "!" * 78, file=sys.stderr)
+        print("!! WRONG RECIPE -- the plot will look normal but the DATA is not",
+              file=sys.stderr)
+        print("!" * 78, file=sys.stderr)
+        for line in textwrap.wrap(msg, 76):
+            print("   " + line, file=sys.stderr)
+        print("   See: https://vasp.at/wiki/index.php/"
+              "Band-structure_calculation_using_meta-GGA_functionals\n",
+              file=sys.stderr)
+    return lay
+
+
+def load_all(cfg):
+    """Read VASP output and resolve projection groups from a config namespace.
+
+    Returns (bands_data, dos_data, groups, spins, show_both, gap); bands_data or
+    dos_data is None when the folder only holds one of the two.
+    """
+    lay = resolve_layout(cfg)
+    cfg._layout = lay
+    kind = lay["kind"]
+    bands_dir, dos_dir, scf_dir = lay["bands"], lay["dos"], lay["scf"]
+    want_bands = bands_dir is not None and kind in ("bands", "both")
+    want_dos = dos_dir is not None and kind in ("dos", "both")
 
     if cfg.verbose:
+        print(f"[0/4] Layout: {lay['layout']} -- {lay['why']}")
+        print(f"      plotting: {kind}")
+
+    # ---- Wannier90: interpolated curves, read straight from the w90 output --
+    # Same dict shapes as the VASP readers, so every figure builder, projection
+    # and spin path below works unchanged and the plots look identical.
+    if kind == "wannier90":
+        w90 = lay["w90"]
+        if cfg.verbose:
+            print(f"[1/4] Wannier90 output: {w90_describe(bands_dir, w90)}")
+        bands_data = dos_data = None
+        if w90.get("band_dat"):
+            bands_data = read_w90_bands(bands_dir, w90,
+                                        efermi=getattr(cfg, "efermi", None))
+        if w90.get("dos_dat"):
+            dos_data = read_w90_dos(dos_dir, w90,
+                                    efermi=getattr(cfg, "efermi", None))
+        src = bands_data if bands_data is not None else dos_data
+        efermi = src["efermi"]
+        if cfg.verbose:
+            print(f"      E_F = {efermi:.4f} eV  ({src['efermi_source']})")
+            print("      NOTE: Wannier90 energies are absolute; they are shifted "
+                  "by E_F here.")
+        spins, show_both = _resolve_spins_value(
+            cfg.spin, len(((dos_data or {}).get("total")) or {}) > 1)
+        if cfg.smear is None:
+            cfg.smear = 0.0                # w90 already integrates onto its grid
+        if bands_data is not None:
+            auto_lo, auto_hi = auto_energy_window(bands_data)
+        else:
+            auto_lo, auto_hi = auto_energy_window_dos(dos_data)
+        if cfg.emin is None:
+            cfg.emin = auto_lo
+        if cfg.emax is None:
+            cfg.emax = auto_hi
+        cfg._efermi = efermi
+        # Wannier90 output carries no orbital projections, so every method
+        # degrades to the plain backbone -- which is exactly the VASP look.
+        if cfg.method != "plain" and cfg.verbose:
+            print(f"      method={cfg.method} has no Wannier90 projections "
+                  "available -> drawing the plain interpolated curves.")
+        cfg.method = "plain"
+        return bands_data, dos_data, [], spins, show_both, None
+
+    ref_dir = bands_dir if want_bands else dos_dir
+    if cfg.verbose:
         print(f"[1/4] Reading Fermi level from {scf_dir} ...")
-    efermi = read_fermi(scf_dir, fallback_dir=bands_dir)
+    efermi = read_fermi(scf_dir, fallback_dir=ref_dir)
     if cfg.verbose:
         print(f"      E_F = {efermi:.4f} eV")
 
-    if cfg.verbose:
-        print(f"[2/4] Reading band structure from {bands_dir} ...")
-    bands_data = read_bands(bands_dir, efermi)
-    ispin = bands_data.get("ispin", 1)
-    if ispin >= 3:
-        raise ValueError(
-            f"ISPIN={ispin} is not supported yet — only ISPIN=1 (non "
-            "spin-polarised) and ISPIN=2 (collinear spin) are implemented. "
-            "Non-collinear/spinor output (4 spin components) is out of scope "
-            "for this plotter.")
-    spins, show_both = _resolve_spins_value(cfg.spin, bands_data["is_spin"])
-    if cfg.verbose:
-        print(f"      {sum(v.shape[0] for v in bands_data['bands'].values())} bands, "
-              f"{len(bands_data['distance'])} k-points, "
-              f"{len(bands_data['segments'])} path segment(s), "
-              f"ISPIN={ispin} (spin={'yes' if bands_data['is_spin'] else 'no'}), "
-              f"SOC={'yes' if bands_data['soc'] else 'no'}")
+    bands_data = None
+    spins, show_both = [Spin.up], False
+    if want_bands:
+        if cfg.verbose:
+            print(f"[2/4] Reading band structure from {bands_dir} ...")
+        bands_data = read_bands(bands_dir, efermi)
+        ispin = bands_data.get("ispin", 1)
+        if ispin >= 3:
+            raise ValueError(
+                f"ISPIN={ispin} is not supported yet — only ISPIN=1 (non "
+                "spin-polarised) and ISPIN=2 (collinear spin) are implemented. "
+                "Non-collinear/spinor output (4 spin components) is out of scope "
+                "for this plotter.")
+        spins, show_both = _resolve_spins_value(cfg.spin, bands_data["is_spin"])
+        if cfg.verbose:
+            print(f"      {sum(v.shape[0] for v in bands_data['bands'].values())} bands, "
+                  f"{len(bands_data['distance'])} k-points, "
+                  f"{len(bands_data['segments'])} path segment(s), "
+                  f"ISPIN={ispin} (spin={'yes' if bands_data['is_spin'] else 'no'}), "
+                  f"SOC={'yes' if bands_data['soc'] else 'no'}")
 
-    if cfg.verbose:
-        print(f"[3/4] Reading DOS from {dos_dir} ...")
-    dos_data = read_dos(dos_dir, efermi)
+    dos_data = None
+    if want_dos:
+        if cfg.verbose:
+            print(f"[3/4] Reading DOS from {dos_dir} ...")
+        dos_data = read_dos(dos_dir, efermi)
+        if bands_data is None:
+            # DOS-only folder: the spin channels come from the DOS itself.
+            is_spin = Spin.down in dos_data.get("total", {})
+            spins, show_both = _resolve_spins_value(cfg.spin, is_spin)
 
     if getattr(cfg, "smear", None) is None:
-        sigma, ismear, nedos, src = resolve_dos_smearing([dos_dir, scf_dir, bands_dir])
+        sigma, ismear, nedos, src = resolve_dos_smearing(
+            [d for d in (dos_dir, scf_dir, bands_dir) if d is not None])
         cfg.smear = sigma
         if cfg.verbose:
             if src is not None:
@@ -249,7 +354,10 @@ def load_all(cfg):
                 warnings.warn("No INCAR in Dos/Scf/Bands; applying a light "
                               f"default DOS Gaussian ({sigma:g} eV).")
 
-    auto_lo, auto_hi = auto_energy_window(bands_data)
+    if bands_data is not None:
+        auto_lo, auto_hi = auto_energy_window(bands_data)
+    else:                                    # DOS-only: frame the non-zero DOS
+        auto_lo, auto_hi = auto_energy_window_dos(dos_data)
     if cfg.emin is None:
         cfg.emin = auto_lo
     if cfg.emax is None:
@@ -259,7 +367,11 @@ def load_all(cfg):
         print(f"      energy window: [{cfg.emin:g}, {cfg.emax:g}] eV "
               f"({tag}; use --emin/--emax to change)")
 
-    structure, n_orb = bands_data["structure"], bands_data["n_orb"]
+    src_data = bands_data if bands_data is not None else dos_data
+    structure, n_orb = src_data["structure"], src_data["n_orb"]
+    if structure is None:
+        raise ValueError("could not read the structure (no vasprun.xml with "
+                         "projections?) -- cannot resolve projection groups.")
 
     grouping = _site_grouping(structure, getattr(cfg, "group", GROUP_MODE),
                               getattr(cfg, "symprec", SYMPREC))
@@ -287,16 +399,36 @@ def load_all(cfg):
                 for g in groups)
             print(f"      method={cfg.method}; channels -> {mapping}")
 
-    gap = analyze_band_gap(bands_data)               # band-edge analysis
+    # Band-edge analysis needs eigenvalues along a path; a DOS-only folder has none.
+    gap = analyze_band_gap(bands_data) if bands_data is not None else None
     cfg._efermi = efermi                             # stash for the report
-    if cfg.verbose:
+    if cfg.verbose and gap is not None:
         if gap.get("metal"):
             print("      band gap: metallic (bands cross E_F)")
         else:
-            kind = "direct" if gap["direct"] else "indirect"
-            print(f"      band gap: {gap['gap']:.4f} eV ({kind}, "
+            kind_lbl = "direct" if gap["direct"] else "indirect"
+            print(f"      band gap: {gap['gap']:.4f} eV ({kind_lbl}, "
                   f"{classify_material(gap)})")
     return bands_data, dos_data, groups, spins, show_both, gap
+
+
+def _render(cfg, bands_data, dos_data, groups, job_spins, note, overlay, gap):
+    """Draw the figure that matches what the folder actually contains.
+
+    bands + DOS -> the combined figure (unchanged);
+    bands only  -> a standalone band structure;
+    DOS only    -> a standalone density of states.
+    """
+    if bands_data is not None and dos_data is not None:
+        return build_figure(bands_data, dos_data, groups, cfg, job_spins,
+                            show_both=overlay, gap=gap, spin_note=note,
+                            overlay_plain=overlay)
+    if bands_data is not None:
+        return build_bands_figure(bands_data, groups, cfg, job_spins, gap=gap,
+                                  spin_note=note, overlay_plain=overlay)
+    return build_dos_figure(dos_data, groups, cfg, job_spins,
+                            show_both=overlay, spin_note=note,
+                            structure=dos_data.get("structure"))
 
 
 def generate(root=".", *, return_axes=False, return_data=False, **kwargs):
@@ -305,9 +437,8 @@ def generate(root=".", *, return_axes=False, return_data=False, **kwargs):
     bands_data, dos_data, groups, spins, show_both, gap = load_all(cfg)
     job_spins, _suffix, note, overlay = _spin_jobs(cfg, bands_data, spins,
                                                    show_both)[0]
-    fig, axes = build_figure(bands_data, dos_data, groups, cfg, job_spins,
-                             show_both=overlay, gap=gap, spin_note=note,
-                             overlay_plain=overlay)
+    fig, axes = _render(cfg, bands_data, dos_data, groups, job_spins, note,
+                        overlay, gap)
     result = [fig]
     if return_axes:
         result.append(axes)
@@ -422,7 +553,7 @@ def parse_args(argv=None):
             '  vasp-plot-fatbandsdos --root . --method one_orbital \\\n'
             '      --auto-projections 1 --emin -3 --emax 3\n'
             '  vasp-plot-fatbandsdos --root . --method rgb \\\n'
-            '      --projections "(Cu-d),(V-d),(S-p)" --title "CuVS_3"\n'))
+            '      --projections "(Cu-d),(V-d),(S-p)" --title "MoS_2"\n'))
     p.add_argument("--root", default=".", type=Path,
                    help="Calculation root with Scf/ Bands/ Dos/ (default: .)")
     p.add_argument("--list", action="store_true",
@@ -459,7 +590,7 @@ def parse_args(argv=None):
                    help="Spin channel(s) to plot for ISPIN=2 (default: both). "
                         "Ignored for ISPIN=1 (a single channel is plotted).")
     p.add_argument("--title", default=None,
-                   help='Title in TeX-ish form, e.g. "CuVS_3 - G_0W_0".')
+                   help='Title in TeX-ish form, e.g. "MoS_2 - G_0W_0".')
     p.add_argument("--no-title", dest="show_title", action="store_false")
     p.add_argument("--group", choices=["symmetry", "formula", "element"],
                    default=GROUP_MODE,
@@ -492,6 +623,11 @@ def parse_args(argv=None):
     p.add_argument("--emax", type=float, default=None,
                    help="Upper energy bound (eV, rel. E_F); default auto-fit. "
                         "Also bounds --auto-projections selection.")
+    p.add_argument("--efermi", type=float, default=None,
+                   help="Fermi level in eV. Only needed for Wannier90 output, "
+                        "whose energies are absolute: normally taken from "
+                        "fermi_energy in the .win file, else from the VASP run "
+                        "in this or the parent folder.")
     p.add_argument("--pickle", action="store_true",
                    help="Also write the figure as a .fig.pkl for later editing.")
     p.add_argument("--dpi", type=int, default=DPI)
@@ -515,13 +651,14 @@ def main(argv=None):
     cfg.verbose = True
 
     root = cfg.root.expanduser().resolve()
-    bands_dir, dos_dir = root / BANDS_DIR, root / DOS_DIR
-    for d in (bands_dir, dos_dir):
-        if not d.is_dir():
-            sys.exit(f"ERROR: expected sub-folder not found: {d}")
+    try:
+        lay = resolve_layout(cfg)
+    except FileNotFoundError as exc:
+        sys.exit(f"ERROR: {exc}")
 
     if cfg.list:
-        list_structure(bands_dir, group_mode=cfg.group, symprec=cfg.symprec)
+        src = lay["bands"] or lay["dos"]
+        list_structure(src, group_mode=cfg.group, symprec=cfg.symprec)
         return
 
     try:
@@ -546,13 +683,13 @@ def main(argv=None):
     for job_spins, suffix, note, overlay in jobs:
         base = f"{name}_{suffix}" if suffix else name
         what = "overlay plain" if overlay else cfg.method
-        print(f"[4/4] Rendering figure (method={what}, "
+        panels = (f"{len(bands_data['segments'])} k-path panel(s)"
+                  if bands_data is not None else "DOS only")
+        print(f"[4/4] Rendering {lay['kind']} figure (method={what}, "
               f"{0 if overlay else len(groups)} group(s), "
-              f"spin={suffix or cfg.spin}, "
-              f"{len(bands_data['segments'])} k-path panel(s)) -> {base} ...")
-        fig, _axes = build_figure(bands_data, dos_data, groups, cfg, job_spins,
-                                  show_both=overlay, gap=gap, spin_note=note,
-                                  overlay_plain=overlay)
+              f"spin={suffix or cfg.spin}, {panels}) -> {base} ...")
+        fig, _axes = _render(cfg, bands_data, dos_data, groups, job_spins,
+                             note, overlay, gap)
         for fmt in formats:
             path = out_dir / f"{base}.{fmt}"
             fig.savefig(path, dpi=cfg.dpi, bbox_inches="tight")

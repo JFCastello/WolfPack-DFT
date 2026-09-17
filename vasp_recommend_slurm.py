@@ -155,7 +155,8 @@ Useful flags
     --csv FILE           write the full ranked list as CSV
     --email user@host    inserted into the SLURM script
     --job-name NAME      SLURM --job-name (default: VASP)
-    --executable EXE     force vasp_std|vasp_gam|vasp_ncl (else auto from OUTCAR)
+    --executable EXE     force the VASP binary (else WP_VASP_STD/WP_VASP_GAM from
+                         vasp-configure, else auto vasp_std/vasp_gam from the OUTCAR)
     --time D-HH:MM:SS    SLURM time limit (default: 7-00:00:00)
     --calc-type {auto,dft,gw,gw-low,rpa-low}
                          override automatic DFT/GW/RPA detection (default: auto)
@@ -309,6 +310,7 @@ class DryRunSummary:
     coarse_fft: Optional[Tuple[int, int, int]] = None   # NGX, NGY, NGZ
     fine_fft: Optional[Tuple[int, int, int]] = None     # NGXF, NGYF, NGZF
     is_gamma_only: bool = False
+    is_noncollinear: bool = False
 
     # --- Algorithm settings (informational) ---
     algo: Optional[str] = None
@@ -441,6 +443,17 @@ class Candidate:
         # https://vasp.at/wiki/Practical_guide_to_GW_calculations
         """INCAR snippet for a conventional (cubic-scaling) GW run."""
         rpk = self.ranks_per_kgroup
+        maxmem = self.memory.maxmem_mb
+        maxmem_line = ""
+        if self.recommend_maxmem and maxmem > 0:
+            maxmem_line = (
+                f"MAXMEM = {maxmem}   # MB/rank, FROZEN budget = mem-per-cpu - ~3 GB overhead room.\n"
+                "#                VASP fills whatever MAXMEM it gets and USES ~MAXMEM + ~2 GB, so a\n"
+                "#                bigger MAXMEM = a hungrier job (never raise it to fix an OOM --\n"
+                "#                the pipeline keeps it FROZEN across relaunches). To CUT memory:\n"
+                "#                lower ENCUTGW, or spread the same ranks over MORE NODES. An OOM is\n"
+                "#                fixed by raising mem-per-cpu AROUND the frozen MAXMEM, not MAXMEM.\n"
+            )
         return (
             "# --- Parallelization: CONVENTIONAL (quartic-scaling) GW ---\n"
             "# GW parallelizes only over k-points -> KPAR is the lever; NCORE = 1.\n"
@@ -448,6 +461,7 @@ class Candidate:
             "NCORE = 1     # REQUIRED for the GW step (no band-FFT distribution)\n"
             f"# Each k-point group gets {rpk} rank(s); they parallelize the\n"
             "# internal DFT/Exact diagonalization. Do NOT set NPAR for GW.\n"
+            + maxmem_line +
             "# GW essentials (keep consistent with your DFT/Exact pre-step):\n"
             "ISMEAR = 0 ; SIGMA = 0.05   # small SIGMA to avoid partial occupancies\n"
             "# LOPTICS = .TRUE.          # insulators/semiconductors; OMIT for metals\n"
@@ -737,45 +751,86 @@ RPA_LOWSCALING_ALGOS = {
 
 
 # ----------------------------------------------------------------------------
-# Empirical memory anchor for CONVENTIONAL (quartic-scaling) GW
-# ----------------------------------------------------------------------------
-# The DFT-style rank-0 memory table that VASP prints does NOT include the
-# screened-Coulomb / polarizability arrays chi(G,G',omega) that dominate
-# conventional-GW memory, so rescaling that table (as for DFT) under-predicts
-# GW per-rank memory by ~10x.  Instead we anchor to a MEASURED data point and
-# scale it by the variables that actually drive GW memory.
+# Conventional-GW per-rank memory FLOOR model.
 #
-# Measured reference (CuVS3, G0W0@PBE+U via EVGW0):
-#     per-rank memory   ~ 2292 MB
-#     NOMEGA            = 100
-#     ISPIN             = 2
-#     NKPTS (irred.)    = 96
-#     ENCUTGW           = 608 eV   (defaulted to ENCUT; SEE WARNING below)
-#     KPAR              = 21
-#     total MPI ranks   = 252      (ASSUMED 21x12; override with --gw-ref-ranks)
+# Research conclusion (VASP wiki MAXMEM / Practical_guide_to_GW / Not_enough_memory;
+# forum t=18931, t=19502; rehnd.github.io/tutorials/vasp/gw): the per-rank memory
+# needed to RUN conventional GW is a FLOOR set by orbitals + exact exchange + ONE
+# response-function block, and it is
+#   * NOMEGA-INDEPENDENT -- NOMEGA only sets how many frequency blocks VASP BATCHES at
+#     once (bounded by MAXMEM) for SPEED; the minimum is always one block, so lowering
+#     NOMEGA does NOT lower the floor (this is why a NOMEGA sweep gave the same OOM);
+#   * proportional to ENCUTGW^3 -- the response matrix ~ (N_G)^2 ~ ENCUTGW^3 is the #1
+#     memory lever (ENCUTGW, NOT NOMEGA);
+#   * proportional to 1/ranks-per-k-group -- the floor is distributed over the ranks of
+#     a k-group, so MORE ranks per group => LESS per rank.
+# KPAR REPLICATES the floor per k-group, so the cure for OOM is MORE NODES / FEWER
+# RANKS-PER-NODE (undersaturation), never a bigger MAXMEM. MAXMEM is NOT a knob in this
+# model: VASP fills whatever MAXMEM it is given and reports needing ~MAXMEM + a fixed
+# ~uncounted overhead, so chasing MAXMEM upward never converges. We instead derive
+# MAXMEM = (mem-per-cpu - reserve) so the batchable arrays + the overhead fit the cgroup.
 #
-# Similarity scaling applied to a candidate (same machine/system family):
-#     per_rank_GW ~ ANCHOR
-#         * (NOMEGA      / NOMEGA_ref)
-#         * (ISPIN       / ISPIN_ref)
-#         * (ENCUTGW     / ENCUTGW_ref)^3      # chi ~ N_resp^2 ~ ENCUTGW^3
-#         * (ranks_per_kgroup_ref / ranks_per_kgroup)   # arrays split over the group
-# where ranks_per_kgroup = total_ranks / KPAR.
-#
-# The ENCUTGW dependence is CUBIC: it is by far the strongest memory knob.
-# The reference ENCUTGW is unknown (it was commented out and thus defaulted to
-# ENCUT = 608); 608 eV would normally OOM, so the true value used was very
-# likely smaller.  Pass --gw-ref-encutgw with the value actually used to make
-# the cross-ENCUTGW scaling (e.g. a 200->400 convergence sweep) quantitative.
-GW_CONV_REF = {
-    "per_rank_mb": 2292.0,
-    "nomega": 100,
-    "ispin": 2,
-    "nkpts": 96,
-    "encutgw": 608.0,
-    "kpar": 21,
-    "total_ranks": 252,   # assumption; ranks_per_kgroup_ref = 252/21 = 12
-}
+# We ANCHOR the floor to VASP's OWN printed "min. memory requirement per mpi rank" and
+# PROVISION TO IT (no discount). History (learn from it): an intermediate version tried a
+# 0.80 "real-RSS discount" after ONE run (CuVS3 EVGW0 NOMEGA=25) reported 7282 but ran at
+# ~5850/rank on 1 node at 96.6% (the response function is NCSHMEM-shared, so real RSS <
+# the printed number). That discount OOM'd the very next run (NOMEGA=100, which holds more
+# frequency arrays -> real peak back up near 7282) at only 3.7% margin. LESSON: VASP's
+# printed requirement is the number to trust -- it is what VASP will try to allocate, it is
+# NOMEGA-stable, and provisioning below it is a coin-flip that depends on NOMEGA/shmem/load
+# balance. So anchor = 7282; the mem_util policy (~0.80) then adds the ~25% headroom, giving
+# mem-per-cpu ~9100. CONSEQUENCE: 120 ranks x 7282 = 874 GB CANNOT fit one 727 GB node, so
+# the job MUST split across KPAR nodes (one k-group/node, ~40 ranks/node) AND each rank must
+# get >= 7282 -- more nodes alone does NOT help; you must raise mem-per-cpu with the split.
+GW_FLOOR_ANCHOR_MB = 7282.0       # VASP's printed "min. memory requirement per mpi rank" ...
+GW_FLOOR_ANCHOR_RPK = 40.0        # ... at this many ranks per k-group ...
+GW_FLOOR_ANCHOR_ENCUTGW = 405.0   # ... and this ENCUTGW (eV). (empirical EVGW0 reference)
+GW_VASP_REQ_TO_RSS = 1.00         # provision to VASP's FULL printed requirement (NO discount;
+                                  #   the 0.80 discount OOM'd at NOMEGA=100 -- do not restore it)
+# MAXMEM is a FROZEN INPUT, never re-derived from a bigger allocation. Measured on the
+# user's cluster: VASP fills whatever MAXMEM it gets and its requirement/real peak lands
+# at ~MAXMEM + 1.5-2.4 GB (required 7282@4961, 9566@7692 [6.4.3], 9799@7692 [6.4.2],
+# 12083@10550, 15128@13300). The old rule MAXMEM = mem-per-cpu - 15% therefore DIVERGED:
+# harvest required -> raise mem-per-cpu -> bigger MAXMEM -> bigger required -> OOM again
+# (MAXMEM_next ~ 1.05 x MAXMEM + 2.5 GB). Fix: MAXMEM <= mem-per-cpu - OVERHEAD, and on
+# any refine it may only stay or go DOWN (vasp_test_recommend freezes it to the INCAR's
+# previous value). Then usage ~ MAXMEM + 2 GB is pinned and the relaunch converges.
+GW_MAXMEM_OVERHEAD_MB = 3000      # cgroup room kept ABOVE MAXMEM for VASP's overhead
+                                  #   (orbitals/exchange/FFT/MPI, observed <= ~2.4 GB)
+
+
+def gw_floor_per_rank_mb(
+    ranks_per_kgroup: float,
+    encutgw: Optional[float],
+    *,
+    anchor_mb: float = GW_FLOOR_ANCHOR_MB,
+    anchor_rpk: float = GW_FLOOR_ANCHOR_RPK,
+    anchor_encutgw: float = GW_FLOOR_ANCHOR_ENCUTGW,
+) -> float:
+    """Conventional-GW per-rank memory FLOOR (MB), NOMEGA-independent.
+
+        R(rpk, ENCUTGW) = anchor_mb * (anchor_rpk / rpk) * (ENCUTGW / anchor_encutgw)^3
+
+    `anchor_mb` is VASP's own measured "min. memory requirement per mpi rank" at
+    (`anchor_rpk`, `anchor_encutgw`); pass a harvested value to pin the level to a real
+    run. NOMEGA does NOT appear by design (the floor is one response block)."""
+    rpk = max(1.0, float(ranks_per_kgroup))
+    e = float(encutgw or anchor_encutgw)
+    return max(1.0, anchor_mb * (anchor_rpk / rpk) * (e / max(anchor_encutgw, 1.0)) ** 3)
+
+
+def gw_maxmem_from_request(mem_per_cpu_mb: float,
+                           existing_mb: Optional[int] = None) -> int:
+    """MAXMEM (MB/rank): capped at mem-per-cpu - GW_MAXMEM_OVERHEAD_MB and FROZEN --
+    never raised above the value a previous run already used (`existing_mb`).
+
+    VASP fills whatever MAXMEM it gets and really uses ~MAXMEM + ~2 GB, so re-deriving
+    a bigger MAXMEM from a bigger allocation makes every relaunch hungrier (divergent
+    ratchet). Keeping MAXMEM fixed pins VASP's usage; only the headroom grows."""
+    cap = mem_per_cpu_mb - GW_MAXMEM_OVERHEAD_MB
+    if existing_mb and existing_mb > 0:
+        cap = min(cap, existing_mb)
+    return int(max(2800, cap))
 
 
 def _parse_named_fft_grid(text: str, header: str) -> Optional[Tuple[int, int, int]]:
@@ -875,11 +930,14 @@ def detect_calculation_type(
     if algo_up in GW_CONVENTIONAL_ALGOS:
         return "GW_CONVENTIONAL", s.algo
 
-    # 2. Low-scaling fingerprints (survive ALGO=None).
+    # 2. Low-scaling fingerprints (survive ALGO=None). NOTE: the
+    # "min. memory requirement per mpi rank ... per node" line is printed by BOTH
+    # conventional and low-scaling GW, so it is NOT a low-scaling marker (using it as
+    # one misclassifies a failed CONVENTIONAL GW run); the imaginary-time/-frequency
+    # grids and NTAUPAR/NOMEGAPAR echoes are the genuine space-time fingerprints.
     lowscaling_markers = (
         s.fft_exx is not None
         or s.fft_supercell is not None
-        or s.vasp_min_mem_per_rank_mb is not None
         or s.ntaupar_dry is not None
         or s.nomegapar_dry is not None
         or re.search(r"FFT grid for exact exchange", text, re.IGNORECASE) is not None
@@ -969,6 +1027,9 @@ def parse_outcar(outcar_path: Path,
         (s.irr_kpoints is not None and s.irr_kpoints == 1)
         or (s.nkpts is not None and s.nkpts == 1)
     )
+    # Non-collinear / spin-orbit: needs the vasp_ncl binary, which vasp_std is not.
+    s.is_noncollinear = re.search(
+        r"\b(LNONCOLLINEAR|LSORBIT)\s*=\s*\.?T", text, re.IGNORECASE) is not None
 
     # Algorithm / cutoff.  Use \b to avoid matching IALGO when looking for ALGO.
     s.algo = _first_str([r"(?<![A-Z])ALGO\s*=\s*(\S+)"], text)
@@ -1490,13 +1551,16 @@ def score_candidate(
     # "increase KPAR up to NKPTS" advice on "given sufficient memory" -- so
     # the penalties below have to be strong enough to overcome the +6
     # kpar_coverage bonus when KPAR maxing forces a memory-heavy layout.
+    # Memory that exceeds the SLURM per-cpu DEFAULT is NOT penalised: a job that
+    # can't fit one node is split across more nodes (compute_request_geometry), so
+    # "exceeds partition default" is just a non-default allocation, not a failure.
+    # (The old -40 MEMORY_EXCEEDS_PARTITION hard penalty is removed.) We keep only a
+    # small REWARD for memory-light layouts that comfortably fit the default.
     mem = candidate.memory
-    if not mem.fits_partition:
-        parts["MEMORY_EXCEEDS_PARTITION_(HARD_PENALTY)"] = -40.0
-    elif mem.suggested_mem_per_cpu_mb > mem.partition_mem_per_cpu_mb:
-        parts["memory_above_partition_default_(non-default_alloc)"] = -12.0
+    if mem.suggested_mem_per_cpu_mb > mem.partition_mem_per_cpu_mb:
+        pass
     elif mem.suggested_mem_per_cpu_mb > 0.85 * mem.partition_mem_per_cpu_mb:
-        parts["memory_uses_>85pct_of_partition_default"] = -5.0
+        pass
     elif mem.suggested_mem_per_cpu_mb < 0.5 * mem.partition_mem_per_cpu_mb:
         # Memory-efficient configurations get an explicit bonus.  This
         # rewards layouts (typically KPAR=1, moderate NCORE) that leave
@@ -1802,88 +1866,66 @@ def estimate_conventional_gw_memory(
     npar: int,
     partition_mem_per_cpu_mb: int,
     safety_factor: float,
+    mem_util: float = 0.80,
+    gw_peak_factor: float = 8.0,
     ref: Optional[Dict[str, float]] = None,
     ref_ranks_override: Optional[int] = None,
     ref_encutgw_override: Optional[float] = None,
     anchor_override: Optional[float] = None,
 ) -> MemoryEstimate:
-    """Per-rank memory for a CONVENTIONAL (quartic-scaling) GW layout.
+    """Per-rank memory FLOOR for a CONVENTIONAL (quartic-scaling) GW layout.
 
-    per_rank = base_DFT(orbitals + FFT + projectors)  +  GW_excess
-    where GW_excess is the measured per-rank GW cost (chi/W over NOMEGA),
-    anchored to GW_CONV_REF and scaled by NOMEGA, ISPIN, ENCUTGW^3, and
-    1/ranks_per_kgroup.  This corrects the ~10x under-prediction that arises
-    from reusing the DFT memory table (which omits the GW response arrays).
+    NOT flat x factor (that model is gone -- it ignored that the GW floor is
+    NOMEGA-independent and under-counted the response block, causing repeated OOM).
+    The floor is anchored to VASP's own measured "min. memory requirement per mpi
+    rank" and scaled by the physical exponents (see gw_floor_per_rank_mb):
+
+        R(rpk, ENCUTGW) = anchor_mb * (anchor_rpk / rpk) * (ENCUTGW / anchor_encutgw)^3
+
+    NOMEGA does NOT appear (the floor is one response block; NOMEGA only batches more
+    for SPEED, bounded by MAXMEM). If VASP already printed its own per-rank number for
+    THIS OUTCAR (a real/failed GW run), we take max(formula, VASP's number) -- never
+    predict below VASP's own floor. `anchor_override` (a harvested measured floor) and
+    `ref_encutgw_override` pin the level to reality; `gw_peak_factor`/`ref_ranks`/`ref`
+    are accepted for call-site compatibility but unused by the floor model.
     """
-    r = dict(GW_CONV_REF)
-    if ref:
-        r.update(ref)
-    anchor_mb = float(anchor_override if anchor_override is not None
-                      else r["per_rank_mb"])
-    ref_ranks = int(ref_ranks_override if ref_ranks_override is not None
-                    else r["total_ranks"])
-    ref_kpar = int(r["kpar"])
-    ref_encutgw = float(ref_encutgw_override if ref_encutgw_override is not None
-                        else r["encutgw"])
-    ref_nomega = float(r["nomega"])
-    ref_ispin = float(r["ispin"])
-    ref_rpk = max(1.0, ref_ranks / float(max(1, ref_kpar)))
-
-    # 1) Base (non-GW) per-rank cost: reuse the OUTCAR-anchored DFT model,
-    #    but strip its safety buffer so we don't double-count headroom.
-    base_est = estimate_memory(
-        summary=summary, total_ranks=total_ranks, kpar=kpar, ncore=ncore,
-        npar=npar, partition_mem_per_cpu_mb=partition_mem_per_cpu_mb,
-        safety_factor=1.0,
-    )
-    base_mb = max(0.0, base_est.per_rank_mb - base_est.safety_mb)
-
-    # 2) GW excess: similarity scaling around the measured anchor.  We anchor
-    #    on the GW-specific excess (anchor minus the base AT the reference),
-    #    so the same base model is not counted twice.
-    # Reference base at the reference layout (so anchor - ref_base = pure GW):
-    ref_total = max(1, ref_ranks)
-    ref_npar = max(1, ref_total // max(1, ref_kpar))
-    ref_base_est = estimate_memory(
-        summary=summary, total_ranks=ref_total, kpar=ref_kpar, ncore=1,
-        npar=ref_npar, partition_mem_per_cpu_mb=partition_mem_per_cpu_mb,
-        safety_factor=1.0,
-    )
-    ref_base_mb = max(0.0, ref_base_est.per_rank_mb - ref_base_est.safety_mb)
-    gw_excess_ref = max(0.0, anchor_mb - ref_base_mb)
-
     rpk = max(1.0, total_ranks / float(max(1, kpar)))
-    nomega = float(summary.nomega or ref_nomega)
-    ispin = float(summary.ispin or ref_ispin)
-    # ENCUTGW defaults to ENCUT when unset.
-    encutgw = float(summary.encutgw or summary.encut or ref_encutgw)
+    encutgw = float(summary.encutgw or summary.encut or GW_FLOOR_ANCHOR_ENCUTGW)
+    anchor_mb = float(anchor_override or GW_FLOOR_ANCHOR_MB)
+    anchor_encutgw = float(ref_encutgw_override or GW_FLOOR_ANCHOR_ENCUTGW)
 
-    gw_excess = (
-        gw_excess_ref
-        * (nomega / ref_nomega)
-        * (ispin / ref_ispin)
-        * (encutgw / ref_encutgw) ** 3
-        * (ref_rpk / rpk)
-    )
+    floor = gw_floor_per_rank_mb(rpk, encutgw, anchor_mb=anchor_mb,
+                                 anchor_encutgw=anchor_encutgw)
+    src = (f"real-RSS floor {floor:.0f} MB/rank = anchor {anchor_mb:.0f} MB @ "
+           f"{GW_FLOOR_ANCHOR_RPK:.0f} ranks/kgrp,{anchor_encutgw:.0f} eV "
+           f"x ({GW_FLOOR_ANCHOR_RPK:.0f}/{rpk:.0f}) x ({encutgw:.0f}/{anchor_encutgw:.0f})^3 "
+           f"(NOMEGA-independent)")
+    # If this OUTCAR is a real/failed GW run, PROVISION TO VASP's printed requirement
+    # (GW_VASP_REQ_TO_RSS = 1.0, no discount -- a discount OOM'd at NOMEGA=100).
+    if summary.vasp_min_mem_per_rank_mb:
+        vasp_need = summary.vasp_min_mem_per_rank_mb * GW_VASP_REQ_TO_RSS
+        if vasp_need > floor:
+            src = (f"VASP's own required memory {vasp_need:.0f} MB/rank "
+                   f"(formula floor was {floor:.0f})")
+            floor = vasp_need
 
     est = MemoryEstimate(partition_mem_per_cpu_mb=partition_mem_per_cpu_mb)
-    est.model = f"gw-conventional-empirical (anchor {anchor_mb:.0f} MB/rank)"
-    est.gw_grid_source = (
-        f"anchor: CuVS3 EVGW0, {anchor_mb:.0f} MB/rank @ {ref_ranks} ranks "
-        f"(KPAR {ref_kpar}), NOMEGA {ref_nomega:.0f}, ISPIN {ref_ispin:.0f}, "
-        f"ENCUTGW {ref_encutgw:.0f}"
-    )
-    est.base_mb = base_mb
-    est.gw_grid_term_mb = gw_excess
-    core_sum = base_mb + gw_excess
-    est.safety_mb = (max(safety_factor, 1.0) - 1.0) * core_sum + 100.0
-    est.per_rank_mb = core_sum + est.safety_mb
-    est.gw_per_node_mb = est.per_rank_mb * min(total_ranks, max(1, summary.nkpts or total_ranks))
-    est.total_job_mb = est.per_rank_mb * total_ranks
-    est.suggested_mem_per_cpu_mb = round_up_mem(est.per_rank_mb)
-    est.fits_partition = (
-        est.suggested_mem_per_cpu_mb <= 1.5 * partition_mem_per_cpu_mb
-    )
+    est.model = "gw-conventional-floor (anchored, NOMEGA-independent)"
+    est.gw_grid_source = src
+    est.base_mb = floor
+    est.gw_grid_term_mb = 0.0
+    est.safety_mb = 0.0
+    est.per_rank_mb = floor
+    # MAXMEM is DERIVED from the per-rank allocation (= floor / mem_util request), NOT
+    # chased. See gw_maxmem_from_request. compute_request_geometry/vasp-test recompute it
+    # from the final mem-per-cpu; this is just the first-pass value for the INCAR snippet.
+    _req = floor / max(mem_util, 0.05)
+    est.maxmem_mb = gw_maxmem_from_request(_req)
+    # Per-node need: a whole k-group (rpk ranks) on one node -- this is what must fit.
+    est.gw_per_node_mb = floor * rpk
+    est.total_job_mb = floor * total_ranks
+    est.suggested_mem_per_cpu_mb = round_up_mem(floor)
+    est.fits_partition = est.suggested_mem_per_cpu_mb <= 1.5 * partition_mem_per_cpu_mb
     return est
 
 
@@ -1947,13 +1989,16 @@ def score_gw_candidate(
     # ---- Conventional GW: cores per k-group ------------------------------
     rpk = candidate.ranks_per_kgroup
     if not low:
-        # Each k-point group's ranks speed the internal DFT/Exact step.  A
-        # handful of ranks per group is healthy; one rank per k-point (rpk=1)
-        # wastes the band parallelism, and a huge group has poor efficiency.
-        if rpk == 1 and (irr_k or 0) > 1:
-            parts["gw_one_rank_per_kgroup_(WEAK)"] = -6.0
-        elif 2 <= rpk <= cpus_per_node:
-            parts["gw_healthy_kgroup_size"] = 6.0
+        # Each k-point group's ranks parallelise the internal Exact/diagonalisation
+        # over the (typically hundreds of) GW bands. Too FEW ranks per group is the
+        # killer: it's slow AND memory-heavy per rank, which is why a high KPAR with
+        # a tiny k-group (e.g. rpk=3) is a bad layout. So penalise small k-groups and
+        # reward bigger ones (up to ~a NUMA-to-node size), which steers KPAR to a
+        # sane value rather than the largest divisor of NKPTS.
+        if rpk < 8 and (irr_k or 0) > 1:
+            parts["gw_kgroup_too_small_(few_band_ranks)"] = -10.0
+        elif rpk <= cpus_per_node:
+            parts["gw_healthy_kgroup_size"] = 6.0 + 8.0 * min(1.0, rpk / 32.0)
         if rpk <= cpus_per_node:
             parts["gw_kgroup_fits_one_node"] = 3.0
         elif rpk % cpus_per_node != 0:
@@ -1987,18 +2032,31 @@ def score_gw_candidate(
                 min(1.0, t / max(1, nomega))
             )
 
-    # ---- Memory feasibility (shared with DFT weights) -------------------
-    mem = candidate.memory
-    if not mem.fits_partition:
-        parts["MEMORY_EXCEEDS_PARTITION_(HARD_PENALTY)"] = -40.0
-    elif mem.suggested_mem_per_cpu_mb > mem.partition_mem_per_cpu_mb:
-        parts["memory_above_partition_default_(non-default_alloc)"] = -12.0
-    elif mem.suggested_mem_per_cpu_mb > 0.85 * mem.partition_mem_per_cpu_mb:
-        parts["memory_uses_>85pct_of_partition_default"] = -5.0
-    elif mem.suggested_mem_per_cpu_mb < 0.5 * mem.partition_mem_per_cpu_mb:
-        parts["memory_well_below_partition_default"] = 5.0
-    elif mem.suggested_mem_per_cpu_mb < 0.7 * mem.partition_mem_per_cpu_mb:
-        parts["memory_comfortably_below_partition_default"] = 3.0
+    # ---- Conventional GW: node PACKING (memory feasibility per node) -------
+    # The GW floor per rank scales as 1/ranks-per-k-group, so a small k-group
+    # (large KPAR with few total ranks) blows the per-rank memory up and forces
+    # the job onto many nodes (1 rank/node in the worst case). Strongly favour
+    # layouts that pack MANY ranks per node; this is what makes a sane KPAR
+    # (big k-groups) beat a memory-infeasible high-KPAR layout.
+    if not low and candidate.memory.suggested_mem_per_cpu_mb > 0:
+        _node_mb = 0.0
+        try:
+            _node_mb = float(partition_info.get("node_mem_mb") or 0)
+        except (TypeError, ValueError):
+            _node_mb = 0.0
+        if _node_mb > 0:
+            ranks_fit = 0.95 * _node_mb / candidate.memory.suggested_mem_per_cpu_mb
+            if ranks_fit < 1.0:
+                parts["gw_per_rank_too_big_for_node_(HARD)"] = -60.0
+            else:
+                parts["gw_node_packing"] = 22.0 * min(1.0, ranks_fit / 24.0)
+
+    # ---- Memory: NO partition-default penalty for GW --------------------
+    # GW per-rank memory is large by nature and always exceeds the SLURM per-cpu
+    # default; that is NOT a problem -- a job that can't fit one node is split
+    # across KPAR nodes (see group_fits_node + compute_request_geometry). The real
+    # constraint (a whole k-group must fit a node) is the hard FEASIBILITY filter in
+    # main(); here we do not penalise high memory at all.
 
     # ---- Compactness / SLURM accounting ---------------------------------
     if candidate.total_ranks % cpus_per_node == 0:
@@ -2107,6 +2165,7 @@ def build_gw_candidates(
                                       if summary.nbands else 0),
                     nodes=nodes, ntasks_per_node=ntasks_per_node, cpu_bind="cores",
                     memory=memory, calc_type=summary.calc_type, nomega=summary.nomega,
+                    recommend_maxmem=recommend_maxmem,
                 )
                 score, p = score_gw_candidate(
                     summary=summary, partition_info=partition_info,
@@ -2161,11 +2220,22 @@ def build_gw_candidates(
 # ============================================================================
 
 
-def pick_executable(summary: DryRunSummary, override: Optional[str]) -> str:
-    """Choose the VASP binary (vasp_std/gam/ncl) from the summary or an override."""
+def pick_executable(summary: DryRunSummary, override: Optional[str],
+                    std_default: Optional[str] = None,
+                    gam_default: Optional[str] = None,
+                    ncl_default: Optional[str] = None) -> str:
+    """Choose the VASP binary: --executable override > the vasp-configure profile
+    (WP_VASP_STD / WP_VASP_GAM -- a custom build configured ONCE is inherited by every
+    generated job + state.env, so vasp-test/magic run the same binary) > auto."""
     if override:
         return override
-    return "vasp_gam" if summary.is_gamma_only else "vasp_std"
+    # Non-collinear is checked FIRST: vasp_ncl is required regardless of how many
+    # k-points there are, and there is no gamma-only non-collinear binary.
+    if summary.is_noncollinear:
+        return ncl_default or "vasp_ncl"
+    if summary.is_gamma_only:
+        return gam_default or "vasp_gam"
+    return std_default or "vasp_std"
 
 
 def _node_mem_mb(partition_info: Dict[str, object], fallback_mem_per_cpu: int) -> int:
@@ -2176,6 +2246,66 @@ def _node_mem_mb(partition_info: Dict[str, object], fallback_mem_per_cpu: int) -
     cpn = int(partition_info.get("cpus_per_node", 1))        # type: ignore[arg-type]
     mpc = int(partition_info.get("mem_per_cpu_mb", fallback_mem_per_cpu))  # type: ignore[arg-type]
     return cpn * mpc
+
+
+def _node_reserve_mb(partition_info: Dict[str, object], margin: float) -> int:
+    """RAM (MB) to keep FREE on each node = margin x node RAM.
+
+    `margin` is the fraction from vasp-configure (WP_MAIN_MEM_MARGIN): 0.02 leaves
+    2% of the node free, i.e. 98% is usable. Expressed as a fraction rather than an
+    absolute figure so one profile fits nodes of any size."""
+    if margin <= 0:
+        return 0
+    nm = _node_mem_mb(partition_info, 0)
+    return int(max(0.0, min(margin, 0.5)) * nm)
+
+
+def group_fits_node(candidate: "Candidate", node_mem_mb: int,
+                    cpus_per_node: int) -> bool:
+    """Can a WHOLE k-point group run on one node? For GW this is MANDATORY: a
+    k-group split across nodes means cross-node chi/W traffic, so a config whose
+    group cannot fit a node is INFEASIBLE on this cluster. DFT has no such
+    constraint (it may spread by memory freely), so it is always 'feasible' here.
+
+    A group of `rpk` ranks fits iff it fits by cores AND by memory at the model's
+    per-rank estimate (real RSS; vasp-test re-checks this with MEASURED memory)."""
+    if candidate.calc_type == "DFT":
+        return True
+    rpk = max(1, candidate.ranks_per_kgroup
+              or (candidate.total_ranks // max(1, candidate.kpar)))
+    usage = max(1.0, candidate.memory.per_rank_mb)
+    return rpk <= cpus_per_node and rpk * usage <= node_mem_mb
+
+
+def calibrate_gw_memory(candidates: Sequence["Candidate"], measured_mb: float,
+                        ref_ranks: int, ref_kpar: Optional[int],
+                        mem_util: float) -> bool:
+    """Scale every GW candidate's memory so the candidate matching the reference
+    layout (ref_ranks, ref_kpar) predicts the MEASURED per-rank peak. Used by
+    vasp-test's auto-recovery: the model SHAPE (how memory scales with the layout)
+    is trusted, but the absolute level is pinned to the real measurement, so the
+    re-pick's feasibility/sizing reflect reality. Returns True if calibrated."""
+    refs = [c for c in candidates if c.total_ranks == ref_ranks
+            and (ref_kpar is None or c.kpar == ref_kpar) and c.calc_type != "DFT"]
+    if not refs or refs[0].memory.per_rank_mb <= 0:
+        return False
+    cal = measured_mb / refs[0].memory.per_rank_mb
+    if cal <= 0:
+        return False
+    for c in candidates:
+        if c.calc_type == "DFT":
+            continue
+        m = c.memory
+        m.per_rank_mb *= cal
+        m.base_mb *= cal
+        m.gw_grid_term_mb *= cal
+        rpk = c.ranks_per_kgroup or (c.total_ranks // max(1, c.kpar))
+        m.gw_per_node_mb = m.per_rank_mb * max(1, rpk)
+        m.total_job_mb = m.per_rank_mb * c.total_ranks
+        m.suggested_mem_per_cpu_mb = round_up_mem(m.per_rank_mb)
+        # MAXMEM stays DERIVED (mem-per-cpu - reserve), consistent with the floor model.
+        m.maxmem_mb = gw_maxmem_from_request(m.per_rank_mb / max(mem_util, 0.05))
+    return True
 
 
 # Real resident memory (RSS) is consistently LARGER than the per-rank figure
@@ -2193,7 +2323,8 @@ def compute_request_geometry(candidate: "Candidate",
                              partition_info: Dict[str, object],
                              mem_util: float = 0.80,
                              reserve_mb: int = 0,
-                             rss_overhead: float = DEFAULT_RSS_OVERHEAD):
+                             rss_overhead: float = DEFAULT_RSS_OVERHEAD,
+                             gw_node_frac: float = 0.0):
     """Size the memory request and node layout for the cluster policy.
 
     Returns (mem_per_cpu, nodes, ntasks_per_node, node_mem_mb).
@@ -2208,22 +2339,65 @@ def compute_request_geometry(candidate: "Candidate",
         SPLIT across more nodes (fewer ranks per node) so every node fits --
         per https://www.vasp.at/wiki/index.php/Category:Parallelization the
         rank count is unchanged; only the rank-to-node mapping spreads out;
-      * `reserve_mb` keeps that much RAM free per node (e.g. debug/login nodes).
+      * `reserve_mb` keeps that much RAM free per node (e.g. debug/login nodes);
+      * GW SWEET sizing (`gw_node_frac` > 0, non-DFT only): the per-rank request
+        is RAISED to gw_node_frac x node_mem / ranks-per-node -- spending the
+        queue-friendly share of the node on a bigger frozen MAXMEM (= mem-per-cpu
+        - 3 GB), which buys frequency-block batching speed. Safe at any level:
+        VASP's demand is ~MAXMEM + 2.1 GB (measured law), so it always lands
+        ~0.9 GB under the allocation. The fraction (default 0.67 from
+        WP_GW_NODE_FRAC) keeps ~1/3 of each node free so the job still backfills
+        in the queue; 0 disables (pure need-based sizing).
     """
-    per_rank = max(float(candidate.memory.per_rank_mb), 1.0) * max(rss_overhead, 1.0)
-    mem_per_cpu = max(200, round_up_mem(per_rank / max(mem_util, 0.05)))
+    # GW floors are already REAL RSS (anchored to measured runs), so do NOT apply
+    # the table->RSS overhead that the DFT table-based estimate needs.
+    _over = 1.0 if candidate.calc_type != "DFT" else max(rss_overhead, 1.0)
+    usage = max(float(candidate.memory.per_rank_mb), 1.0) * _over   # predicted REAL RSS/rank
+    desired = max(200, round_up_mem(usage / max(mem_util, 0.05)))   # >= mem_util-utilisation request
     if getattr(candidate, "recommend_maxmem", False) and candidate.memory.maxmem_mb:
-        mem_per_cpu = max(mem_per_cpu, candidate.memory.maxmem_mb + 150)
+        desired = max(desired, candidate.memory.maxmem_mb + 150)
 
     cpn = int(partition_info.get("cpus_per_node", candidate.ntasks_per_node) or 1)
-    node_mem = _node_mem_mb(partition_info, mem_per_cpu)
-    usable = max(mem_per_cpu, node_mem - max(reserve_mb, 0))
+    node_mem = _node_mem_mb(partition_info, desired)
+    usable = max(desired, node_mem - max(reserve_mb, 0))
     total = max(candidate.total_ranks, 1)
 
-    by_mem = max(1, usable // max(mem_per_cpu, 1))           # ranks that fit by RAM
-    ntpn = min(cpn, total, by_mem)
-    nodes = math.ceil(total / ntpn)
-    ntpn = min(cpn, math.ceil(total / nodes))               # even fill across nodes
+    # Per-node ceiling from the REAL predicted USAGE, not the padded request: a whole
+    # k-group can fit a node at its actual RSS even when request*ranks would overflow
+    # it. We then TRIM the request (never below usage) so the group fits, instead of
+    # spilling onto an extra node and straddling the k-group.
+    by_use = max(1, usable // max(int(math.ceil(usage)), 1))
+    cap = max(1, min(cpn, by_use))                           # ranks-per-node ceiling at REAL usage
+
+    # Node layout rule: if the WHOLE job fits one node, use one node; otherwise split
+    # across exactly KPAR nodes -- one whole k-point group per node (never straddle a
+    # group: for GW that means cross-node chi/W communication). Only when even that is
+    # impossible (DFT KPAR=1 too big, or a single group larger than a node) fall back
+    # to a plain memory split.
+    kpar = max(1, int(getattr(candidate, "kpar", 1) or 1))
+    rpk = total // kpar if (kpar and total % kpar == 0) else 0
+    if total <= cap:                                        # whole job fits ONE node
+        nodes, ntpn = 1, total
+    elif kpar > 1 and rpk and rpk <= cap:                  # split across KPAR nodes
+        nodes, ntpn = kpar, rpk
+    else:                                                   # memory-only fallback
+        ntpn = min(cpn, total, cap)
+        nodes = math.ceil(total / ntpn)
+        ntpn = min(cpn, math.ceil(total / nodes))           # even fill across nodes
+
+    # Size the request: the mem_util sizing, but trimmed so ntpn ranks fit the node
+    # (keeps the whole-group layout rather than adding a node). Stays in
+    # [usage, desired] -> utilisation in [mem_util, 100%]: policy-compliant AND no OOM.
+    fit_req = usable // max(ntpn, 1)
+    mem_per_cpu = max(200, min(desired, max(int(math.ceil(usage)), (fit_req // 50) * 50)))
+
+    # GW SWEET raise: grow the request to the queue-friendly node share so the frozen
+    # MAXMEM (mem-per-cpu - 3 GB) is as big -- and the frequency batching as fast -- as
+    # the queue allows. Never exceeds what ntpn ranks can actually have on the node.
+    if gw_node_frac > 0 and candidate.calc_type != "DFT":
+        _avail = max(0, node_mem - max(reserve_mb, 0))
+        sweet = (int(gw_node_frac * _avail) // max(ntpn, 1)) // 50 * 50
+        mem_per_cpu = max(mem_per_cpu, min(sweet, (fit_req // 50) * 50))
     return mem_per_cpu, nodes, ntpn, node_mem
 
 
@@ -2240,10 +2414,11 @@ def slurm_script(
     mem_util: float = 0.80,
     reserve_mb: int = 0,
     rss_overhead: float = DEFAULT_RSS_OVERHEAD,
+    gw_node_frac: float = 0.0,
 ) -> str:
     """Render the production SLURM script for a candidate (80% memory + node split)."""
     mem_per_cpu, nodes, ntpn, node_mem = compute_request_geometry(
-        candidate, partition_info, mem_util, reserve_mb, rss_overhead)
+        candidate, partition_info, mem_util, reserve_mb, rss_overhead, gw_node_frac)
     modules: List[str] = list(partition_info["modules"])     # type: ignore[arg-type]
     extra_env: List[str] = list(partition_info["extra_env"]) # type: ignore[arg-type]
 
@@ -2269,6 +2444,9 @@ def slurm_script(
             f"of {node_mem/1024:.0f} GB)")
     if nodes > 1:
         note += f"; spread over {nodes} nodes so each node's RAM fits"
+    if gw_node_frac > 0 and candidate.calc_type != "DFT":
+        note += (f"\n# GW SWEET: request raised toward {gw_node_frac:.0%} of the node so the "
+                 f"frozen MAXMEM (= mem-per-cpu - 3 GB) buys max frequency-batching speed")
     lines.extend(["", note])
     lines.extend(["", "# --- Modules (from your cluster profile) ---", *modules])
     lines.extend(["", "# --- Pure-MPI environment ---", *extra_env])
@@ -2478,6 +2656,7 @@ def print_best_candidate(
     job_name: str,
     executable: str,
     time_limit: str,
+    gw_node_frac: float = 0.0,
 ) -> None:
     """Print the full recommendation for the top candidate (layout, memory, INCAR, SLURM)."""
     print("=" * 78)
@@ -2526,9 +2705,8 @@ def print_best_candidate(
         print(f"  whole-job total       : {m.total_job_mb / 1024.0:9.2f} GB")
         print(f"  suggested --mem-per-cpu : {m.suggested_mem_per_cpu_mb} MB  "
               f"(partition default: {m.partition_mem_per_cpu_mb} MB)")
-        fits = "YES" if m.fits_partition else \
-            "NO  -- lower NTAUPAR, use fewer ranks, or a larger-memory partition"
-        print(f"  fits partition?         : {fits}")
+        print("  node layout             : sized to the utilisation policy; if it "
+              "exceeds one node it splits across KPAR nodes (see SLURM script)")
         if m.gw_grid_source == "fine-fft-proxy":
             print("  NOTE: grids estimated from the fine FFT mesh (ALGO=None dry run).")
             print("        For an accurate number, do a brief REAL low-scaling run so")
@@ -2537,28 +2715,26 @@ def print_best_candidate(
         print()
     elif conv:
         m = candidate.memory
+        rpk = candidate.ranks_per_kgroup or (candidate.total_ranks // max(1, candidate.kpar))
         print(f"[MEMORY ESTIMATE  ({m.model})]")
-        print(f"  calibrated to your measurement; {m.gw_grid_source}")
-        print(f"  base (orbitals+FFT+proj): {m.base_mb:9.1f} MB  (per rank)")
-        print(f"  GW excess (chi/W, NOMEGA): {m.gw_grid_term_mb:9.1f} MB"
-              f"  (scales 1/(ranks-per-k-group), NOMEGA, ISPIN, ENCUTGW^3)")
-        print(f"  safety buffer           : {m.safety_mb:9.1f} MB")
-        print(f"  ---")
-        print(f"  per-rank total          : {m.per_rank_mb:9.1f} MB")
-        print(f"  whole-job total         : {m.total_job_mb / 1024.0:9.2f} GB")
+        print(f"  {m.gw_grid_source}")
+        print(f"  per-rank FLOOR          : {m.per_rank_mb:9.1f} MB  "
+              f"(NOMEGA-INDEPENDENT; ~ENCUTGW^3; ~1/ranks-per-k-group)")
+        print(f"  per-node need           : {m.gw_per_node_mb / 1024.0:9.2f} GB  "
+              f"(one k-group = {rpk} ranks/node -- this is what must fit a node)")
+        print(f"  first-pass MAXMEM       : {m.maxmem_mb} MB/rank  "
+              f"(DERIVED = mem-per-cpu - reserve; vasp-test sets the final value)")
         print(f"  suggested --mem-per-cpu : {m.suggested_mem_per_cpu_mb} MB  "
               f"(partition default: {m.partition_mem_per_cpu_mb} MB)")
-        fits = "YES" if m.fits_partition else \
-            "NO  -- raise total ranks, lower KPAR, or use a larger-mem partition"
-        print(f"  fits partition?         : {fits}")
+        print("  node layout             : KPAR k-groups, ONE per node (undersaturated); "
+              "OOM is cured by MORE nodes / lower ENCUTGW, NOT a bigger MAXMEM")
         # ENCUTGW is the dominant (cubic) memory knob; flag the default=ENCUT trap.
         if summary.encutgw is None and summary.encut is not None:
             print(f"  WARNING: ENCUTGW is unset -> defaults to ENCUT = "
-                  f"{summary.encut:.0f} eV. GW memory ~ ENCUTGW^3, so this is")
+                  f"{summary.encut:.0f} eV. The GW floor ~ ENCUTGW^3, so this is")
             print(f"           the OOM-prone choice. Set ENCUTGW explicitly "
-                  f"(e.g. 200-400) and converge it; halving ENCUTGW cuts this")
-            print(f"           estimate ~8x. Pass --gw-ref-encutgw with the "
-                  f"value used for your 2292 MB run to calibrate the sweep.")
+                  f"(e.g. 200-400) and converge it; halving ENCUTGW cuts the")
+            print(f"           floor ~8x -- the single most effective memory lever.")
         print()
     else:
         print(f"[MEMORY ESTIMATE  ({candidate.memory.model})]")
@@ -2575,9 +2751,8 @@ def print_best_candidate(
         print(f"  whole-job total       : {m.total_job_mb / 1024.0:9.2f} GB")
         print(f"  suggested --mem-per-cpu : {m.suggested_mem_per_cpu_mb} MB  "
               f"(partition default: {m.partition_mem_per_cpu_mb} MB)")
-        fits = "YES" if m.fits_partition else \
-            "NO  -- pick a larger-memory partition or fewer ranks"
-        print(f"  fits partition?         : {fits}")
+        print("  node layout             : sized to the utilisation policy; if it "
+              "exceeds one node it splits across more nodes (see SLURM script)")
         print()
 
     print("[WHY]  (top score contributions)")
@@ -2602,6 +2777,7 @@ def print_best_candidate(
         job_name=job_name,
         executable=executable,
         time_limit=time_limit,
+        gw_node_frac=gw_node_frac,
     ))
     print("-" * 78)
     print()
@@ -2720,6 +2896,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "overhead not in VASP's table). Default: "
                              "WP_RSS_OVERHEAD from the profile, else 1.4. "
                              "vasp-test supersedes this with the measured value.")
+    parser.add_argument("--gw-node-frac", type=float, default=None,
+                        help="GW SWEET sizing: grow the per-node memory request to "
+                             "this fraction of the node so the frozen MAXMEM "
+                             "(= mem-per-cpu - 3 GB) buys frequency-batching speed, "
+                             "while ~1-frac of the node stays free for queue "
+                             "backfill. Default: WP_GW_NODE_FRAC from the profile, "
+                             "else 0.67. 0 = pure need-based (SAFE) sizing.")
     parser.add_argument("--top", type=int, default=10,
                         help="Number of top candidates to print (default 10).")
     parser.add_argument("--csv", type=Path, default=None,
@@ -2793,18 +2976,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "in the INCAR snippet (only show explicit "
                              "NTAUPAR/NOMEGAPAR instead). By default the tool "
                              "recommends MAXMEM, per the VASP wiki.")
+    parser.add_argument("--no-apply-incar", action="store_true",
+                        help="Do NOT write the recommended KPAR/NCORE/NPAR into "
+                             "the INCAR (by default they are applied, backup at "
+                             "INCAR.bak, so vasp-test + production match).")
     parser.add_argument("--gw-mem-per-rank", type=float, default=None,
                         metavar="MB",
-                        help="CONVENTIONAL GW only: measured per-rank memory "
-                             "(MB) to anchor the GW memory model. Default "
-                             "anchor is 2292 MB (CuVS3 EVGW0). Set this to your "
-                             "own measured value to recalibrate.")
+                        help="CONVENTIONAL GW only: a MEASURED per-rank peak (MB) "
+                             "to calibrate the GW memory model to reality. The "
+                             "whole model is scaled so the candidate matching "
+                             "--gw-ref-ranks/--gw-ref-kpar predicts this value; "
+                             "vasp-test passes it to re-pick a feasible config.")
     parser.add_argument("--gw-ref-ranks", type=int, default=None, metavar="N",
-                        help="CONVENTIONAL GW only: total MPI ranks used in the "
-                             "run that produced --gw-mem-per-rank (default "
-                             "assumes 252). Needed to scale the anchor by "
-                             "ranks-per-k-group; pass the real value of your "
-                             "2292 MB run.")
+                        help="CONVENTIONAL GW only: total MPI ranks of the run "
+                             "that produced --gw-mem-per-rank (the calibration "
+                             "reference layout).")
+    parser.add_argument("--gw-ref-kpar", type=int, default=None, metavar="K",
+                        help="CONVENTIONAL GW only: KPAR of the --gw-mem-per-rank "
+                             "reference layout (with --gw-ref-ranks identifies the "
+                             "candidate whose prediction is pinned to the measurement).")
     parser.add_argument("--gw-ref-encutgw", type=float, default=None,
                         metavar="EV",
                         help="CONVENTIONAL GW only: the ENCUTGW (eV) actually "
@@ -2972,13 +3162,69 @@ def _embed_recommendation(script_text: str, candidate: "Candidate",
     meta_str = " ".join(f"{k}={v}" for k, v in meta.items())
     block = ["", "# ===================  WolfPack-DFT recommendation  ==================",
              f"# WOLFPACK {meta_str}",
-             "# INCAR settings to merge into your INCAR (kept FIXED by vasp-test):"]
+             "# Parallelization applied to your INCAR (KPAR/NCORE/NPAR; backup INCAR.bak):"]
     block += ["#   " + ln for ln in candidate.incar_snippet.splitlines()]
     block += ["# ===================================================================="]
     lines = script_text.split("\n")
     if lines and lines[0].startswith("#!"):
         return "\n".join([lines[0], *block, *lines[1:]])
     return "\n".join([*block, *lines])
+
+
+def _set_incar_flag(text: str, key: str, value) -> str:
+    """Set `key = value` in INCAR text: replace the value in place (keeping any
+    trailing comment) if the tag exists, else append a fresh line."""
+    pat = re.compile(rf"^(\s*{key}\s*=\s*)[-+0-9.]+", re.IGNORECASE | re.MULTILINE)
+    if pat.search(text):
+        return pat.sub(rf"\g<1>{value}", text, count=1)
+    sep = "" if (not text or text.endswith("\n")) else "\n"
+    return text + f"{sep}{key} = {value}   # set by vasp-recommend-slurm (FIXED parallel config)\n"
+
+
+def _comment_out_incar_flag(text: str, key: str, why: str) -> str:
+    """Comment out an ACTIVE `key = ...` line, preserving it for the record."""
+    pat = re.compile(rf"^([ \t]*)({key}[ \t]*=[^\r\n]*)$", re.IGNORECASE | re.MULTILINE)
+    return pat.sub(rf"\g<1># \g<2>   # {why}", text)
+
+
+def apply_parallel_to_incar(path: Path, kpar: int, ncore: int, npar: int,
+                            is_gw: bool) -> Optional[List[str]]:
+    """Write the recommended PARALLELISATION into the user's INCAR (backup once at
+    INCAR.bak). KPAR + NCORE only -- NEVER NPAR. These are parallelisation, not physics.
+
+    NPAR IS DELIBERATELY NOT WRITTEN. NPAR and NCORE are two ways of expressing the
+    same split (NPAR * NCORE = ranks per k-point group), and VASP IGNORES NCORE when
+    NPAR is present, so setting both hands control to the one we did not intend. The
+    two are only equivalent at ONE rank count: NCORE is absolute (cores per orbital,
+    portable), NPAR is not. At the 48 ranks recommended here, KPAR=3 -> 16 ranks per
+    k-group, so NCORE=4 and NPAR=4 agree; re-run the SAME INCAR on 96 ranks and NPAR=4
+    silently forces NCORE=8 instead of the 4 that was benchmarked. Hence NCORE only,
+    with NPAR reported as a derived quantity -- which is exactly what the printed
+    INCAR snippet has always said ("Derived only ... do NOT set BOTH").
+
+    An NPAR left over from an earlier version (or from the user) is commented out for
+    the same reason: it would override the NCORE we just wrote."""
+    try:
+        t = Path(path).read_text()
+    except OSError:
+        return None
+    bak = Path(str(path) + ".bak")
+    if not bak.exists():
+        try:
+            bak.write_text(t)
+        except OSError:
+            pass
+    flags = [("KPAR", kpar), ("NCORE", ncore)]
+    for k, v in flags:
+        t = _set_incar_flag(t, k, v)
+    t = _comment_out_incar_flag(
+        t, "NPAR", f"removed by vasp-recommend-slurm: NPAR overrides NCORE={ncore} "
+                   f"(derived value here is {npar})")
+    try:
+        Path(path).write_text(t)
+    except OSError:
+        return None
+    return [f"{k}={v}" for k, v in flags] + [f"NPAR={npar} (derived; not written)"]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -3001,6 +3247,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except ValueError:
             args.mem_util = 0.80
     args.mem_util = min(max(args.mem_util, 0.05), 1.0)
+    # Head-room kept FREE on every production node, as a fraction of its RAM
+    # (vasp-configure: WP_MAIN_MEM_MARGIN; 0.02 => 98% usable). Clamped so a typo
+    # cannot swallow the node.
+    try:
+        _main_margin = float(profile.get("WP_MAIN_MEM_MARGIN", "") or 0.0)
+    except ValueError:
+        _main_margin = 0.0
+    _main_margin = min(max(_main_margin, 0.0), 0.5)
     if args.rss_overhead is None:
         try:
             args.rss_overhead = float(profile.get("WP_RSS_OVERHEAD", "")
@@ -3008,6 +3262,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except ValueError:
             args.rss_overhead = DEFAULT_RSS_OVERHEAD
     args.rss_overhead = max(args.rss_overhead, 1.0)
+    # GW SWEET node fraction: how much of a node the GW request may grow to (buying
+    # frozen-MAXMEM batching speed) while leaving the rest free for queue backfill.
+    if args.gw_node_frac is None:
+        try:
+            args.gw_node_frac = float(profile.get("WP_GW_NODE_FRAC", "") or 0.67)
+        except ValueError:
+            args.gw_node_frac = 0.67
+    args.gw_node_frac = min(max(args.gw_node_frac, 0.0), 0.95)
 
     # Resolve the dry-run OUTCAR (auto-find so `vasp-recommend-slurm` chains off
     # `vasp-dry-run` with no arguments).
@@ -3062,8 +3324,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 1
 
-    executable = pick_executable(summary, args.executable)
+    # CALIBRATION: when vasp-test re-invokes us with a MEASURED per-rank peak, pin
+    # the GW model to it so the re-pick's feasibility uses real (not theoretical)
+    # memory -- otherwise we would re-pick the same infeasible config.
+    if is_gw and args.gw_mem_per_rank and args.gw_ref_ranks:
+        calibrate_gw_memory(candidates, args.gw_mem_per_rank, args.gw_ref_ranks,
+                            args.gw_ref_kpar, args.mem_util)
+
+    # FEASIBILITY: for GW a whole k-group MUST fit one node (a split group means
+    # cross-node chi/W traffic). Keep only configs whose group fits; the best-scoring
+    # FEASIBLE one wins. If NONE fits, the optimised config cannot run on this
+    # cluster -- error out with guidance instead of emitting a straddling layout.
+    node_mem = _node_mem_mb(partition_info, int(partition_info["mem_per_cpu_mb"]))  # type: ignore[index]
+    feasible = [c for c in candidates
+                if group_fits_node(c, node_mem, cpus_per_node)]
+    if not feasible:
+        best = candidates[0]
+        rpk = max(1, best.ranks_per_kgroup or best.total_ranks // max(1, best.kpar))
+        need_gb = rpk * best.memory.per_rank_mb / 1024.0
+        print(
+            "\n[INFEASIBLE] No parallelization fits this cluster's nodes.\n"
+            f"  The best config (KPAR={best.kpar}, {rpk} ranks/k-group) needs "
+            f"~{need_gb:.0f} GB per k-group, but a node holds only "
+            f"{node_mem/1024:.0f} GB ({cpus_per_node} cores).\n"
+            "  A GW k-group cannot be split across nodes, so this is not runnable.\n"
+            "  Options: raise KPAR (smaller k-groups) if NKPTS allows; lower ENCUTGW/\n"
+            "  NOMEGA/NBANDS; or use a higher-memory partition. (vasp-test will also\n"
+            "  re-pick automatically if the MEASURED memory is what breaks it.)",
+            file=sys.stderr)
+        return 3
+    candidates = feasible            # best FEASIBLE candidate now leads the list
+
+    executable = pick_executable(
+        summary, args.executable,
+        std_default=(profile.get("WP_VASP_STD", "") or "").strip() or None,
+        gam_default=(profile.get("WP_VASP_GAM", "") or "").strip() or None,
+        ncl_default=(profile.get("WP_VASP_NCL", "") or "").strip() or None)
     best_each = best_per_total_ranks(candidates)
+
+    # GW SWEET: size the geometry NOW (before printing) so the displayed MAXMEM matches
+    # the final request -- the request grows to the queue-friendly node share and the
+    # frozen MAXMEM (= mem-per-cpu - 3 GB) grows with it, buying batching speed.
+    if is_gw and args.gw_node_frac > 0:
+        _mpc, _, _, _ = compute_request_geometry(
+            candidates[0], partition_info, args.mem_util,
+            reserve_mb=_node_reserve_mb(partition_info, _main_margin),
+            rss_overhead=args.rss_overhead, gw_node_frac=args.gw_node_frac)
+        candidates[0].memory.maxmem_mb = gw_maxmem_from_request(_mpc)
 
     # Capture the full human-readable report so it can both print to the console
     # and be appended to report.out (for the dry-run -> recommend -> test chain).
@@ -3085,7 +3392,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             candidate=candidates[0], partition_name=args.partition,
             partition_info=partition_info, summary=summary,
             email=args.email or None, job_name=args.job_name,
-            executable=executable, time_limit=args.time)
+            executable=executable, time_limit=args.time,
+            gw_node_frac=(args.gw_node_frac if is_gw else 0.0))
         print(f"[MEMORY POLICY] SLURM memory sized for >= "
               f"{args.mem_util*100:.0f}% utilisation (request = need / "
               f"{args.mem_util:.2f}); vasp-test will refine it from a real run.")
@@ -3099,16 +3407,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.no_write:
         return 0
 
-    # Geometry + 80%-utilisation memory for the production job.
+    # Geometry + 80%-utilisation memory for the production job (GW: SWEET-raised).
     best = candidates[0]
+    _frac = args.gw_node_frac if is_gw else 0.0
+    _reserve = _node_reserve_mb(partition_info, _main_margin)
     mem_per_cpu, nodes, ntpn, node_mem = compute_request_geometry(
-        best, partition_info, args.mem_util, rss_overhead=args.rss_overhead)
+        best, partition_info, args.mem_util, reserve_mb=_reserve,
+        rss_overhead=args.rss_overhead, gw_node_frac=_frac)
     script_text = slurm_script(
         candidate=best, partition_name=args.partition,
         partition_info=partition_info, summary=summary,
         email=args.email or None, job_name=args.job_name,
         executable=executable, time_limit=args.time, mem_util=args.mem_util,
-        rss_overhead=args.rss_overhead)
+        reserve_mb=_reserve, rss_overhead=args.rss_overhead, gw_node_frac=_frac)
 
     meta = {
         "stage": "recommend",
@@ -3121,6 +3432,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "node_mem_mb": node_mem,
         "mem_per_cpu": mem_per_cpu,
         "pred_mem_per_rank": int(round(best.memory.per_rank_mb)),
+        "pred_flat_mb": int(round(best.memory.base_mb)),
+        "pred_nodes": nodes,
+        "pred_ntpn": ntpn,
         "mem_util": args.mem_util,
         "exe": executable,
     }
@@ -3141,6 +3455,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except OSError as exc:
         print(f"[FILES] WARNING: could not write {args.write_slurm}: {exc}",
               file=sys.stderr)
+
+    # Apply the recommended parallelisation to the INCAR so vasp-test and the
+    # production run use it (KPAR/NCORE always; NPAR for DFT). Backup INCAR.bak.
+    if not args.no_apply_incar:
+        applied = apply_parallel_to_incar(Path("INCAR"), best.kpar, best.ncore,
+                                          best.npar, best.calc_type != "DFT")
+        if applied:
+            print(f"[FILES] applied to INCAR        -> {' '.join(applied)}"
+                  f"  (backup: INCAR.bak)")
 
     # Pipeline state for vasp-test (the FIXED config it must validate + scale).
     write_state(args.state, meta)

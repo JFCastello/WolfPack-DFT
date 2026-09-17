@@ -38,6 +38,10 @@ from .vaspio import _segment_ticks
 
 MARKER = "o"               # small circle: clearest when many bands overlap
 
+# Wannier90 interpolated bands are continuous curves, not sampled points.
+W90_BAND_COLOR = "0.20"
+W90_BAND_LW = 1.1
+
 
 # --------------------------------------------------------------------------- #
 # Colour helpers
@@ -143,7 +147,19 @@ def _draw_segment(ax, bands_data, groups, band_w, w_tot, sl, spins, cfg, lsty,
 
 def _draw_plain(ax, bands_data, sl, spins, cfg, lsty):
     """plain method: shared pale backbone + a small, slightly-translucent black
-    circle at every k-point where the eigenvalues were computed."""
+    circle at every k-point where the eigenvalues were computed.
+
+    Wannier90 output is an INTERPOLATION onto a dense path -- its points are not
+    computed eigenvalues, so marking every one would be misleading (and unreadable).
+    Interpolated bands are therefore drawn as continuous solid curves instead.
+    """
+    if bands_data.get("w90"):
+        x = bands_data["distance"][sl]
+        for sp in spins:
+            for band in bands_data["bands"][sp]:
+                ax.plot(x, band[sl], color=W90_BAND_COLOR, lw=W90_BAND_LW,
+                        ls=lsty(sp), zorder=3, solid_capstyle="round")
+        return
     _draw_backbone(ax, bands_data, sl, spins, lsty)
     x = bands_data["distance"][sl]
     size = float(getattr(cfg, "plain_marker_size", PLAIN_MARKER_SIZE))
@@ -507,10 +523,14 @@ def build_figure(bands_data, dos_data, groups, cfg, spins, show_both, gap=None,
     else:
         handles = [Line2D([0], [0], color="0.55", lw=2.0, label="total")]
         if method == "plain":
-            handles.append(Line2D([0], [0], color="none", marker=legend_marker,
-                                  markerfacecolor=PLAIN_MARKER_COLOR,
-                                  markeredgecolor="none", markersize=7,
-                                  label="k-points"))
+            if bands_data.get("w90"):
+                handles.append(Line2D([0], [0], color=W90_BAND_COLOR,
+                                      lw=W90_BAND_LW, label="Wannier interp."))
+            else:
+                handles.append(Line2D([0], [0], color="none", marker=legend_marker,
+                                      markerfacecolor=PLAIN_MARKER_COLOR,
+                                      markeredgecolor="none", markersize=7,
+                                      label="k-points"))
         for g in groups:                              # each group in its colour
             handles.append(group_handle(g["color"], g["label"]))
         # single-spin figure: note which channel is shown (ISPIN=2 only)
@@ -522,8 +542,10 @@ def build_figure(bands_data, dos_data, groups, cfg, spins, show_both, gap=None,
                handlelength=1.6, labelspacing=0.3)
 
     if cfg.show_title:
-        ttl = mathify_title(cfg.title) if cfg.title else \
-            _auto_formula_tex(bands_data["structure"].composition.reduced_formula)
+        _st = bands_data.get("structure")
+        ttl = (mathify_title(cfg.title) if cfg.title else
+               (_auto_formula_tex(_st.composition.reduced_formula)
+                if _st is not None else "Band structure and DOS"))
         if spin_note:
             ttl = f"{ttl}  $({spin_note})$"
         fig.suptitle(ttl, y=0.985, fontsize=14)
@@ -531,3 +553,219 @@ def build_figure(bands_data, dos_data, groups, cfg, spins, show_both, gap=None,
         fig.suptitle(f"$({spin_note})$", y=0.985, fontsize=12)
 
     return fig, {"bands": band_axes, "dos": axd}
+
+
+# --------------------------------------------------------------------------- #
+# Standalone figures -- one calculation folder, one physical quantity
+# --------------------------------------------------------------------------- #
+# build_figure() above always pairs bands with a DOS side-panel, which is what a
+# full Scf/Bands/Dos workflow produces.  When the plotter is pointed at a bare
+# calculation folder only ONE of the two exists, so these two builders draw it
+# on its own.  They reuse the same weights, colours and group machinery, so a
+# standalone panel is identical to its counterpart inside the combined figure --
+# except that a standalone DOS is drawn the conventional way round, with energy
+# on the x-axis.
+# --------------------------------------------------------------------------- #
+def build_dos_figure(dos_data, groups, cfg, spins, show_both=False,
+                     spin_note=None, structure=None):
+    """Standalone density of states: energy on x, DOS on y.
+
+    Returns (fig, {'dos': ax}).  `groups` may be empty (method='plain'), in
+    which case only the filled total DOS is drawn.
+    """
+    _apply_rcparams(cfg.font)
+    show_both = bool(show_both)
+
+    def sign(sp):
+        return -1.0 if (show_both and sp == Spin.down) else 1.0
+
+    fig = plt.figure(figsize=(cfg.figw, cfg.figh))
+    ax = fig.add_subplot(111)
+
+    E = dos_data["energies"]
+    mask = (E >= cfg.emin - 1.0) & (E <= cfg.emax + 1.0)
+    Em = E[mask]
+
+    def prep(arr):
+        return _smear(E, arr, cfg.smear)[mask]
+
+    proj_dos = {g["plain"]: dos_projection(g, dos_data) for g in groups}
+    ymax = 0.0
+
+    # total DOS: filled grey, mirrored when both spins are shown
+    dos_spins = [Spin.up, Spin.down] if show_both else spins
+    for sp in dos_spins:
+        tot = dos_data["total"].get(sp)
+        if tot is None:
+            continue
+        y = sign(sp) * prep(tot)
+        col = ({Spin.up: OVERLAY_UP_COLOR, Spin.down: OVERLAY_DOWN_COLOR}[sp]
+               if show_both else "0.55")
+        fillc = col if show_both else "0.86"
+        ax.fill_between(Em, 0.0, y, color=fillc, alpha=0.16 if show_both else 1.0,
+                        lw=0, zorder=1)
+        ax.plot(Em, y, color=col, lw=DOS_TOTAL_LW, zorder=2)
+        ymax = max(ymax, np.abs(y).max() if y.size else 0.0)
+
+    # projected group curves in their channel colours
+    for g in groups:
+        pj = proj_dos[g["plain"]]
+        if pj is None:
+            continue
+        for sp in spins:
+            dens = pj.get(sp)
+            if dens is None:
+                continue
+            y = sign(sp) * prep(dens)
+            ax.plot(Em, y, color=g["color"], lw=DOS_LW, zorder=3)
+            ymax = max(ymax, np.abs(y).max() if y.size else 0.0)
+
+    ymax = ymax or 1.0
+    ax.axvline(0.0, color="k", ls=(0, (6, 4)), lw=0.9, zorder=0)   # E_F
+    if show_both:
+        ax.axhline(0.0, color="0.5", lw=0.6, zorder=0)
+        ax.set_ylim(-1.06 * ymax, 1.06 * ymax)
+    else:
+        ax.set_ylim(0.0, 1.06 * ymax)
+    ax.set_xlim(cfg.emin, cfg.emax)
+    ax.set_xlabel(r"$E - E_\mathrm{F}$ (eV)")
+    ax.set_ylabel("DOS (states/eV/unit cell)")
+    ax.yaxis.set_major_formatter(FuncFormatter(_abs_fmt))
+    ax.tick_params(axis="both", which="both", direction="in",
+                   top=True, right=True)
+
+    handles = [Line2D([0], [0], color="0.55", lw=2.0, label="total")]
+    if show_both:
+        handles = [
+            Line2D([0], [0], color=OVERLAY_UP_COLOR, lw=2.0, label=r"spin $\uparrow$"),
+            Line2D([0], [0], color=OVERLAY_DOWN_COLOR, lw=2.0, label=r"spin $\downarrow$"),
+        ]
+    for g in groups:
+        handles.append(Line2D([0], [0], color=g["color"], lw=2.0, label=g["label"]))
+    if handles:
+        ax.legend(handles=handles, loc="upper right", borderaxespad=0.4,
+                  handlelength=1.6, labelspacing=0.3)
+
+    if cfg.show_title:
+        ttl = mathify_title(cfg.title) if cfg.title else (
+            _auto_formula_tex(structure.composition.reduced_formula)
+            if structure is not None else "Density of states")
+        if spin_note:
+            ttl = f"{ttl}  $({spin_note})$"
+        fig.suptitle(ttl, y=0.985, fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig, {"dos": ax}
+
+
+def build_bands_figure(bands_data, groups, cfg, spins, gap=None,
+                       spin_note=None, overlay_plain=False):
+    """Standalone band structure (no DOS side-panel).
+
+    Same segment panels, markers and gap annotation as the left half of
+    build_figure(), stretched across the full figure width.
+    """
+    method = "plain" if overlay_plain else getattr(cfg, "method", DEFAULT_METHOD)
+    _apply_rcparams(cfg.font)
+
+    def lsty(sp):
+        return "solid"
+
+    dist = bands_data["distance"]
+    segs = bands_data["segments"]
+    n_seg = len(segs)
+    seg_len = []
+    for sl in segs:
+        xs = dist[sl]
+        seg_len.append(max(float(xs[-1] - xs[0]) if len(xs) > 1 else 0.0, 1e-6))
+
+    fig = plt.figure(figsize=(cfg.figw, cfg.figh))
+    gs = fig.add_gridspec(1, n_seg, width_ratios=seg_len, wspace=SEG_WSPACE,
+                          left=0.095, right=0.985, top=0.92, bottom=0.11)
+    band_axes = []
+    for j in range(n_seg):
+        band_axes.append(fig.add_subplot(gs[0, j],
+                                         sharey=band_axes[0] if band_axes else None))
+
+    band_w = {g["plain"]: band_weights(g, bands_data) for g in groups}
+    w_tot = state_total_weight(bands_data)
+    ef_kw = dict(color="k", ls=(0, (6, 4)), lw=0.9, zorder=0)
+
+    n_target = int(getattr(cfg, "markers", MARKER_TARGET) or 0)
+    if n_target > 0:
+        total_len = float(dist[-1] - dist[0]) if len(dist) > 1 else 1.0
+        spacing = total_len / max(n_target, 1)
+    else:
+        spacing = 0.0
+
+    for j, (ax, sl) in enumerate(zip(band_axes, segs)):
+        if overlay_plain:
+            _draw_overlay_plain(ax, bands_data, sl, cfg)
+        else:
+            _draw_segment(ax, bands_data, groups, band_w, w_tot, sl, spins, cfg,
+                          lsty, spacing)
+        ax.axhline(0.0, **ef_kw)
+        xs = dist[sl]
+        ax.set_xlim(xs[0], xs[-1])
+        ticks = _segment_ticks(dist, bands_data["kpoint_labels"], sl)
+        for d, _l in ticks:
+            ax.axvline(d, color="0.5", lw=0.6, zorder=0)
+        ax.set_xticks([d for d, _l in ticks])
+        ax.set_xticklabels([format_kpt_label(l) for _d, l in ticks],
+                           fontsize=KPT_LABEL_SIZE)
+        ax.tick_params(axis="x", top=True, bottom=True)
+        if j == 0:
+            ax.set_ylabel(r"$E - E_\mathrm{F}$ (eV)")
+            ax.tick_params(axis="y", left=True, right=False, labelleft=True)
+        else:
+            ax.tick_params(axis="y", left=False, right=False, labelleft=False)
+    band_axes[0].set_ylim(cfg.emin, cfg.emax)
+
+    if gap is not None:
+        _annotate_gap(band_axes, segs, dist, gap)
+
+    # legend on the last panel (no DOS axis to hang it on)
+    handles = []
+    if overlay_plain:
+        handles = [
+            Line2D([0], [0], color="none", marker=MARKER,
+                   markerfacecolor=OVERLAY_UP_COLOR, markeredgecolor="none",
+                   markersize=8, label=r"spin $\uparrow$"),
+            Line2D([0], [0], color="none", marker=MARKER,
+                   markerfacecolor=OVERLAY_DOWN_COLOR, markeredgecolor="none",
+                   markersize=8, label=r"spin $\downarrow$"),
+        ]
+    else:
+        if method == "plain":
+            if bands_data.get("w90"):
+                handles.append(Line2D([0], [0], color=W90_BAND_COLOR,
+                                      lw=W90_BAND_LW, label="Wannier interp."))
+            else:
+                handles.append(Line2D([0], [0], color="none", marker=MARKER,
+                                      markerfacecolor=PLAIN_MARKER_COLOR,
+                                      markeredgecolor="none", markersize=7,
+                                      label="k-points"))
+        for g in groups:
+            handles.append(Line2D([0], [0], color="none", marker=MARKER,
+                                  markerfacecolor=g["color"],
+                                  markeredgecolor="none", markersize=8,
+                                  label=g["label"]))
+        if bands_data["is_spin"] and method != "stacked":
+            arrow = r"\uparrow" if spins == [Spin.up] else r"\downarrow"
+            handles.append(Line2D([0], [0], color="none", label=r"spin $%s$" % arrow))
+    if handles:
+        band_axes[-1].legend(handles=handles, loc="upper right",
+                             borderaxespad=0.4, handlelength=1.6,
+                             labelspacing=0.3)
+
+    if cfg.show_title:
+        _st = bands_data.get("structure")
+        ttl = (mathify_title(cfg.title) if cfg.title else
+               (_auto_formula_tex(_st.composition.reduced_formula)
+                if _st is not None else "Band structure"))
+        if spin_note:
+            ttl = f"{ttl}  $({spin_note})$"
+        fig.suptitle(ttl, y=0.985, fontsize=14)
+    elif spin_note:
+        fig.suptitle(f"$({spin_note})$", y=0.985, fontsize=12)
+
+    return fig, {"bands": band_axes}

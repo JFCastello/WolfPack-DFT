@@ -36,7 +36,7 @@ vasp-plot-fatbandsdos --root . --list
 # step 2 — plot with a chosen method (--method is REQUIRED)
 vasp-plot-fatbandsdos --root . --method rgb \
     --projections "(Cu-d),(V-d),(S-p)" \
-    --title "CuVS_3 - G_0W_0"
+    --title "MoS_2 - G_0W_0"
 ```
 
 With no `--projections`, the script colours one group per element so you always
@@ -102,7 +102,7 @@ vasp-plot-fatbandsdos --root . --method rgb --auto-projections 3 --emin -6 --ema
 
 ```bash
 conda activate wolfpack-dft
-vasp-quick-plots --emin -6 --emax 6 --title "CuVS_3"
+vasp-quick-plots --emin -6 --emax 6 --title "MoS_2"
 vasp-quick-plots --methods plain,rgb,cmyk          # subset
 vasp-quick-plots --stacked-n 6                      # 6 units in the stacked plot
 ```
@@ -163,7 +163,7 @@ neat subscripts:
 
 | Input | Renders as |
 |-------|-----------|
-| `CuVS_3 - G_0W_0` | CuVS₃ – G₀W₀ |
+| `MoS_2 - G_0W_0` | MoS₂ – G₀W₀ |
 | `MoS_2 monolayer` | MoS₂ monolayer |
 | `Fe_{12}O_{19}` | Fe₁₂O₁₉ |
 
@@ -250,7 +250,7 @@ from vasp_plot_fatbandsdos import generate
 fig, axes = generate(root="path/to/calc",
                      method="rgb",
                      projections="(Cu-d),(S-p)",
-                     title="CuVS_3", return_axes=True)
+                     title="MoS_2", return_axes=True)
 axes["bands"][0].set_ylim(-2, 2)    # tweak anything
 fig.savefig("custom.pdf")
 ```
@@ -306,3 +306,51 @@ WolfPack-DFT/
   back to `Bands/` only if necessary; point `--root` at a run with a dense SCF.
 - **`--method rgb` error with > 3 groups** — rgb encodes at most 3 channels;
   use `--method stacked` for more groups or narrow your `--projections`.
+
+## Where you run it: the workflow tree, or one calculation
+
+**Nothing changes for the classic layout.** If the folder you point at contains
+`Bands/` and `Dos/`, it is treated exactly as before -- the combined band-structure +
+DOS figure, same code path, same look. That check runs first and short-circuits; the
+`INCAR` is not even consulted.
+
+Only when there is **no** `Bands/`+`Dos/` tree does the plotter fall back to inspecting
+the folder itself, so you can stand inside a single calculation. It then creates
+`Plots/` and writes only the figures that folder can support:
+
+| what the folder holds | how it is recognised | what you get |
+|---|---|---|
+| the classic tree | `Bands/` + `Dos/` exist | combined bands + DOS (unchanged) |
+| band structure | `KPOINTS` is line-mode (a k-path) | a standalone band-structure figure |
+| density of states | regular k-mesh **and** `ISMEAR<=-4` / `NEDOS` / `LORBIT>=10` / `ICHARG>=10` | a standalone DOS figure (energy on the x-axis) |
+| Wannier90 output | any `*_band.dat` / `*-dos.dat` present | the interpolated bands and/or DOS |
+
+`vasp-quick-plots` behaves the same way: every method folder (`0_Plain` ... `5_Stacked`)
+is filled with the plots that folder supports, with the same automatic projections.
+
+```bash
+cd 3_Dos            # a DOS run, no Scf/Bands/Dos tree
+vasp-quick-plots    # -> Plots/{0_Plain,...}/  with DOS plots only
+```
+
+## Wannier90 (interpolated bands and DOS)
+
+Point the plotter at a Wannier90 folder and it reproduces the same figures as vanilla
+VASP with **nothing else to specify**:
+
+```bash
+cd 4_Wann
+vasp-plot-fatbandsdos --method plain     # or: vasp-quick-plots
+```
+
+It reads `seedname_band.dat` (band-outer blocks: k-distance, energy), takes the
+high-symmetry labels and their positions from the `set xtics (...)` line of
+`seedname_band.gnu` (falling back to the `kpoint_path` block of the `.win`), and reads
+`seedname-dos.dat` (energy, total, plus the spin-up/down columns when `spin_decomp` is on).
+
+**Wannier90 energies are absolute**, so the Fermi level is resolved automatically:
+`fermi_energy` in the `.win` -> a VASP run in the same folder -> a VASP run in the parent
+folder (the DFT step the Wannierisation came from). Override with `--efermi`.
+
+Interpolated bands are drawn as continuous curves rather than per-k-point markers,
+because they are an interpolation onto a dense path, not computed eigenvalues.

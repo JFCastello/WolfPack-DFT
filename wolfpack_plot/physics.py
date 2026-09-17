@@ -379,7 +379,23 @@ def collect_report(root, cfg, bands_data, dos_data, groups, efermi, gap):
     """Gather physical quantities from the calculation as a single text string."""
     root = Path(root)
     scf_dir, bands_dir, dos_dir = root / SCF_DIR, root / BANDS_DIR, root / DOS_DIR
-    st = bands_data["structure"]
+    # A single-calculation folder has no Scf/Bands/Dos sub-tree, and a DOS-only
+    # folder has no band data: fall back to the folder itself / the DOS structure.
+    if not scf_dir.is_dir():
+        scf_dir = root
+    if not dos_dir.is_dir():
+        dos_dir = root
+    st = (bands_data["structure"] if bands_data is not None
+          else dos_data.get("structure"))
+    if st is None:
+        # Wannier90 output with no POSCAR/vasprun nearby: skip the structural
+        # section entirely rather than fail the whole report.
+        import datetime as _dt0
+        return ("VASP fat-band / DOS analysis report\n"
+                f"generated  : {_dt0.datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                f"root        : {root}\n\n"
+                "(no structure available -- Wannier90 output without a VASP "
+                "run alongside; nothing further to report)\n")
     lat = st.lattice
     import datetime as _dt
     L = []
@@ -413,16 +429,23 @@ def collect_report(root, cfg, bands_data, dos_data, groups, efermi, gap):
 
     # --- electronic structure ---
     L.append(_section("ELECTRONIC STRUCTURE"))
-    nb = sum(v.shape[0] for v in bands_data["bands"].values())
     L.append(f"Fermi level E_F    : {_fmt(efermi, ' eV')}  (eigenvalues below "
              f"are referenced so E_F = 0)")
-    L.append(f"spin polarised     : {'yes' if bands_data['is_spin'] else 'no'}")
-    L.append(f"spin-orbit coupling: {'yes' if bands_data['soc'] else 'no'}")
-    L.append(f"bands x k-points   : {nb} x {len(bands_data['distance'])}")
-    L.append(f"material class     : {classify_material(gap).upper()}")
-    if gap.get("metal"):
-        L.append("band gap           : none (bands cross E_F -> metallic)")
+    if bands_data is None:
+        # DOS-only folder: no eigenvalues along a path, so no band-edge analysis.
+        L.append("band structure     : not in this folder (DOS-only calculation)")
+        L.append("band gap           : not determined -- run the band-structure "
+                 "step for VBM/CBM")
     else:
+        nb = sum(v.shape[0] for v in bands_data["bands"].values())
+        L.append(f"spin polarised     : {'yes' if bands_data['is_spin'] else 'no'}")
+        L.append(f"spin-orbit coupling: {'yes' if bands_data['soc'] else 'no'}")
+        L.append(f"bands x k-points   : {nb} x {len(bands_data['distance'])}")
+    if bands_data is not None and gap is not None:
+        L.append(f"material class     : {classify_material(gap).upper()}")
+    if bands_data is not None and gap is not None and gap.get("metal"):
+        L.append("band gap           : none (bands cross E_F -> metallic)")
+    elif bands_data is not None and gap is not None:
         kind = "direct" if gap["direct"] else "indirect"
         L.append(f"fundamental gap    : {gap['gap']:.4f} eV  ({kind})")
         vk = _plain_klabel(gap["vbm_klabel"]) or f"{gap['vbm_k_dist']:.3f}"

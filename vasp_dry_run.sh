@@ -35,11 +35,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 1
 #SBATCH --mem-per-cpu=8000
-#SBATCH -t 00:30:00
+#SBATCH -t 00:10:00
 #SBATCH -o vasp_dryrun_%j.out
 #SBATCH -e vasp_dryrun_%j.err
-# (the normal entry point `vasp-dry-run` renders slurm_dryrun.sh instead; these
-#  in-file directives apply only if you run `sbatch vasp-dry-run` directly.)
+# (the normal entry point `vasp-dry-run` renders slurm_dryrun.sh instead, taking
+#  the walltime from WP_TEST_WALLTIME_MIN; these in-file directives apply only if
+#  you run `sbatch vasp-dry-run` directly. SLURM parses them before any shell
+#  runs, so they CANNOT read the profile -- hence a deliberately small 10 min,
+#  which fits under any site's debug cap. The probe itself exits in seconds.)
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '2,31p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'
@@ -52,6 +55,46 @@ set -uo pipefail
 _wp_conf="${WOLFPACK_CLUSTER_CONF:-$HOME/.config/wolfpack-dft/cluster.conf}"
 # shellcheck source=/dev/null
 [[ -f "$_wp_conf" ]] && source "$_wp_conf"
+
+# --- The profile is REQUIRED, not optional --------------------------------- #
+# Every value below is a FACT ABOUT THIS CLUSTER that vasp-configure asks the
+# user for: partition names, cores per node, RAM per node, the debug walltime
+# cap. Falling back to a built-in number means silently running with someone
+# else's hardware -- and the numbers disagreed between tools (cores/node
+# defaulted to 256 here and 128 in another script), so the "safe default" was
+# not even self-consistent. A wrong guess does not fail fast either: SLURM
+# accepts the job and the sizing is quietly wrong. So: if the answer is not in
+# the profile, stop and say which answer is missing.
+_wp_require(){
+    local missing=() v
+    for v in "$@"; do [[ -z "${!v:-}" ]] && missing+=("$v"); done
+    (( ${#missing[@]} == 0 )) && return 0
+    {
+        echo
+        echo "=============================================================================="
+        echo " CANNOT RUN -- this cluster has not been configured"
+        echo "=============================================================================="
+        echo " These values describe YOUR cluster and cannot be guessed:"
+        for v in "${missing[@]}"; do echo "     ${v}"; done
+        echo
+        if [[ -f "$_wp_conf" ]]; then
+            echo " A profile exists at"
+            echo "     ${_wp_conf}"
+            echo " but does not define them. Re-run the wizard to fill them in:"
+        else
+            echo " No profile found at"
+            echo "     ${_wp_conf}"
+            echo " Create one (asks a handful of questions, once per cluster):"
+        fi
+        echo "     vasp-configure"
+        echo "=============================================================================="
+        echo
+    } >&2
+    exit 2
+}
+
+_wp_require WP_DEBUG_PARTITION WP_TEST_WALLTIME_MIN WP_VASP_STD
+
 
 # Emit the resolved module-load command lines (single source of truth: used both
 # to bake them into the rendered job script and to load them in the fallback).
@@ -77,7 +120,26 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         exit 1
     fi
     part="${WP_DEBUG_PARTITION:-debug}"
-    exe="${WP_VASP_STD:-vasp_std}"
+    # A non-collinear / spin-orbit run needs the vasp_ncl binary: vasp_std cannot
+    # do it. vasp-configure asks for WP_VASP_NCL and saved it, but nothing ever
+    # read it, so an LSORBIT run was probed with vasp_std and failed on the spot.
+    if grep -qiE '^[[:space:]]*(LSORBIT|LNONCOLLINEAR)[[:space:]]*=[[:space:]]*\.?T' INCAR 2>/dev/null; then
+        exe="${WP_VASP_NCL:-vasp_ncl}"
+    else
+        exe="${WP_VASP_STD:-vasp_std}"
+    fi
+    # Walltime and memory come from the cluster profile, like every other field
+    # in this header. They used to be hardcoded at 30 min / 8000 MB, so a site
+    # configured for a 20-minute debug cap had its dry run REJECTED by SLURM --
+    # vasp-configure asked the question and the answer was ignored.
+    # The dry run is a 1-rank probe that exits in seconds; it only needs to fit
+    # inside the debug partition's cap, so it shares WP_TEST_WALLTIME_MIN.
+    _dr_min="${VASP_DRYRUN_WALLTIME_MIN:-${WP_TEST_WALLTIME_MIN:-30}}"
+    _dr_min="${_dr_min%%.*}"; _dr_min="${_dr_min//[!0-9]/}"; _dr_min="${_dr_min:-30}"
+    (( _dr_min < 1 )) && _dr_min=1
+    _dr_time=$(printf '%02d:%02d:00' $((_dr_min/60)) $((_dr_min%60)))
+    _dr_mem="${VASP_DRYRUN_MEM_MB:-${WP_DRYRUN_MEM_MB:-8000}}"
+    _dr_mem="${_dr_mem//[!0-9]/}"; _dr_mem="${_dr_mem:-8000}"
     mkdir -p .wolfpack                       # so SLURM can place its log there
     job="$PWD/slurm_dryrun.sh"
     {
@@ -87,8 +149,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "#SBATCH --ntasks=1"
         echo "#SBATCH --ntasks-per-node=1"
         echo "#SBATCH --cpus-per-task=1"
-        echo "#SBATCH --mem-per-cpu=8000"
-        echo "#SBATCH --time=00:30:00"
+        echo "#SBATCH --mem-per-cpu=${_dr_mem}"
+        echo "#SBATCH --time=${_dr_time}"
         if [[ -n "${WP_EMAIL:-}" ]]; then
             echo "#SBATCH --mail-user=${WP_EMAIL}"
             echo "#SBATCH --mail-type=ALL"

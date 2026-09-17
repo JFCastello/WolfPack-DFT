@@ -7,7 +7,8 @@
 # cluster looks, so they stop being hard-wired to one machine:
 #
 #   * your notification email,
-#   * which VASP module(s) to load (you pick the version and the modules),
+#   * which VASP to use -- a module OR a locally compiled build on the filesystem
+#     (both are auto-detected and offered in one numbered menu),
 #   * the names of your debug and main partitions,
 #   * cores-per-node and memory-per-node for each,
 #   * the maximum number of cores you may request.
@@ -20,28 +21,43 @@
 # a plain KEY="value" file, sourced by the shell scripts and parsed by
 # vasp-recommend-slurm. Re-run any time to update it.
 #
+# CUSTOM (build-it-yourself) VASP
+#   A locally compiled VASP is a binary on the filesystem, not a module. It is
+#   auto-detected under common roots (override with WP_VASP_BUILD_ROOTS) and shown
+#   in the version menu as "[custom] ...". It needs a base module for runtime libs,
+#   plus either a self-contained wrapper or an extra LD_LIBRARY_PATH. A build can
+#   describe itself with a sidecar "<exe>.wpmeta" (KEY=value), e.g.:
+#       VASP_EXE=/path/vasp_std_w90       VASP_MODULES=compiler mpi vasp/x-runtime
+#       VASP_LD_LIBRARY_PATH=/libA:/libB  VASP_FEATURES=wannier90,hdf5,openmp
+#   vasp-configure reads it; otherwise it asks for the base module + LD path.
+#
 # USAGE
 #   vasp-configure                    # interactive wizard
 #   vasp-configure --non-interactive  # detect + defaults, no prompts
 #   vasp-configure --vasp-modules "aocc/4.2.0 vasp/6.5.0-mpi-zen4-h"
+#   vasp-configure --vasp-std /path/vasp_std_w90 --vasp-modules vasp/6.4.3-runtime
 #   vasp-configure --show             # print the current profile and exit
 #   vasp-configure --edit             # hand-edit the profile in $EDITOR
-#   vasp-configure --verify           # load the modules and check vasp_std
+#   vasp-configure --verify           # load the config and check VASP launches
 #   vasp-configure --help
 #
 # FLAGS (all optional; a provided value pre-fills the wizard / is used as-is
 # in --non-interactive mode):
-#   --email STR            --vasp-modules "STR"     --vasp-std NAME
+#   --email STR            --vasp-modules "STR"     --vasp-std NAME|PATH
+#   --vasp-ld-path "DIR:DIR"  (extra LD_LIBRARY_PATH for a non-RPATH'd build)
 #   --main-partition NAME  --debug-partition NAME
 #   --main-cpus N          --debug-cpus N
 #   --main-mem MB          --debug-mem MB           --max-cores N
+#   --debug-max-cores N       (core cap for the vasp-test benchmark job)
+#   --main-mem-margin F       (fraction of a MAIN node's RAM left free; 0.02 = 98% usable)
+#   --debug-mem-margin F      (same for DEBUG nodes)
 #   --module-cmd {ml,module}
 #   --conf PATH            --non-interactive | -y    --show  --edit  --verify
 #
 # IF A JOB DIES WITH "execve(): vasp_std: No such file or directory"
 #   The configured modules don't put vasp_std on PATH (usually a missing
 #   compiler/MPI prerequisite). No reinstall needed:
-#       vasp-configure --verify   # report whether the modules expose vasp_std
+#       vasp-configure --verify   # report whether VASP launches with your config
 #       vasp-configure            # re-run and set the module line (add the compiler)
 #       vasp-configure --edit     # hand-edit WP_VASP_MODULES
 ###############################################################################
@@ -54,18 +70,31 @@ c_bold=$'\033[1m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_cya=$'\033[36m'; c_rs
 info() { printf '%s\n' "${c_bold}==>${c_rst} $*"; }
 note() { printf '%s\n' "    ${c_cya}$*${c_rst}"; }
 warn() { printf '%s\n' "    ${c_yel}WARN${c_rst} $*" >&2; }
-usage(){ sed -n '2,53p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; exit 0; }
+usage(){ sed -n '2,60p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; exit 0; }
 
 # --------------------------------------------------------------------------- #
 # Profile variables (pre-seeded by flags / detection / prompts)
 # --------------------------------------------------------------------------- #
 WP_EMAIL=""; WP_MODULE_CMD=""; WP_MODULE_PURGE="1"; WP_VASP_MODULES=""
 WP_VASP_STD="vasp_std"; WP_VASP_GAM="vasp_gam"; WP_VASP_NCL="vasp_ncl"
+WP_VASP_LD_LIBRARY_PATH=""        # extra LD_LIBRARY_PATH for non-RPATH'd custom builds
 WP_EXTRA_ENV="export OMP_NUM_THREADS=1;export MKL_NUM_THREADS=1"
 WP_MAIN_PARTITION=""; WP_DEBUG_PARTITION=""
 WP_MAIN_CPUS_PER_NODE=""; WP_DEBUG_CPUS_PER_NODE=""
 WP_MAIN_MEM_PER_NODE_MB=""; WP_DEBUG_MEM_PER_NODE_MB=""
 WP_MAIN_NUMA_CORES=""; WP_MAX_CORES=""
+# Pipeline policy (asked in section 7; not hardcoded in the stage scripts).
+WP_TEST_WALLTIME_MIN=""    # debug/test partition walltime cap (min); VASP runs this minus the analysis margin
+WP_MEM_UTIL_MIN=""         # cluster's minimum memory-utilisation policy (fraction, e.g. 0.80)
+WP_MEM_UTIL=""             # sizing TARGET the tools aim for (= policy + 1% buffer)
+# Memory head-room kept free per node, as a FRACTION of the node's RAM (replaces the
+# old absolute WP_DEBUG_RESERVE_GB): 0.02 => 98% of the node is usable. One value per
+# partition, because a shared debug/login node usually needs more slack than main.
+WP_MAIN_MEM_MARGIN=""      # fraction of a MAIN  node's RAM left free (0.02 = 98% usable)
+WP_DEBUG_MEM_MARGIN=""     # fraction of a DEBUG node's RAM left free (0.05 = 95% usable)
+WP_DEBUG_MAX_CORES=""      # cap on total cores a DEBUG/test job may request
+WP_DEBUG_RESERVE_GB=""     # LEGACY (absolute GB): migrated into WP_DEBUG_MEM_MARGIN
+WP_GW_NODE_FRAC=""         # GW SWEET: grow the GW request to this node fraction (speed vs queue); 0=need-based
 
 # --------------------------------------------------------------------------- #
 # Argument parsing
@@ -76,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --module-cmd)       WP_MODULE_CMD="${2:?}"; shift 2 ;;
         --vasp-modules)     WP_VASP_MODULES="${2:?}"; shift 2 ;;
         --vasp-std)         WP_VASP_STD="${2:?}"; shift 2 ;;
+        --vasp-ld-path)     WP_VASP_LD_LIBRARY_PATH="${2:?}"; shift 2 ;;
         --main-partition)   WP_MAIN_PARTITION="${2:?}"; shift 2 ;;
         --debug-partition)  WP_DEBUG_PARTITION="${2:?}"; shift 2 ;;
         --main-cpus)        WP_MAIN_CPUS_PER_NODE="${2:?}"; shift 2 ;;
@@ -83,6 +113,14 @@ while [[ $# -gt 0 ]]; do
         --main-mem)         WP_MAIN_MEM_PER_NODE_MB="${2:?}"; shift 2 ;;
         --debug-mem)        WP_DEBUG_MEM_PER_NODE_MB="${2:?}"; shift 2 ;;
         --max-cores)        WP_MAX_CORES="${2:?}"; shift 2 ;;
+        --test-walltime)    WP_TEST_WALLTIME_MIN="${2:?}"; shift 2 ;;
+        --mem-util-min)     WP_MEM_UTIL_MIN="${2:?}"; shift 2 ;;
+        --main-mem-margin)  WP_MAIN_MEM_MARGIN="${2:?}"; shift 2 ;;
+        --debug-mem-margin) WP_DEBUG_MEM_MARGIN="${2:?}"; shift 2 ;;
+        --debug-max-cores)  WP_DEBUG_MAX_CORES="${2:?}"; shift 2 ;;
+        # legacy: absolute GB of debug head-room -> converted to a fraction below
+        --debug-reserve)    WP_DEBUG_RESERVE_GB="${2:?}"; shift 2 ;;
+        --gw-node-frac)     WP_GW_NODE_FRAC="${2:?}"; shift 2 ;;
         --conf)             CONF="${2:?}"; shift 2 ;;
         -y|--non-interactive) INTERACTIVE=0; shift ;;
         --show)             SHOW_ONLY=1; shift ;;
@@ -153,16 +191,351 @@ detect_vasp_modules() {
       | awk '{$1=$1; print}' | sort -u
 }
 
-sinfo_partitions() { command -v sinfo >/dev/null 2>&1 && sinfo -h -o "%P" 2>/dev/null; }
+# ----- CUSTOM (build-it-yourself) VASP installs ----------------------------- #
+# A locally compiled VASP is NOT a module: it is a binary on the filesystem that
+# needs (a) a base module for runtime libs (MPI/compiler) and (b) either a
+# self-contained wrapper or some extra LD_LIBRARY_PATH for non-RPATH'd libs.
+# Builds may drop a sidecar "<exe>.wpmeta" (KEY=value) describing how to launch:
+#   VASP_EXE=/path/to/vasp_std_w90     VASP_MODULES=compiler/x mpi/y vasp/z-runtime
+#   VASP_LD_LIBRARY_PATH=/libA:/libB   VASP_FEATURES=wannier90,hdf5,openmp
+
+_meta()    { grep -m1 "^$2=" "$1" 2>/dev/null | cut -d= -f2-; }  # _meta FILE KEY
+_shorten() { case "$1" in "$HOME"/*) printf '~%s\n' "${1#"$HOME"}";; *) printf '%s\n' "$1";; esac; }
+
+# Scan WP_VASP_BUILD_ROOTS (space/colon list) or a default set of common roots
+# for local VASP builds, so they show up in the version menu beside the modules.
+# Output: "<exe-to-invoke><TAB><menu label>". Builds advertised by a .wpmeta are
+# listed first (with their feature tags); bare vasp_std / *_w90 are listed too.
+detect_custom_vasp() {
+    local roots r meta exe ver feats dd
+    if [[ -n "${WP_VASP_BUILD_ROOTS:-}" ]]; then roots="${WP_VASP_BUILD_ROOTS//:/ }"
+    else roots="$HOME/Vasp $HOME/vasp $HOME/VASP $HOME/.local $HOME/opt $HOME/builds $HOME/src"; fi
+    local -A seen=()
+    for r in $roots; do                                  # (1) .wpmeta-described builds
+        [[ -d "$r" ]] || continue
+        while IFS= read -r meta; do
+            exe="$(_meta "$meta" VASP_EXE)"; [[ -z "$exe" ]] && exe="${meta%.wpmeta}"
+            [[ -e "$exe" && -z "${seen[$exe]:-}" ]] || continue
+            seen[$exe]=1
+            feats="$(_meta "$meta" VASP_FEATURES)"
+            ver="$(printf '%s' "$exe" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+            printf '%s\t[custom] vasp %s%s -> %s\n' "$exe" "${ver:-?}" \
+                   "${feats:+  ($feats)}" "$(_shorten "$exe")"
+        done < <(find "$r" -maxdepth 6 -name '*.wpmeta' 2>/dev/null)
+    done
+    for r in $roots; do                                  # (2) bare binaries / wrappers
+        [[ -d "$r" ]] || continue
+        while IFS= read -r exe; do
+            [[ -z "${seen[$exe]:-}" ]] || continue
+            dd="$(dirname "$exe")"
+            [[ -f "${exe}.wpmeta" || -f "${dd}/vasp_std.wpmeta" ]] && continue
+            # prefer a wrapper: skip raw vasp_std if a *_w90 sits in the same dir
+            [[ "$(basename "$exe")" == vasp_std ]] && compgen -G "${dd}/vasp_*_w90" >/dev/null 2>&1 && continue
+            seen[$exe]=1
+            ver="$(printf '%s' "$exe" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+            printf '%s\t[custom] vasp %s -> %s\n' "$exe" "${ver:-?}" "$(_shorten "$exe")"
+        done < <(find "$r" -maxdepth 6 -type f -perm -u+x \
+                      \( -name 'vasp_*_w90' -o -name 'vasp_std' \) 2>/dev/null)
+    done
+}
+
+# Configure a chosen custom build: read its .wpmeta if present (VASP_EXE,
+# VASP_MODULES, VASP_LD_LIBRARY_PATH, VASP_FEATURES), else ask for the base
+# module(s) and any extra LD_LIBRARY_PATH. Sets WP_VASP_STD / WP_VASP_MODULES /
+# WP_VASP_LD_LIBRARY_PATH.
+configure_custom() {
+    local exe="$1" meta="" v_exe="" v_mods="" v_ld="" v_feats="" d m
+    d="$(dirname "$exe")"
+    for m in "${exe}.wpmeta" "${d}/$(basename "$exe").wpmeta" "${d}/vasp_std.wpmeta"; do
+        [[ -f "$m" ]] && { meta="$m"; break; }
+    done
+    if [[ -n "$meta" ]]; then
+        v_exe="$(_meta "$meta" VASP_EXE)"
+        v_mods="$(_meta "$meta" VASP_MODULES)"
+        v_ld="$(_meta "$meta" VASP_LD_LIBRARY_PATH)"
+        v_feats="$(_meta "$meta" VASP_FEATURES)"
+        note "read $(_shorten "$meta")${v_feats:+   (features: $v_feats)}"
+    fi
+    WP_VASP_STD="${v_exe:-$exe}"
+    if [[ -n "$v_mods" ]]; then
+        WP_VASP_MODULES="$v_mods"
+    else
+        note "A local build needs a base module for its runtime libs (MPI + compiler)."
+        ask WP_VASP_MODULES "Base module(s) to load (blank if none)" ""
+    fi
+    if [[ -n "$v_ld" ]]; then
+        WP_VASP_LD_LIBRARY_PATH="$v_ld"
+    elif [[ -z "$meta" ]]; then
+        note "If the binary is NOT RPATH'd and has no wrapper, list extra lib dirs"
+        note "for LD_LIBRARY_PATH (colon-separated). Blank if it uses a wrapper."
+        ask WP_VASP_LD_LIBRARY_PATH "Extra LD_LIBRARY_PATH (blank if none)" ""
+    fi
+    note "custom VASP exe : $WP_VASP_STD"
+    note "  base modules  : ${WP_VASP_MODULES:-(none)}"
+    [[ -n "$WP_VASP_LD_LIBRARY_PATH" ]] && note "  extra LD path : $WP_VASP_LD_LIBRARY_PATH"
+}
+
+# Verify a custom build: load the base modules + extra LD path, resolve the real
+# ELF (follow a wrapper's 'exec ... vasp...'), and check every shared library
+# resolves. 0=ok  1=missing libs  2=cannot test.
+verify_custom_libs() {
+    local exe="$1" real="$1"
+    [[ -e "$exe" ]] || return 2
+    if head -c2 "$exe" 2>/dev/null | grep -q '#!'; then          # a wrapper script
+        real="$(grep -oE 'exec[[:space:]]+\S*vasp[^[:space:]]*' "$exe" 2>/dev/null | awk '{print $2}' | head -1)"
+        [[ -n "$real" && -e "$real" ]] || real="$exe"
+    fi
+    command -v ldd >/dev/null 2>&1 || return 2
+    ( run_module purge >/dev/null 2>&1 || true
+      if [[ -n "$WP_VASP_MODULES" ]]; then
+          # shellcheck disable=SC2086
+          if [[ "$WP_MODULE_CMD" == module ]]; then module load $WP_VASP_MODULES >/dev/null 2>&1 || true
+          else ml $WP_VASP_MODULES >/dev/null 2>&1 || true; fi
+      fi
+      [[ -n "$WP_VASP_LD_LIBRARY_PATH" ]] && export LD_LIBRARY_PATH="$WP_VASP_LD_LIBRARY_PATH:${LD_LIBRARY_PATH:-}"
+      ! ldd "$real" 2>/dev/null | grep -qi 'not found' )
+}
+
+# --------------------------------------------------------------------------- #
+# SLURM INTROSPECTION
+# --------------------------------------------------------------------------- #
+# Everything here asks SLURM instead of guessing. Three rules:
+#
+#   1. NOTHING is invented. A detector that cannot determine a value prints
+#      nothing, and the wizard asks the user. A wrong guess about a cluster does
+#      not fail fast -- SLURM accepts the job and the sizing is silently wrong --
+#      so "no answer" is strictly better than "a plausible answer".
+#
+#   2. The MOST RESTRICTIVE limit wins. A job must satisfy the partition AND the
+#      QOS AND the user's association simultaneously; any one of them can reject
+#      it. Detecting only one (the old code read the association and ignored the
+#      QOS entirely) means the cap looks larger than it is.
+#
+#   3. Every detected number carries its PROVENANCE, so the summary can say
+#      which SLURM object imposed it and the user can check it.
+#
+# _WP_WHY collects "<value> <- <source>" notes for the last detector that ran.
+# Provenance is written to a FILE, not a shell variable: detectors are called as
+# $(detect_x), which runs them in a SUBSHELL, and a variable set there never
+# reaches the caller. The file survives.
+_WP_WHY_FILE="${TMPDIR:-/tmp}/.wolfpack-detect.$$"
+_have(){ command -v "$1" >/dev/null 2>&1; }
+_why_reset(){ : > "$_WP_WHY_FILE"; }
+_why_add(){ printf '    %s\n' "$1" >> "$_WP_WHY_FILE"; }
+wp_why(){ [[ -s "$_WP_WHY_FILE" ]] && cat "$_WP_WHY_FILE"; }
+trap 'rm -f "$_WP_WHY_FILE"' EXIT
+
+# --- time: SLURM accepts several spellings; normalise all to MINUTES -------- #
+# "infinite"/"UNLIMITED"/"n/a" -> empty (no cap). Formats per sbatch(1):
+#   minutes | minutes:seconds | hours:minutes:seconds
+#   days-hours | days-hours:minutes | days-hours:minutes:seconds
+_slurm_time_to_min(){
+    local t="${1//[[:space:]]/}" d=0 rest
+    [[ -z $t ]] && return 0
+    case "${t,,}" in infinite|unlimited|n/a|none|-) return 0 ;; esac
+    if [[ $t == *-* ]]; then d="${t%%-*}"; rest="${t#*-}"; else rest="$t"; fi
+    [[ $d =~ ^[0-9]+$ ]] || d=0
+    awk -v d="$d" -v r="$rest" 'BEGIN{
+        n = split(r, a, ":")
+        if (n == 3)      m = a[1]*60 + a[2] + (a[3] > 0 ? 1 : 0)   # HH:MM:SS
+        else if (n == 2) m = a[1] + (a[2] > 0 ? 1 : 0)             # MM:SS
+        else if (n == 1) m = (r == "" ? 0 : a[1])                  # MM  (or D- only)
+        else             m = 0
+        total = d*1440 + m
+        if (total > 0) printf "%d", total }'
+}
+
+# --- TRES strings: "cpu=120,mem=500G,node=4" -> one field, memory in MB ----- #
+_tres_field(){
+    awk -v s="$1" -v k="$2" 'BEGIN{
+        n = split(s, parts, ",")
+        for (i = 1; i <= n; i++) {
+            if (split(parts[i], kv, "=") != 2) continue
+            if (tolower(kv[1]) != tolower(k)) continue
+            v = kv[2]
+            if (tolower(k) == "mem") {
+                u = toupper(substr(v, length(v), 1))
+                num = v + 0
+                if      (u == "T") num *= 1024*1024
+                else if (u == "G") num *= 1024
+                else if (u == "K") num /= 1024
+                printf "%d", num
+            } else printf "%d", v + 0
+            exit } }'
+}
+
+# --- scontrol show partition: one key ("MaxTime", "MaxNodes", ...) ---------- #
+# scontrol prints space-separated Key=Value pairs across several lines.
+_part_kv(){
+    _have scontrol || return 0
+    scontrol show partition "$1" 2>/dev/null \
+      | tr ' ' '\n' | awk -F= -v k="$2" '$1==k && NF>=2 {print $2; exit}'
+}
+
+# --- a partition's node hardware, read from the NODES themselves ------------ #
+# sinfo prints ONE LINE PER NODE-GROUP, so a heterogeneous partition yields
+# several. Sizing to the LARGEST produces jobs that will not fit the smallest,
+# and SLURM will simply never schedule them there -- so the safe common
+# denominator is the MINIMUM, and a spread is reported rather than hidden.
+_node_field(){   # _node_field <partition> <sinfo-format> -> "min max count"
+    _have sinfo || return 0
+    sinfo -h -p "$1" -o "$2" 2>/dev/null | grep -oE '[0-9]+' | sort -n \
+      | awk 'NR==1{min=$1} {max=$1; n++} END{ if(n) printf "%d %d %d", min, max, n }'
+}
+
+# --- the QOS that apply to this user on this partition ---------------------- #
+# The QOS that actually bind on THIS partition.
+#
+# A partition that declares QoS=<name> enforces that one, and it is the only one
+# that applies there. The user's association also lists every QOS they MAY use
+# elsewhere -- folding those in made 'main' inherit the debug queue's 20-minute
+# wall and 96-core cap, because the most-restrictive rule then reached across
+# partitions that have nothing to do with each other. So: the partition's own
+# QoS wins outright, and the association list is consulted ONLY when the
+# partition declares none.
+_qos_names(){
+    local part="$1" out
+    out="$(_part_kv "$part" QoS)"
+    case "${out,,}" in n/a|none|"") out="" ;; esac
+    if [[ -z $out ]] && _have sacctmgr; then
+        out="$(sacctmgr -nP show assoc user="$USER" format=QOS 2>/dev/null \
+               | tr ',' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+    fi
+    printf '%s\n' $out | sed '/^$/d' | sort -u
+}
+_qos_kv(){   # _qos_kv <qos> <format-field>
+    _have sacctmgr || return 0
+    sacctmgr -nP show qos "$1" format="$2" 2>/dev/null | head -1
+}
+
+# --- the user's association limits ----------------------------------------- #
+_assoc_kv(){ _have sacctmgr || return 0
+    sacctmgr -nP show assoc user="$USER" format="$1" 2>/dev/null | sed '/^$/d' | head -1; }
+
+# --------------------------------------------------------------------------- #
+# DETECTORS  (each prints ONE number, or nothing; _WP_WHY holds the provenance)
+# --------------------------------------------------------------------------- #
+
+# WALLTIME cap for a partition, in minutes. THE limit that was never detected:
+# vasp-dry-run/vasp-test hardcoded 30 min, so a site capping debug at 20 had its
+# jobs rejected with nothing in the toolkit able to notice.
+detect_time_cap_min(){
+    local part="$1" best="" v q
+    _why_reset
+    v="$(_slurm_time_to_min "$(_part_kv "$part" MaxTime)")"
+    [[ -n $v ]] && { _why_add "${v} min <- partition '$part' MaxTime"; best="$v"; }
+    v="$(_slurm_time_to_min "$(_assoc_kv MaxWall)")"
+    [[ -n $v ]] && { _why_add "${v} min <- your association MaxWall"
+                     [[ -z $best || $v -lt $best ]] && best="$v"; }
+    while read -r q; do
+        [[ -z $q ]] && continue
+        v="$(_slurm_time_to_min "$(_qos_kv "$q" MaxWall)")"
+        [[ -n $v ]] && { _why_add "${v} min <- QOS '$q' MaxWall"
+                         [[ -z $best || $v -lt $best ]] && best="$v"; }
+    done < <(_qos_names "$part")
+    [[ -n $best ]] && printf '%d' "$best"
+}
+
+# Total CPUs one job may request. Partition size, association and QOS all bind.
+detect_core_cap(){
+    local part="$1" best="" v t q nodes cpn
+    # Resolve cores/node FIRST: that detector clears the provenance log for its
+    # own use, so calling it later would erase the notes collected here.
+    cpn="$(detect_cpus_per_node "$part")"
+    _why_reset
+    for t in "$(_assoc_kv GrpTRES)" "$(_assoc_kv MaxTRES)"; do
+        v="$(_tres_field "$t" cpu)"
+        [[ -n $v && $v -gt 0 ]] && { _why_add "${v} cpu <- your association TRES"
+                                     [[ -z $best || $v -lt $best ]] && best="$v"; }
+    done
+    while read -r q; do
+        [[ -z $q ]] && continue
+        for t in "$(_qos_kv "$q" MaxTRESPU)" "$(_qos_kv "$q" MaxTRES)" "$(_qos_kv "$q" GrpTRES)"; do
+            v="$(_tres_field "$t" cpu)"
+            [[ -n $v && $v -gt 0 ]] && { _why_add "${v} cpu <- QOS '$q'"
+                                         [[ -z $best || $v -lt $best ]] && best="$v"; }
+        done
+    done < <(_qos_names "$part")
+    # A partition's own ceiling: MaxNodes x cores-per-node, else its total CPUs.
+    nodes="$(_part_kv "$part" MaxNodes)"
+    if [[ $nodes =~ ^[0-9]+$ && $cpn =~ ^[0-9]+$ ]]; then
+        v=$(( nodes * cpn ))
+        _why_add "${v} cpu <- partition MaxNodes(${nodes}) x ${cpn} cores/node"
+        [[ -z $best || $v -lt $best ]] && best="$v"
+    else
+        v="$(_part_kv "$part" TotalCPUs)"
+        [[ $v =~ ^[0-9]+$ ]] && { _why_add "${v} cpu <- partition TotalCPUs"
+                                  [[ -z $best || $v -lt $best ]] && best="$v"; }
+    fi
+    [[ -n $best ]] && printf '%d' "$best"
+}
+
+# Cores per node. MINIMUM over the partition's nodes -- see _node_field.
+detect_cpus_per_node(){
+    _why_reset
+    local part="$1" r; r="$(_node_field "$part" "%c")" || return 0
+    [[ -z $r ]] && return 0
+    set -- $r
+    _why_add "$1 cores/node <- sinfo -p '$part' (min over nodes)"
+    (( $2 != $1 )) && _why_add "heterogeneous: nodes range $1..$2 cores; using the MINIMUM so a job fits any of them"
+    printf '%d' "$1"
+}
+
+# RAM per node (MB), likewise the minimum, and clamped by MaxMemPerNode.
+detect_mem_per_node(){
+    _why_reset
+    local part="$1" r v; r="$(_node_field "$part" "%m")" || return 0
+    [[ -z $r ]] && return 0
+    set -- $r
+    local best="$1"
+    _why_add "${best} MB/node <- sinfo -p '$part' RealMemory (min over nodes)"
+    (( $2 != best )) && _why_add "heterogeneous: nodes range $1..$2 MB; using the MINIMUM"
+    v="$(_part_kv "$part" MaxMemPerNode)"
+    if [[ $v =~ ^[0-9]+$ ]] && (( v > 0 && v < best )); then
+        _why_add "${v} MB <- partition MaxMemPerNode (lower than the hardware)"; best="$v"
+    fi
+    printf '%d' "$best"
+}
+
+# Cores per NUMA domain: KPAR groups should not straddle one. Read from a real
+# node in the partition rather than from this login node, whose topology differs.
+detect_numa_cores(){
+    _why_reset
+    local part="$1" node cps
+    _have sinfo && _have scontrol || return 0
+    node="$(sinfo -h -p "$part" -o "%N" 2>/dev/null | head -1)"
+    [[ -z $node ]] && return 0
+    node="$(scontrol show hostnames "$node" 2>/dev/null | head -1)"
+    [[ -z $node ]] && return 0
+    cps="$(scontrol show node "$node" 2>/dev/null | tr ' ' '\n' \
+           | awk -F= '$1=="CoresPerSocket" && NF>=2 {print $2; exit}')"
+    [[ $cps =~ ^[0-9]+$ ]] && (( cps > 0 )) || return 0
+    _why_add "${cps} cores/socket <- scontrol show node ${node}"
+    printf '%d' "$cps"
+}
+
+# Max nodes per job, if the partition or a QOS says so.
+detect_node_cap(){
+    local part="$1" best="" v q
+    _why_reset
+    v="$(_part_kv "$part" MaxNodes)"
+    [[ $v =~ ^[0-9]+$ ]] && { _why_add "${v} nodes <- partition MaxNodes"; best="$v"; }
+    while read -r q; do
+        [[ -z $q ]] && continue
+        v="$(_tres_field "$(_qos_kv "$q" MaxTRESPU)" node)"
+        [[ -n $v && $v -gt 0 ]] && { _why_add "${v} nodes <- QOS '$q'"
+                                     [[ -z $best || $v -lt $best ]] && best="$v"; }
+    done < <(_qos_names "$part")
+    [[ -n $best ]] && printf '%d' "$best"
+}
+
+sinfo_partitions() { _have sinfo && sinfo -h -o "%P" 2>/dev/null; }
 default_partition() { sinfo_partitions | tr ' ' '\n' | grep '\*' | tr -d '* ' | head -1; }
 guess_debug_part()  { sinfo_partitions | tr ' *' '\n\n' | grep -iE 'debug|devel|test|short' | head -1; }
-cpus_of()  { command -v sinfo >/dev/null 2>&1 && sinfo -h -p "$1" -o "%c" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1; }
-mem_of()   { command -v sinfo >/dev/null 2>&1 && sinfo -h -p "$1" -o "%m" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1; }
-detect_max_cores() {
-    command -v sacctmgr >/dev/null 2>&1 || return 0
-    sacctmgr -nP show assoc user="$USER" format=GrpTRES,MaxTRES 2>/dev/null \
-      | tr '|,' '\n\n' | grep -iE '^cpu=' | grep -oE '[0-9]+' | sort -n | tail -1
-}
+# Back-compat names used by the wizard body below.
+cpus_of(){ detect_cpus_per_node "$1"; }
+mem_of(){  detect_mem_per_node  "$1"; }
+detect_max_cores(){ detect_core_cap "${1:-$WP_MAIN_PARTITION}"; }
 
 # --------------------------------------------------------------------------- #
 # --show : print the current profile and exit
@@ -198,6 +571,21 @@ if [[ $VERIFY_ONLY -eq 1 ]]; then
         || { warn "no profile at $CONF — run 'vasp-configure' first."; exit 1; }
     case "$WP_MODULE_CMD" in ml|module) ;; *) WP_MODULE_CMD=ml ;; esac
     exe="${WP_VASP_STD:-vasp_std}"
+    if [[ "$exe" == */* ]]; then                      # custom build: verify shared libs
+        info "Verifying CUSTOM VASP build from $CONF"
+        echo "    exe          : $exe"
+        echo "    base modules : ${WP_VASP_MODULES:-(none)}  [$WP_MODULE_CMD]"
+        [[ -n "${WP_VASP_LD_LIBRARY_PATH:-}" ]] && echo "    extra LD path: $WP_VASP_LD_LIBRARY_PATH"
+        verify_custom_libs "$exe"; rc=$?
+        case "$rc" in
+            0) info "${c_grn}OK${c_rst}: every shared library of '$exe' resolves."; exit 0 ;;
+            2) warn "could not test here (need ldd + the module system on a login node)."; exit 2 ;;
+            *) warn "FAILED: some shared libraries are 'not found' for '$exe'."
+               warn "Add the missing lib dirs:  vasp-configure --vasp-ld-path \"/dirA:/dirB\""
+               warn "or point WP_VASP_STD at a wrapper that sets LD_LIBRARY_PATH itself."
+               exit 1 ;;
+        esac
+    fi
     info "Verifying VASP modules from $CONF"
     echo "    modules : ${WP_VASP_MODULES:-(none)}  [$WP_MODULE_CMD]"
     echo "    exe     : $exe"
@@ -230,48 +618,63 @@ info "Notification email (used as #SBATCH --mail-user in emitted scripts)"
 ask WP_EMAIL "Email (blank = no mail line)" "$WP_EMAIL"
 echo
 
-# ---- 2. VASP modules ----
-# You pick a VASP module; if your cluster needs a compiler/MPI loaded first,
-# you give it SEPARATELY and it is prepended (never replaces the VASP module).
-info "VASP modules to load"
-if [[ -z "$WP_VASP_MODULES" && $INTERACTIVE -eq 1 ]] && have_modules; then
-    note "module command: $WP_MODULE_CMD"
-    mapfile -t VASP_CANDS < <(detect_vasp_modules)
-    if [[ ${#VASP_CANDS[@]} -gt 0 ]]; then
-        echo "    Detected VASP modules:"
-        i=1; for c in "${VASP_CANDS[@]}"; do printf "      %2d) %s\n" "$i" "$c"; i=$((i+1)); done
+# ---- 2. VASP version (module OR local build) ----
+# Pick a VASP module, OR a locally compiled build found on the filesystem (both
+# appear in one numbered menu). If a module needs a compiler/MPI loaded first you
+# give it SEPARATELY and it is prepended. A custom build instead needs a base
+# module for runtime libs + (a wrapper or an extra LD path), captured here.
+info "VASP version to use"
+if [[ -z "$WP_VASP_MODULES" && $INTERACTIVE -eq 1 ]]; then
+    have_modules && note "module command: $WP_MODULE_CMD"
+    mapfile -t VASP_CANDS   < <(have_modules && detect_vasp_modules)
+    mapfile -t CUSTOM_CANDS < <(detect_custom_vasp)
+    n_mod=${#VASP_CANDS[@]}; n_cus=${#CUSTOM_CANDS[@]}
+    if (( n_mod + n_cus > 0 )); then
+        echo "    Detected VASP versions on this system:"
+        i=1
+        for c in "${VASP_CANDS[@]}";   do printf "      %2d) %s\n" "$i" "$c"; i=$((i+1)); done
+        for c in "${CUSTOM_CANDS[@]}"; do printf "      %2d) %s\n" "$i" "${c#*$'\t'}"; i=$((i+1)); done
         echo "       m) type the whole module line manually"
         echo "       s) skip (no module)"
         read -r -p "    Choose [1]: " pick || true; pick="${pick:-1}"
-        case "$pick" in
-            s|S) WP_VASP_MODULES="" ;;
-            m|M) ask WP_VASP_MODULES "Whole module line to load (space-separated)" "" ;;
-            *)   if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick>=1 && pick<=${#VASP_CANDS[@]} )); then
-                     chosen="${VASP_CANDS[pick-1]}"
-                     note "Many clusters require a compiler/MPI to be loaded BEFORE the VASP"
-                     note "module (e.g. aocc/4.2.0, gcc/13, intel/2024). If yours does, enter"
-                     note "it here -- it is loaded first, then $chosen. Leave blank if none."
-                     ask PREREQ "Module(s) to load before $chosen (blank if none)" ""
-                     WP_VASP_MODULES="${PREREQ:+$PREREQ }$chosen"
-                     note "module line -> $WP_VASP_MODULES"
-                 else
-                     warn "invalid choice; type the module line below."
-                     ask WP_VASP_MODULES "Whole module line to load (space-separated)" ""
-                 fi ;;
-        esac
+        if [[ "$pick" =~ ^[Ss]$ ]]; then
+            WP_VASP_MODULES=""
+        elif [[ "$pick" =~ ^[Mm]$ ]]; then
+            ask WP_VASP_MODULES "Whole module line to load (space-separated)" ""
+        elif [[ "$pick" =~ ^[0-9]+$ ]] && (( pick>=1 && pick<=n_mod )); then
+            chosen="${VASP_CANDS[pick-1]}"
+            note "Many clusters require a compiler/MPI loaded BEFORE the VASP module"
+            note "(e.g. aocc/4.2.0, gcc/13, intel/2024). Enter it (loaded first), or blank."
+            ask PREREQ "Module(s) to load before $chosen (blank if none)" ""
+            WP_VASP_MODULES="${PREREQ:+$PREREQ }$chosen"
+            note "module line -> $WP_VASP_MODULES"
+        elif [[ "$pick" =~ ^[0-9]+$ ]] && (( pick>n_mod && pick<=n_mod+n_cus )); then
+            entry="${CUSTOM_CANDS[pick-n_mod-1]}"
+            configure_custom "${entry%%$'\t'*}"
+        else
+            warn "invalid choice; type the module line below."
+            ask WP_VASP_MODULES "Whole module line to load (space-separated)" ""
+        fi
     else
-        warn "no VASP module detected via 'module avail/spider' — type it below."
+        warn "no VASP module or local build detected -- type the module line below"
+        warn "(or set WP_VASP_BUILD_ROOTS to your build dir and re-run to auto-find it)."
         ask WP_VASP_MODULES "Whole module line to load for VASP (space-separated)" ""
     fi
-elif [[ -z "$WP_VASP_MODULES" && $INTERACTIVE -eq 1 ]]; then
-    warn "no Lmod/Environment-Modules here. If your cluster loads VASP another way,"
-    warn "type the module line below (or leave blank to skip)."
-    ask WP_VASP_MODULES "Whole module line to load for VASP (space-separated)" ""
 fi
-ask WP_VASP_STD "VASP std executable name" "$WP_VASP_STD"
+ask WP_VASP_STD "VASP std executable (name on PATH, or full path to a custom binary/wrapper)" "$WP_VASP_STD"
 
 # Informational check -- never blocks, never loops.
-if [[ -n "$WP_VASP_MODULES" ]] && have_modules; then
+if [[ "$WP_VASP_STD" == */* ]]; then                 # custom build: check its libs
+    if verify_custom_libs "$WP_VASP_STD"; then
+        note "checked: every shared library of '$WP_VASP_STD' resolves."
+    else
+        case $? in
+            2) note "skipped lib check (no ldd / module system on this host)." ;;
+            *) warn "some shared libraries are 'not found' for '$WP_VASP_STD' --"
+               warn "add their dirs with --vasp-ld-path, or point at a wrapper. (--verify to retest)" ;;
+        esac
+    fi
+elif [[ -n "$WP_VASP_MODULES" ]] && have_modules; then
     if verify_modules "$WP_VASP_MODULES" "$WP_VASP_STD"; then
         note "checked: '$WP_VASP_STD' is on PATH after loading these modules."
     else
@@ -297,10 +700,19 @@ echo
 
 # ---- 4. per-partition node specs ----
 info "Node resources (cores / memory per node)"
-: "${WP_MAIN_CPUS_PER_NODE:=$(cpus_of "$WP_MAIN_PARTITION")}";   : "${WP_MAIN_CPUS_PER_NODE:=128}"
-: "${WP_DEBUG_CPUS_PER_NODE:=$(cpus_of "$WP_DEBUG_PARTITION")}"; : "${WP_DEBUG_CPUS_PER_NODE:=$WP_MAIN_CPUS_PER_NODE}"
-: "${WP_MAIN_MEM_PER_NODE_MB:=$(mem_of "$WP_MAIN_PARTITION")}";  : "${WP_MAIN_MEM_PER_NODE_MB:=$(( WP_MAIN_CPUS_PER_NODE * 2000 ))}"
-: "${WP_DEBUG_MEM_PER_NODE_MB:=$(mem_of "$WP_DEBUG_PARTITION")}";: "${WP_DEBUG_MEM_PER_NODE_MB:=$WP_MAIN_MEM_PER_NODE_MB}"
+# No invented numbers. A detector that cannot answer leaves the value empty and
+# `ask` prompts with a blank default, so the user supplies the fact rather than
+# inheriting someone else's hardware.
+_probe(){ local __v="$1" __part="$2" __fn="$3"
+    [[ -n "${!__v}" ]] && return 0
+    local got; got="$($__fn "$__part")"
+    [[ -n $got ]] && { printf -v "$__v" '%s' "$got"; note "  ${__v}=${got}"; wp_why; }
+}
+_probe WP_MAIN_CPUS_PER_NODE    "$WP_MAIN_PARTITION"  detect_cpus_per_node
+_probe WP_MAIN_MEM_PER_NODE_MB  "$WP_MAIN_PARTITION"  detect_mem_per_node
+_probe WP_DEBUG_CPUS_PER_NODE   "$WP_DEBUG_PARTITION" detect_cpus_per_node
+_probe WP_DEBUG_MEM_PER_NODE_MB "$WP_DEBUG_PARTITION" detect_mem_per_node
+_probe WP_MAIN_NUMA_CORES       "$WP_MAIN_PARTITION"  detect_numa_cores
 ask WP_MAIN_CPUS_PER_NODE    "MAIN  cores per node"        "$WP_MAIN_CPUS_PER_NODE"
 ask WP_MAIN_MEM_PER_NODE_MB  "MAIN  memory per node (MB)"  "$WP_MAIN_MEM_PER_NODE_MB"
 ask WP_DEBUG_CPUS_PER_NODE   "DEBUG cores per node"        "$WP_DEBUG_CPUS_PER_NODE"
@@ -309,14 +721,76 @@ echo
 
 # ---- 5. max cores ----
 info "Maximum cores you may request (account / QOS cap)"
-detected_max="$(detect_max_cores)"
-if [[ -n "$detected_max" ]]; then note "detected account CPU cap: $detected_max"
-else note "could not detect a cap automatically — defaulting to one MAIN node."; fi
-: "${WP_MAX_CORES:=${detected_max:-$WP_MAIN_CPUS_PER_NODE}}"
+detected_max="$(detect_core_cap "$WP_MAIN_PARTITION")"
+if [[ -n "$detected_max" ]]; then note "  detected cap: ${detected_max} cores"; wp_why
+else note "  no cap found in SLURM -- please supply one."; fi
+: "${WP_MAX_CORES:=$detected_max}"
 ask WP_MAX_CORES "Max total cores per job" "$WP_MAX_CORES"
 echo
 
+# ---- 5b. DEBUG/test job cap ----
+# The test benchmark runs on the DEBUG configuration.  When the DEBUG partition IS
+# the MAIN one (a cluster with no separate debug queue), this cap is what still keeps
+# the test job small -- vasp-test always honours the DEBUG numbers, whatever partition
+# they name.
+info "DEBUG/test job limits (used by vasp-test even if DEBUG == MAIN partition)"
+if [[ "$WP_DEBUG_PARTITION" == "$WP_MAIN_PARTITION" ]]; then
+    note "DEBUG partition == MAIN ('$WP_MAIN_PARTITION'): tests will run there, but"
+    note "vasp-test will still obey the DEBUG core cap and DEBUG memory margin below."
+fi
+_dbg_cap="$(detect_core_cap "$WP_DEBUG_PARTITION")"
+if [[ -n $_dbg_cap ]]; then note "  detected DEBUG cap: ${_dbg_cap} cores"; wp_why; fi
+: "${WP_DEBUG_MAX_CORES:=$_dbg_cap}"
+ask WP_DEBUG_MAX_CORES "Max total cores for a DEBUG/test job" "$WP_DEBUG_MAX_CORES"
+echo
+
+# ---- 6b. pipeline policy (was hardcoded in the stage scripts) ----
+info "Pipeline policy (walltime, memory utilisation, magic spike, memory margins)"
+# THE limit that was never detected. vasp-dry-run/vasp-test hardcoded 30 minutes,
+# so a site capping its debug queue at 20 had every probe rejected by SLURM with
+# nothing in the toolkit able to see why. Read it from the partition, the QOS and
+# the association, and take the smallest.
+_wall="$(detect_time_cap_min "$WP_DEBUG_PARTITION")"
+if [[ -n $_wall ]]; then
+    note "  detected DEBUG walltime cap: ${_wall} min"; wp_why
+    # Sit just under the cap: a job asking for exactly MaxTime is accepted, but
+    # leaving a minute of slack avoids losing the in-job analysis step to a
+    # kill at the boundary.
+    (( _wall > 5 )) && _wall=$(( _wall - 1 ))
+fi
+: "${WP_TEST_WALLTIME_MIN:=$_wall}"
+: "${WP_MEM_UTIL_MIN:=0.80}"
+: "${WP_GW_NODE_FRAC:=0.67}"
+# Memory margins are FRACTIONS of a node's RAM left free (0.02 => 98% usable).
+# Migrate a legacy absolute WP_DEBUG_RESERVE_GB into the debug fraction.
+if [[ -z "$WP_DEBUG_MEM_MARGIN" && -n "$WP_DEBUG_RESERVE_GB" && "$WP_DEBUG_MEM_PER_NODE_MB" -gt 0 ]]; then
+    WP_DEBUG_MEM_MARGIN="$(awk -v g="$WP_DEBUG_RESERVE_GB" -v m="$WP_DEBUG_MEM_PER_NODE_MB" \
+        'BEGIN{ f=(g*1024.0)/m; if(f<0)f=0; if(f>0.5)f=0.5; printf "%.3f", f }')"
+    note "converted legacy debug reserve ${WP_DEBUG_RESERVE_GB} GB -> margin ${WP_DEBUG_MEM_MARGIN}"
+fi
+: "${WP_MAIN_MEM_MARGIN:=0.02}"
+: "${WP_DEBUG_MEM_MARGIN:=0.05}"
+ask WP_TEST_WALLTIME_MIN  "DEBUG/test walltime cap (min) -- VASP runs this minus the analysis margin" "$WP_TEST_WALLTIME_MIN"
+ask WP_MEM_UTIL_MIN       "Minimum memory-utilisation policy (fraction, e.g. 0.80)"                    "$WP_MEM_UTIL_MIN"
+ask WP_MAIN_MEM_MARGIN    "MAIN  node memory margin (fraction left FREE; 0.02 = 98% usable)"           "$WP_MAIN_MEM_MARGIN"
+ask WP_DEBUG_MEM_MARGIN   "DEBUG node memory margin (fraction left FREE; 0.05 = 95% usable)"           "$WP_DEBUG_MEM_MARGIN"
+ask WP_GW_NODE_FRAC       "GW SWEET node fraction -- grow the GW request to this share of a node (speed) leaving the rest for backfill; 0 = need-based" "$WP_GW_NODE_FRAC"
+# Clamp the margins into a sane range so a typo cannot wipe out a node's memory.
+for _mv in WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN; do
+    printf -v "$_mv" '%s' "$(awk -v x="${!_mv}" 'BEGIN{ x=x+0; if(x<0)x=0; if(x>0.5)x=0.5; printf "%.3f", x }')"
+done
+# Tools aim 1% ABOVE the policy floor so a slightly-low real usage still clears it.
+WP_MEM_UTIL="$(awk -v m="$WP_MEM_UTIL_MIN" 'BEGIN{t=m+0.01; if(t>0.95)t=0.95; printf "%.2f", t}')"
+echo
+
 # ---- 6. write the profile ----
+# A non-RPATH'd custom build needs its extra lib dirs on LD_LIBRARY_PATH at run
+# time. Fold that into WP_EXTRA_ENV (which every job script already emits AFTER
+# the module load) so no other script needs to change; WP_EXTRA_ENV is written
+# single-quoted below so the literal $LD_LIBRARY_PATH survives 'source'.
+if [[ -n "$WP_VASP_LD_LIBRARY_PATH" ]]; then
+    WP_EXTRA_ENV='export LD_LIBRARY_PATH='"$WP_VASP_LD_LIBRARY_PATH"':$LD_LIBRARY_PATH;'"$WP_EXTRA_ENV"
+fi
 mkdir -p "$(dirname "$CONF")"
 {
     echo "# WolfPack-DFT cluster profile -- generated by vasp-configure on $(date -Iseconds)"
@@ -324,12 +798,17 @@ mkdir -p "$(dirname "$CONF")"
     echo "# Re-run 'vasp-configure' to regenerate, or edit by hand (KEY=\"value\")."
     echo
     for k in WP_EMAIL WP_MODULE_CMD WP_MODULE_PURGE WP_VASP_MODULES \
-             WP_VASP_STD WP_VASP_GAM WP_VASP_NCL WP_EXTRA_ENV \
+             WP_VASP_STD WP_VASP_GAM WP_VASP_NCL WP_VASP_LD_LIBRARY_PATH WP_EXTRA_ENV \
              WP_MAIN_PARTITION WP_DEBUG_PARTITION \
              WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
              WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB \
-             WP_MAIN_NUMA_CORES WP_MAX_CORES; do
-        printf '%s="%s"\n' "$k" "${!k}"
+             WP_MAIN_NUMA_CORES WP_MAX_CORES \
+             WP_TEST_WALLTIME_MIN WP_MEM_UTIL_MIN WP_MEM_UTIL \
+             WP_GW_NODE_FRAC \
+             WP_DEBUG_MAX_CORES WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN; do
+        # WP_EXTRA_ENV may carry a literal $LD_LIBRARY_PATH -> single-quote it.
+        if [[ "$k" == WP_EXTRA_ENV ]]; then printf "%s='%s'\n" "$k" "${!k}"
+        else printf '%s="%s"\n' "$k" "${!k}"; fi
     done
 } > "$CONF"
 
@@ -337,9 +816,15 @@ info "${c_grn}Wrote $CONF${c_rst}"
 echo
 echo "    email           : ${WP_EMAIL:-(none)}"
 echo "    VASP modules    : ${WP_VASP_MODULES:-(none)}  [$WP_MODULE_CMD]"
+[[ "$WP_VASP_STD" == */* ]]            && echo "    VASP exe (custom): $WP_VASP_STD"
+[[ -n "$WP_VASP_LD_LIBRARY_PATH" ]]   && echo "    extra LD path   : $WP_VASP_LD_LIBRARY_PATH"
 echo "    main partition  : $WP_MAIN_PARTITION  (${WP_MAIN_CPUS_PER_NODE} cores, ${WP_MAIN_MEM_PER_NODE_MB} MB/node)"
 echo "    debug partition : $WP_DEBUG_PARTITION  (${WP_DEBUG_CPUS_PER_NODE} cores, ${WP_DEBUG_MEM_PER_NODE_MB} MB/node)"
 echo "    max cores/job   : $WP_MAX_CORES"
+echo "    test walltime   : ${WP_TEST_WALLTIME_MIN} min   mem policy: >=${WP_MEM_UTIL_MIN} (target ${WP_MEM_UTIL})"
+echo "    mem margins     : main ${WP_MAIN_MEM_MARGIN} (=$(awk -v m=$WP_MAIN_MEM_MARGIN 'BEGIN{printf "%.0f", (1-m)*100}')% usable)"\
+"   debug ${WP_DEBUG_MEM_MARGIN} (=$(awk -v m=$WP_DEBUG_MEM_MARGIN 'BEGIN{printf "%.0f", (1-m)*100}')% usable)"
+echo "    debug max cores : $WP_DEBUG_MAX_CORES"
 echo
 echo "    These values now flow into vasp-recommend-slurm, vasp-dry-run and"
 echo "    vasp-test. Re-run 'vasp-configure' (or --edit) any time to change them."

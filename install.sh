@@ -8,7 +8,7 @@
 #      `vasp-clean` invokes vasp_clean.sh, `vasp-test` invokes vasp_test.sh, etc.
 #   2. Creates a conda environment with every Python dependency the toolkit
 #      needs (numpy, scipy, matplotlib, pymatgen) plus the optional `glow`
-#      Markdown renderer used by `my-shortcuts`.
+#      Markdown renderer used by `wolfpack`.
 #   3. Makes sure the bin directory is on your $PATH (adds a small block to
 #      your shell rc file if it is not).
 #   4. Runs `vasp-configure` to build your cluster profile: your email, the
@@ -44,6 +44,7 @@ COMMAND_MAP=(
     "vasp-dry-run|vasp_dry_run.sh"
     "vasp-test|vasp_test.sh"
     "vasp-recommend-slurm|vasp_recommend_slurm.py"
+    "vasp-diagnose|vasp_diagnose.sh"
     "vasp-check|vasp_check.sh"
     "vasp-clean|vasp_clean.sh"
     "vasp-nuke|vasp_nuke.sh"
@@ -54,7 +55,14 @@ COMMAND_MAP=(
     "vasp-plot-fatbandsdos|vasp_plot_fatbandsdos.py"
     "vasp-quick-plots|vasp_quick_plots.sh"
     "build-supercell|build_supercell.py"
-    "my-shortcuts|my_shortcuts.sh"
+    "wolfpack|wolfpack.sh"
+)
+
+# Commands this toolkit USED to install under a different name.  Their symlinks
+# are removed on install (only when they point into this toolkit) so a rename
+# never leaves a dangling command behind in $BIN_DIR.
+RETIRED_COMMANDS=(
+    "my-shortcuts"          # renamed 2026-08 -> wolfpack (wolfpack --help)
 )
 
 # Conda packages required by the Python scripts (channel: conda-forge).
@@ -160,6 +168,21 @@ for entry in "${COMMAND_MAP[@]}"; do
     linked=$((linked + 1))
 done
 ok "$linked commands linked."
+
+# Drop symlinks left by earlier versions under an old command name.  Only ours
+# are touched: the link must resolve into $SRC_DIR (or be dangling into it).
+retired=0
+for cmd in "${RETIRED_COMMANDS[@]}"; do
+    link="$BIN_DIR/$cmd"
+    [[ -L "$link" ]] || continue
+    dest="$(readlink "$link")"
+    case "$dest" in
+        "$SRC_DIR"/*) rm -f "$link"
+                      printf '    %-22s (retired, removed)\n' "$cmd"
+                      retired=$((retired + 1)) ;;
+    esac
+done
+(( retired > 0 )) && ok "$retired retired command(s) removed."
 echo
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +323,7 @@ if [[ $DO_CONDA -eq 1 ]]; then
 fi
 echo
 echo "    Quick check (after opening a new shell):"
-echo "        my-shortcuts          # print the toolkit README"
+echo "        wolfpack --help       # print the toolkit README"
 echo "        vasp-check --help"
 echo "        vasp-configure --show # review your cluster profile"
 echo

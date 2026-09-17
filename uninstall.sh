@@ -33,7 +33,7 @@ KNOWN_COMMANDS=(
     vasp-configure vasp-dry-run vasp-test vasp-recommend-slurm vasp-check
     vasp-clean vasp-nuke run-nscf-steps run-scf-steps collect-u-data
     vasp-calculate-u vasp-plot-fatbandsdos vasp-quick-plots build-supercell
-    my-shortcuts
+    wolfpack my-shortcuts
 )
 
 # Cluster profile written by vasp-configure (removed on uninstall).

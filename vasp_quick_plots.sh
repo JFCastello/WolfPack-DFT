@@ -15,6 +15,13 @@
 #   4_CMYK      cmyk: the 4 most-contributing units (cyan/magenta/yellow/black)
 #   5_Stacked   stacked: the 5 most-contributing units (sumo-style circles)
 #
+# SINGLE-CALCULATION FOLDERS
+#   The Scf/ Bands/ Dos/ tree is not required.  Run this inside one calculation
+#   and the kind is detected from the INCAR/KPOINTS (line-mode KPOINTS -> band
+#   structure; regular mesh + tetrahedron/LORBIT/NEDOS -> DOS; Wannier90 output
+#   -> interpolated curves).  Every method folder is then filled with only the
+#   plots that folder can support, with the same automatic projections.
+#
 # "Most-contributing" is measured by the projected DOS integrated over the
 # energy window [--emin, --emax] (a proper states integral, summed over spin).
 # If the cell has fewer distinct elements than a method needs, selection falls
@@ -31,9 +38,9 @@
 #
 # USAGE
 #   conda activate wolfpack-dft         # needs pymatgen/numpy/matplotlib/scipy
-#   cd <root with Scf/ Bands/ Dos/>
+#   cd <root with Scf/ Bands/ Dos/>     # ... or into a single calculation folder
 #   vasp-quick-plots                    # all methods, auto energy window
-#   vasp-quick-plots --emin -6 --emax 6 --title "CuVS_3"
+#   vasp-quick-plots --emin -6 --emax 6 --title "MoS_2"
 #   vasp-quick-plots --methods plain,rgb,cmyk
 #   vasp-quick-plots --root path/to/calc --stacked-n 6 --spin both
 #   vasp-quick-plots --help
@@ -42,7 +49,7 @@
 #   --root DIR        calculation root (default: .)
 #   --emin/--emax EV  energy window (rel. E_F) for BOTH the view and the
 #                     contribution ranking (default: auto-fit to the bands)
-#   --title STR       figure title (TeX-ish, e.g. "CuVS_3 - G_0W_0")
+#   --title STR       figure title (TeX-ish, e.g. "MoS_2 - G_0W_0")
 #   --methods LIST    comma list from: plain,one_orbital,duo,rgb,cmyk,stacked
 #                     (default: all six)
 #   --stacked-n N     how many units for the stacked plot (default: 5)
@@ -115,11 +122,55 @@ if [[ ${#PLOT_CMD[@]} -eq 0 ]]; then
 fi
 
 # --------------------------------------------------------------------------- #
-# Sanity: the expected sub-folders
+# What is in this folder?  Either the classic Scf/ Bands/ Dos/ workflow tree
+# (band structure + DOS in one figure) or a single calculation, whose kind is
+# read off the INCAR/KPOINTS -- so running this inside a DOS run produces the
+# DOS plots for every method, and inside a band run, the band plots.
 # --------------------------------------------------------------------------- #
-for d in Scf Bands Dos; do
-    [[ -d "$ROOT/$d" ]] || warn "$ROOT/$d not found — vasp-plot-fatbandsdos may fail."
-done
+LAYOUT_KIND=""; LAYOUT_WHY=""
+if [[ -d "$ROOT/Bands" && -d "$ROOT/Dos" ]]; then
+    LAYOUT_KIND="both"; LAYOUT_WHY="workflow tree (Bands/ + Dos/ found)"
+else
+    self_qp="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+    here_qp="$(dirname "$self_qp")"
+    PY_QP="$(command -v python3 || command -v python || true)"
+    if [[ -n "$PY_QP" && -f "$here_qp/wolfpack_plot/detect.py" ]]; then
+        # Line 1 = "kind why"; any further lines are PHYSICS problems (wrong
+        # recipe for the functional). They go on stdout, not stderr, precisely
+        # because stderr is discarded here to hide import noise.
+        LAYOUT_OUT="$(
+            "$PY_QP" - "$here_qp" "$ROOT" <<'PYEOF' 2>/dev/null
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location(
+    "wp_detect", sys.argv[1] + "/wolfpack_plot/detect.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+lay = m.detect_layout(sys.argv[2])
+print(lay["kind"] or "none", lay["why"])
+for p in lay.get("problems") or []:
+    print("PROBLEM " + " ".join(p.split()))
+PYEOF
+        )"
+        read -r LAYOUT_KIND LAYOUT_WHY <<<"$(printf '%s\n' "$LAYOUT_OUT" | head -n1)"
+        LAYOUT_PROBLEMS="$(printf '%s\n' "$LAYOUT_OUT" | sed -n 's/^PROBLEM //p')"
+    fi
+fi
+case "${LAYOUT_KIND:-}" in
+    both)  ;;                                    # nothing to say: the normal case
+    bands) info "single calculation: BAND STRUCTURE only (${LAYOUT_WHY})" ;;
+    dos)   info "single calculation: DENSITY OF STATES only (${LAYOUT_WHY})" ;;
+    wannier90) info "single calculation: WANNIER90 interpolation (${LAYOUT_WHY})" ;;
+    *)     warn "no Scf/ Bands/ Dos/ tree here and this folder is not a"
+           warn "recognisable VASP calculation — vasp-plot-fatbandsdos may fail." ;;
+esac
+# A wrong-functional recipe yields a figure that looks completely normal, so say
+# it before any plotting starts rather than as a footnote afterwards.
+if [[ -n ${LAYOUT_PROBLEMS:-} ]]; then
+    while IFS= read -r _p; do
+        [[ -z $_p ]] && continue
+        warn "WRONG RECIPE: ${_p}"
+    done <<<"$LAYOUT_PROBLEMS"
+    warn "see https://vasp.at/wiki/index.php/Band-structure_calculation_using_meta-GGA_functionals"
+fi
 
 # Common args shared by every invocation.
 COMMON=(--root "$ROOT" --spin "$SPIN" --formats "$FORMATS" --group "$GROUP")

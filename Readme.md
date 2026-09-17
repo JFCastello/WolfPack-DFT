@@ -24,7 +24,7 @@ cd WolfPack-DFT
    updates every command at once — **don't delete this folder after installing.**
 2. **Creates a conda environment** (`wolfpack-dft`) with every Python
    dependency the toolkit needs: `numpy`, `scipy`, `matplotlib`, `pymatgen`,
-   plus the optional `glow` Markdown renderer used by `my-shortcuts`.
+   plus the optional `glow` Markdown renderer used by `wolfpack`.
 3. **Adds `~/.local/bin` to your `PATH`** (a small tagged block in `~/.bashrc`)
    if it isn't already there.
 4. **Runs the cluster wizard** (`vasp-configure`) — see below.
@@ -78,7 +78,10 @@ It detects and lets you confirm/override:
   you **choose the version**, and its prerequisites are detected when possible;
 - your **debug** and **main** partition names;
 - **cores per node** and **memory per node** for each (from `sinfo`);
-- the **maximum cores** you may request (from `sacctmgr`, else you set it).
+- the **maximum cores** you may request (from `sacctmgr`, else you set it);
+- **pipeline policy** (no longer hardcoded): the test/debug **walltime cap**, your
+  cluster's minimum **memory-utilisation policy** (e.g. 80 %; tools target +1 %), the
+  **magic pre-spike hold** (min), and the **debug RAM reserve** (GB) left for login.
 
 Every value has a manual fallback if auto-detection isn't available. The result
 flows into `vasp-recommend-slurm`, `vasp-dry-run` and `vasp-test`, so the SLURM
@@ -113,8 +116,9 @@ pass `--purge-repo`.
 | `vasp-configure` | `vasp_configure.sh` | Build your cluster profile (email, VASP modules, partitions, cores, memory, max-cores) |
 | `vasp-dry-run` | `vasp_dry_run.sh` | **Pipeline STAGE 1** — 1-rank dry run on debug → memory table + starts `report.out` |
 | `vasp-recommend-slurm` | `vasp_recommend_slurm.py` | **Pipeline STAGE 2** — read that OUTCAR → KPAR/NCORE + `slurm.sh` (80%-mem, multi-node split) |
-| `vasp-test` | `vasp_test.sh` | **Pipeline STAGE 3** — 30-min benchmark of the *fixed* config → scale measured RAM to production → update `slurm.sh` |
-| `vasp-check` | `vasp_check.sh` | Post-mortem sanity + physics analysis of any VASP run |
+| `vasp-test` | `vasp_test.sh` | **Pipeline STAGE 3** — benchmark of the *fixed* config (job `slurm_benchmark.sh`) → scale measured RAM to production → write the **definitive** `slurm_vasptest.sh` + (GW) `MAXMEM` into the INCAR; prints a **predicted-vs-measured** comparison + validation verdict of the chosen parallelization & node config |
+| `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
+| `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
 | `vasp-nuke` | `vasp_nuke.sh` | Fast no-questions-asked delete of all VASP output files |
 | `run-nscf-steps` | `run_nscf_steps.sh` | Hubbard U workflow Step 1: submit NSCF perturbation jobs |
@@ -124,7 +128,7 @@ pass `--purge-repo`.
 | `vasp-plot-fatbandsdos` | `vasp_plot_fatbandsdos.py` | Fat-band + projected DOS figure (pymatgen; `wolfpack_plot/` package) |
 | `vasp-quick-plots` | `vasp_quick_plots.sh` | One figure per method (plain/one_orbital/duo/rgb/cmyk/stacked) into numbered `Plots/` sub-folders, projections auto-picked over an energy window |
 | `build-supercell` | `build_supercell.py` | Build a plain VASP supercell from a POSCAR |
-| `my-shortcuts` | `my_shortcuts.sh` | Print this README |
+| `wolfpack` | `wolfpack.sh` | Print this README (`--help`), the plotting guide (`--plots`) or the command list (`--list`) |
 
 > Setup commands (run from this folder, not on `$PATH`): `./install.sh` and
 > `./uninstall.sh` — see [Installation](#installation).
@@ -146,10 +150,12 @@ vasp-test               # STAGE 3  (submit; wait for it to finish)
 When it's done the folder contains exactly:
 
 ```
-INCAR  KPOINTS  POSCAR  POTCAR          # your inputs (untouched)
-slurm_dryrun.sh  slurm_vasptest.sh      # the exact STAGE-1 / STAGE-3 jobs
-slurm.sh                                # the production job, ready to sbatch
-report.out                              # one tidy report from all 3 stages
+INCAR  KPOINTS  POSCAR  POTCAR   # your inputs (KPAR/NCORE/NPAR applied; backup INCAR.bak)
+slurm_dryrun.sh                  # STAGE 1 dry-run job
+slurm.sh                         # STAGE 2 recommend first-pass production job
+slurm_benchmark.sh               # STAGE 3 debug benchmark job
+slurm_vasptest.sh                # STAGE 3 DEFINITIVE production job (measured memory) <- sbatch this
+report.out                       # one tidy report from all 3 stages
 ```
 
 Intermediates (the dry-run OUTCAR, pipeline state, SLURM logs) live in a hidden
@@ -173,11 +179,18 @@ With **no argument**, auto-finds `.wolfpack/dryrun_OUTCAR`. It enumerates
 [VASP-wiki parallelization rules](https://www.vasp.at/wiki/index.php/Category:Parallelization),
 and writes the production job to **`slurm.sh`** with:
 
-- the chosen **KPAR/NCORE/NSIM** embedded as comments (merge into your INCAR);
+- the chosen **KPAR/NCORE/NSIM** embedded as comments **and written into your
+  `INCAR`** so STAGE 3 and production match (KPAR + NCORE for GW; KPAR + NCORE +
+  NPAR for DFT; backup at `INCAR.bak`, opt out with `--no-apply-incar`);
 - a memory request sized to the **≥ 80 % utilisation** rule (see below);
-- **automatic multi-node splitting** — if one node can't hold its ranks at that
-  memory, the ranks are spread across more nodes so each node fits (the total
-  rank count is unchanged).
+- **automatic, k-group-aware multi-node splitting** — keeps **whole k-point groups
+  on a node** (`nodes = KPAR / g`, never straddling a k-group across the boundary —
+  crucial for GW, where a split group means cross-node χ/W traffic). The per-node
+  ceiling is computed from the **real predicted usage**, not the padded request, and
+  the request is then **trimmed to fit the node** (kept within `[usage, usage/0.80]`,
+  so utilisation stays between 80 % and 100 % — policy-compliant *and* no OOM). It
+  only straddles (plain memory split) when a single group can't fit a node even at
+  its real usage — i.e. the group is genuinely larger than one node.
 
 It also appends its recommendation to `report.out` and saves the fixed config to
 `.wolfpack/state.env` for STAGE 3.
@@ -203,34 +216,48 @@ vasp-recommend-slurm --help             # full flag list
 
 ### STAGE 3 — `vasp-test`
 
-Reads the **fixed** config from STAGE 2 and benchmarks **that exact config** for
-30 minutes — not your raw INCAR. The recommended rank count (e.g. 120) won't fit
-on the debug partition, so it runs the same **KPAR/NCORE** at the largest rank
-count that *does* fit (up to both debug nodes, 96 cores) at the maximum debug
-memory (node RAM − 16 GB reserve). Then it:
+Reads the **fixed** config from STAGE 2 and benchmarks **that exact config** (job
+`slurm_benchmark.sh`) — not your raw INCAR. VASP runs for `WP_TEST_WALLTIME_MIN`
+minus a short analysis margin, inside a job capped at that walltime. The recommended
+rank count (e.g. 120) won't fit on the debug partition, so it runs the same
+**KPAR/NCORE** at the largest rank count that *does* fit (up to both debug nodes) at
+the maximum debug memory (node RAM − the `WP_DEBUG_RESERVE_GB` reserve). Then it:
 
 1. reads the SLURM metrics (`MaxRSS`, CPU efficiency) of the fixed config;
 2. **scales** the measured per-rank memory from the test rank count **up to the
    production rank count** (VASP component-distribution rules: wavefunctions
    ∝ 1/ranks, grid ∝ 1/NPAR, projectors ∝ 1/NCORE);
-3. sizes the production memory to the **80 % rule** and **updates `slurm.sh` in
-   place** (`--mem-per-cpu`, and `--nodes`/`--ntasks-per-node` if it must split);
+3. sizes the production memory to the **utilisation policy** and lays it out as
+   one node if it fits else exactly **KPAR nodes** (one whole k-group/node), then
+   writes the **definitive `slurm_vasptest.sh`** (recommend's `slurm.sh` is kept);
 4. prints a **VERDICT** on whether the recommended config is adequate and appends
    STAGE 3 to `report.out`.
 
 ```bash
-vasp-test               # renders ./slurm_vasptest.sh, submits it, updates slurm.sh
-# then, once you've merged KPAR/NCORE/NSIM into INCAR:
-sbatch slurm.sh         # the real production job, with measured memory
+vasp-test               # renders ./slurm_benchmark.sh, submits it, writes slurm_vasptest.sh
+# KPAR/NCORE/NPAR are already in your INCAR (applied by vasp-recommend-slurm):
+sbatch slurm_vasptest.sh   # the definitive production job, with measured memory
 ```
 
-**Cluster policies (defaults; override via env or the profile):**
+**Cluster policies (from the profile; override via env):**
 
-- **Memory utilisation** — the request is sized so the job *uses* ≥ 80 % of what
-  it asks for (`request = predicted_use / 0.80`): satisfies clusters that require
-  high utilisation while keeping a ~20 % safety margin.
-- **Debug/login reserve** — on the debug partition, **16 GB per node** is kept
-  free so the (shared) login node stays responsive.
+- **Memory utilisation** — the request is sized so the job *uses* at least the
+  `WP_MEM_UTIL_MIN` policy (e.g. 80 %); the tool aims 1 % above it
+  (`request = predicted_use / 0.81`) so a slightly-low real usage still clears the
+  floor, while keeping a safety margin.
+- **Debug/login reserve** — on the debug partition, **`WP_DEBUG_RESERVE_GB` per
+  node** (default 4 GB) is kept free so the (shared) login node stays responsive.
+
+> **Feasibility & auto-recovery (GW).** A GW k-group *cannot* be split across nodes,
+> so a config is only valid if one whole k-group fits a single node.
+> `vasp-recommend-slurm` only ever picks a **feasible** config — as the node memory
+> tightens it automatically climbs to a higher `KPAR` (smaller k-groups: 3 → 7 → … →
+> NKPTS), and if *nothing* fits it stops with an `[INFEASIBLE]` message (lower
+> `ENCUTGW`/`NOMEGA`/`NBANDS`, or use a larger-memory partition). If the **measured**
+> memory from `vasp-test` is what makes the chosen group too big for a node, vasp-test
+> **auto-recovers**: it re-runs recommend *calibrated to the real measurement*, which
+> re-selects a feasible `KPAR`, rewrites your `INCAR` + `slurm.sh`, and tells you to
+> re-run `vasp-test` to benchmark the new config.
 
 **Flags & tunables (export before running):**
 
@@ -249,8 +276,6 @@ target and RSS-overhead factor can be pinned in the profile as `WP_MEM_UTIL` and
 
 > Requires SLURM job accounting (`sacct`/`MaxRSS`) so memory can be anchored to
 > the measured peak. If it is off, it falls back to VASP's own memory table.
-
----
 
 ## 2. VASP run analysis
 
@@ -404,7 +429,7 @@ vasp-plot-fatbandsdos --root . --list
 # then plot (choose a method):
 vasp-plot-fatbandsdos --root . --method rgb \
     --projections "(Cu-d),(V-d),(S-p)" \
-    --title "CuVS_3 - G_0W_0"
+    --title "MoS_2 - G_0W_0"
 ```
 
 | Method | Groups | Description |
@@ -442,7 +467,7 @@ active.
 
 ```bash
 conda activate wolfpack-dft
-vasp-quick-plots --emin -6 --emax 6 --title "CuVS_3"
+vasp-quick-plots --emin -6 --emax 6 --title "MoS_2"
 # writes Plots/{0_Plain,1_ONE,2_DUO,3_RGB,4_CMYK,5_Stacked}/
 
 vasp-quick-plots --methods plain,rgb,cmyk          # a subset
@@ -479,14 +504,20 @@ build-supercell --help
 
 ## 7. Utilities
 
-### `my-shortcuts`
+### `wolfpack`
 
-Prints this README from any directory. Uses `glow` for rendered Markdown if
-available, falls back to `cat`.
+The toolkit entry point. Prints the guides from any directory, using `glow` for
+rendered Markdown if available and falling back to `cat`.
+*(Replaces the former `my-shortcuts` command; `install.sh` removes the old
+symlink automatically.)*
 
 ```bash
-my-shortcuts           # print (rendered if glow is installed)
-my-shortcuts | less    # paginate
+wolfpack               # this README (same as --help)
+wolfpack --help        # this README
+wolfpack --plots       # the plotting guide (PlotReadme.md)
+wolfpack --list        # one-line list of every installed command
+wolfpack --where       # print the toolkit directory
+wolfpack --help | less # paginate
 ```
 
 ---
@@ -498,10 +529,10 @@ my-shortcuts | less    # paginate
 vasp-configure                            # once: set up your cluster profile
 # from a folder with INCAR KPOINTS POSCAR POTCAR — no arguments, nothing to edit:
 vasp-dry-run                              # STAGE 1  (wait for it to finish)
-vasp-recommend-slurm                      # STAGE 2  → slurm.sh + report.out
-vasp-test                                 # STAGE 3  → measured memory in slurm.sh
-# merge the KPAR/NCORE/NSIM shown in report.out into your INCAR, then:
-sbatch slurm.sh                           # the production job, with measured memory
+vasp-recommend-slurm                      # STAGE 2  → slurm.sh + KPAR/NCORE/NPAR into INCAR
+vasp-test                                 # STAGE 3  → definitive slurm_vasptest.sh (measured)
+# KPAR/NCORE/NPAR are already in your INCAR (backup INCAR.bak); then:
+sbatch slurm_vasptest.sh                  # the definitive production job, with measured memory
 vasp-check                                # → sanity-check the result
 vasp-clean -f .                           # → clean up
 ```
@@ -522,6 +553,6 @@ python vasp-calculate-u                        # prints U
 # Folder layout: root/Scf/ root/Bands/ root/Dos/ (all with vasprun.xml)
 vasp-plot-fatbandsdos --root . --list
 vasp-plot-fatbandsdos --root . --method rgb \
-    --projections "(Cu-d),(V-d),(S-p)" --title "CuVS_3"
+    --projections "(Cu-d),(V-d),(S-p)" --title "MoS_2"
 # output: Plots/fatbands_dos.png and .pdf
 ```

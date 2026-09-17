@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 #==============================================================================
-# vasp_check.sh  —  post-mortem sanity + physics analysis for a finished
-#                   (or KILLED) VASP run.
+# vasp_check.sh  —  PHYSICS-coherence analysis of a VASP run (finished or killed).
+#
+#   It interprets whatever data the run produced: convergence, magnetic order,
+#   metal/insulator/half-metal, direct/indirect band gap with VBM/CBM k-points,
+#   GW quasiparticle shifts. It does NOT diagnose why a job died or whether the
+#   data survived -- that lives in `vasp-diagnose` (OOM/walltime/crash + the
+#   PLOTTABLE / PARTIAL / NOT-USABLE data-salvage verdict). Run vasp-diagnose on a
+#   crashed folder; run vasp-check for the physics on whatever data is present.
 #
 # Recognises the calculation TYPE from INCAR (with OUTCAR fallback):
 #     * static SCF                (NSW=0 / IBRION=-1)
@@ -13,13 +19,12 @@
 #     * RPA / ACFDT, BSE          (light handling)
 #   plus the XC layer: GGA, GGA+U, HSE/PBE0 hybrid.
 #
-# It does FOUR jobs:
+# It does THREE jobs:
 #   (1) computational / convergence audit (SCF, forces, stress, GW knobs)
-#   (2) physics / interpretation (gap + VBM/CBM with full k-coords, moments,
-#       QP renormalisation, Z factors)
-#   (3) for KILLED runs: figure out WHY (OOM vs walltime vs crash, parsing the
-#       scheduler logs) and classify the data as PLOTTABLE / PARTIAL / NOT
-#   (4) flags common pitfalls per calculation type.
+#   (2) physics / interpretation (metal/insulator/half-metal, magnetic order, gap +
+#       VBM/CBM with full k-coords, moments, QP renormalisation, Z factors)
+#   (3) flags common pitfalls per calculation type.
+#   (Why-it-died + data-salvage classification -> see `vasp-diagnose`.)
 #
 # Usage:   vasp_check.sh [DIR]            (default DIR = .)
 #          vasp_check.sh -h | --help
@@ -51,24 +56,21 @@ vasp_check.sh [DIR]   Post-mortem sanity + physics analysis of a VASP run.
                       DIR defaults to the current directory.
   -h, --help          Show this help.
 
-WHAT IT CHECKS (10 sections)
+WHAT IT CHECKS (physics coherence)
   1. File inventory      -- which VASP files are present and their sizes
   2. Run metadata        -- detected calc type (static SCF / ionic relax / AIMD /
                            DFPT / GW / RPA / BSE), XC (GGA / GGA+U / hybrid),
                            key INCAR tags (KPAR, NCORE, NBANDS, ENCUT, LORBIT...)
-  3. Termination         -- normal exit, walltime/OOM kill, or crash;
-                           PRICEL info-only vs actual internal error distinguished
-  4. Data completeness   -- vasprun.xml, EIGENVAL, PROCAR, GW QP-table;
-                           PLOTTABLE / PARTIAL / NOT USABLE verdict for killed runs
-  5. Electronic (SCF)    -- NELM hits, entropy/atom, non-self-consistent notice
-  6. Ionic convergence   -- EDIFFG criterion, max|F|, energy monotonicity (relaxations)
-  7. Cell / stress       -- volume, lattice vectors, residual pressure (Pulay)
-  8. Magnetization       -- net moment, per-atom moments, FM/AFM/nonmagnetic hint
-  9. Eigenvalues & gap   -- fundamental gap (VASP's own line + occupation cross-check),
-                           VBM/CBM with full k-coords, occupied bands, GW QP table
- 10. Pitfalls            -- smearing choice, KPAR divisibility, NBANDS headroom,
+  3. Electronic (SCF)    -- convergence (NELM hits), entropy/atom, non-self-consistent
+  4. Ionic convergence   -- EDIFFG criterion, max|F|, energy monotonicity (relaxations)
+  5. Cell / stress       -- volume, lattice vectors, residual pressure (Pulay)
+  6. Magnetization       -- net moment, per-atom moments, FM/AFM/ferri/nonmagnetic order
+  7. Eigenvalues & gap   -- metal/insulator/half-metal, direct/indirect gap with the
+                           VBM/CBM k-points, occupied bands, GW quasiparticle table
+  8. Pitfalls            -- smearing choice, KPAR divisibility, NBANDS headroom,
                            GW knobs (NCORE=1, ENCUTGW default warning), LDA+U geometry
   Verdict               -- TOTEN, energy/atom, overall PASS / PASS-with-warnings / FAIL
+  (Why a run died + data salvage -> vasp-diagnose)
 
 READS (when present)
   OUTCAR  OSZICAR  INCAR  KPOINTS  POSCAR  CONTCAR  vasprun.xml
@@ -96,20 +98,6 @@ cd "$DIR" || { echo "error: cannot cd into '$DIR'" >&2; exit 2; }
 
 OUT=OUTCAR; OSZ=OSZICAR; INC=INCAR
 [[ -s $OUT ]] || { echo "error: no readable OUTCAR in $(pwd)" >&2; exit 2; }
-
-# scheduler / stdout-stderr logs that may hold OOM / walltime messages
-shopt -s nullglob
-SLURM_LOGS=( slurm-*.out slurm-*.err *.o[0-9]* *.e[0-9]* *.out *.err *.log )
-shopt -u nullglob
-# de-duplicate and drop OUTCAR-like names we already handle
-declare -A _seen=()
-LOGS=()
-for f in "${SLURM_LOGS[@]}"; do
-  [[ -s $f ]] || continue
-  [[ $f == OUTCAR || $f == OSZICAR || $f == vasprun.xml ]] && continue
-  [[ -n ${_seen[$f]:-} ]] && continue
-  _seen[$f]=1; LOGS+=( "$f" )
-done
 
 printf '%s%s VASP run analysis: %s %s\n' "$B" "$CYN" "$(pwd)" "$R"
 
@@ -160,10 +148,14 @@ ucase(){ printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 #============================ 1. FILE INVENTORY ==============================
 hdr "File inventory"
 for f in OUTCAR OSZICAR INCAR KPOINTS POSCAR CONTCAR vasprun.xml EIGENVAL DOSCAR PROCAR WAVECAR CHGCAR; do
-  if [[ -s $f ]]; then printf '  %-12s %s%10s B%s\n' "$f" "$DIM" "$(wc -c <"$f")" "$R"
-  else printf '  %-12s %s(absent)%s\n' "$f" "$DIM" "$R"; fi
+  # Three distinct states -- an empty file is NOT the same as a missing one:
+  # VASP writes a 0-byte CONTCAR for a static run (NSW=0) and 0-byte CHG/CHGCAR
+  # when LCHARG=.FALSE., so "(absent)" there would be plainly wrong.
+  if   [[ -s $f ]]; then printf '  %-12s %s%10s B%s\n' "$f" "$DIM" "$(wc -c <"$f")" "$R"
+  elif [[ -e $f ]]; then printf '  %-12s %s(empty -- 0 B)%s\n' "$f" "$DIM" "$R"
+  else                   printf '  %-12s %s(absent)%s\n' "$f" "$DIM" "$R"; fi
 done
-if ((${#LOGS[@]})); then note "scheduler logs seen: ${LOGS[*]}"; else note "no scheduler/stdout logs in this directory (OOM cause may be undiagnosable here)"; fi
+note "For scheduler logs + WHY a run died (and whether the data is salvageable), use 'vasp-diagnose'."
 
 #============================ 2. PARAMETERS + TYPE ===========================
 NIONS=$(getp NIONS);   NIONS=${NIONS:-0}
@@ -225,6 +217,20 @@ fi
 # XC layer (AEXX-aware). NOTE: a GW run sets LHFCALC=T / AEXX=1.0 internally for the self-energy;
 # that is NOT a hybrid groundstate, so for GW we report the underlying functional instead.
 CALC_XC="GGA"
+# META-GGA (SCAN / r2SCAN / TPSS / M06-L ...) is a different rung of the ladder and
+# behaves differently (tau-dependent potential, needs LASPH, noisier forces), so it
+# must not be reported as plain "GGA". VASP echoes the tag into the OUTCAR; fall back
+# to the INCAR. LDA is only assumed when GGA is explicitly switched off.
+# (getp only matches NUMERIC values, and METAGGA's value is a word -- read it directly.)
+_mgga="$(grep -m1 -aoiE 'METAGGA[[:space:]]*=[[:space:]]*[A-Za-z0-9_-]+' "$OUT" 2>/dev/null \
+         | sed -E 's/.*=[[:space:]]*//')"
+if [[ -z $_mgga && -s $INC ]]; then
+  _mgga="$(grep -m1 -aoiE '^[[:space:]]*METAGGA[[:space:]]*=[[:space:]]*[A-Za-z0-9_-]+' "$INC" 2>/dev/null \
+           | sed -E 's/.*=[[:space:]]*//')"
+fi
+if [[ -n $_mgga && ! $_mgga =~ ^([Nn]one|--)$ ]]; then
+  CALC_XC="meta-GGA (${_mgga})"
+fi
 ax=${AEXX:-0}
 if [[ $LHF == T ]] && ! ((gw_family)); then
   if [[ -n ${HFSCREEN:-} ]] && awk -v s="${HFSCREEN:-0}" 'BEGIN{exit !(s>0)}'; then CALC_XC="HSE-type screened hybrid"
@@ -268,198 +274,38 @@ if ((gw_family)); then
 fi
 
 #============================ 3. TERMINATION =================================
-hdr "Termination / integrity"
-# completion markers that are independent of the timing footer
+hdr "Run completion (physics prerequisites)"
+# Convergence markers the physics sections below rely on. WHY a run died (OOM /
+# walltime / crash) and whether its data is still usable (PLOTTABLE / PARTIAL /
+# NOT) now live in `vasp-diagnose` -- run that on a failed folder. vasp-check is
+# physics-only: it interprets whatever data is present.
 RELAX_DONE=0; SCF_CONVERGED=0
 grep -qiE 'reached required accuracy - stopping structural energy minimi[sz]ation' "$OUT" && RELAX_DONE=1
 grep -q 'aborting loop because EDIFF is reached' "$OUT" && SCF_CONVERGED=1
-
-NORMAL=0; TERM="killed"
+# Is this a multi-step RELAXATION? Then electronic convergence proves NOTHING about
+# the run finishing: 'aborting loop because EDIFF is reached' is printed once per
+# IONIC step, so it is already true at step 1 of 150. Only the ionic marker
+# ('reached required accuracy - stopping structural energy minimisation') or the
+# timing footer mean the run is done. Treating SCF_CONVERGED as completion made a
+# live relaxation report "[ OK ] converged" here while section 5 simultaneously
+# reported "[WARN] relaxation did NOT meet EDIFFG" -- a self-contradicting report.
+IS_RELAX=0
+[[ ${NSW:-0} =~ ^[0-9]+$ ]] && (( NSW > 1 )) && [[ ${IBRION:--1} != "-1" ]] && IS_RELAX=1
 if grep -q 'General timing and accounting' "$OUT"; then
-  NORMAL=1; TERM="normal"
   ok "Normal termination (timing footer present)."
-  ELAPSED=$(grep -m1 'Elapsed time' "$OUT" | awk '{print $NF}')
-  [[ -n ${ELAPSED:-} ]] && note "Elapsed wall time: ${ELAPSED} s"
-elif [[ $CALC_BASE == *relax* ]] && ((RELAX_DONE)); then
-  TERM="completed-no-footer"
-  ok "Relaxation reached required accuracy (converged) -- but the timing footer is absent."
-  note "VASP finished the optimisation and wrote the final structure/wavefunctions; the OUTCAR was almost"
-  note "certainly truncated AFTER the run (copy/transfer). This is NOT a crash and the data is complete."
-elif [[ ( $CALC_BASE == "static SCF" || $CALC_BASE == non-self* ) ]] && ((SCF_CONVERGED)) && ! ((gw_family)); then
-  TERM="completed-no-footer"
-  warn "SCF converged (EDIFF reached) but no timing footer -> OUTCAR likely truncated after the run; data is probably complete (verify below)."
+elif ((RELAX_DONE)); then
+  ok "Reached required accuracy (converged); timing footer absent (OUTCAR likely truncated after the run)."
+elif ((IS_RELAX)); then
+  note "Relaxation still IN PROGRESS or interrupted: the ionic loop never printed"
+  note "  'reached required accuracy' and there is no timing footer. The SCF converges"
+  note "  at every ionic step, but that is not run completion. Everything below"
+  note "  describes the LATEST ionic geometry, not a converged structure."
+elif ((SCF_CONVERGED)); then
+  ok "SCF converged (EDIFF reached); timing footer absent (OUTCAR likely truncated after the run)."
 else
-  warn "No 'General timing' footer and no completion marker -> run was KILLED or truncated MID-calculation."
+  note "No completion marker -- this run may have been killed/truncated."
+  note "Run 'vasp-diagnose' here for the CAUSE + whether the data is salvageable; the physics below uses whatever survived."
 fi
-
-# ---- where did it stop? (last meaningful activity) ----
-LAST_STAGE="unknown"
-if ((gw_family)) && grep -qiE 'response function|polariz|screened|self-energy|NQ=|calculate.*W|HEAD OF MICRO|RESPONSER' "$OUT"; then
-  LAST_STAGE="GW response-function / polarizability / screened-Coulomb step (before any QP energies)"
-fi
-LAST_SCF=$(awk '/^[[:space:]]*[A-Za-z]+:[[:space:]]+[0-9]+[[:space:]]/{s=$1" iter "$2} END{print s}' "$OSZ" 2>/dev/null)
-TAIL3=$(grep -vE '^[[:space:]]*$' "$OUT" | tail -n 3)
-
-# ---- classify a kill: OOM vs walltime vs crash (parse logs + OUTCAR) ----
-KILL_REASON=""; OOM=0; WALL=0; SEG=0; MPI=0; VMEM=0
-if [[ $TERM == killed ]]; then
-  pat_oom='oom-kill|out of memory|oomkilled|out-of-memory|cgroup out-of-memory|killed process|cannot allocate memory|exceeded.*memory limit|memory cgroup out of memory|oom_reaper|oom score'
-  pat_wall='due to time limit|time limit|cancelled at .* due to time|exceeded.*wall'
-  pat_seg='segmentation fault|sigsegv|signal 11|address not mapped'
-  pat_mpi='mpi_abort|bad termination of one of your application|application terminated with the exit string|pmpi_|noticed that process rank'
-  pat_vmem='forrtl: severe \(41\)|insufficient virtual memory|allocation would exceed|error allocating|allocation .*failed|not enough memory|out of memory error'
-  for f in "$OUT" "${LOGS[@]}"; do
-    [[ -s $f ]] || continue
-    grep -qiE "$pat_oom"  "$f" && OOM=1
-    grep -qiE "$pat_wall" "$f" && WALL=1
-    grep -qiE "$pat_seg"  "$f" && SEG=1
-    grep -qiE "$pat_mpi"  "$f" && MPI=1
-    grep -qiE "$pat_vmem" "$f" && VMEM=1
-  done
-  if   ((WALL)); then KILL_REASON="WALLTIME (scheduler time limit hit)"
-  elif ((OOM||VMEM)); then KILL_REASON="OOM (out of memory)"
-  elif ((SEG)); then KILL_REASON="SEGFAULT (crash)"
-  elif ((MPI)); then KILL_REASON="MPI abort (cause not explicit; inspect logs)"
-  else KILL_REASON="truncated, cause not found in OUTCAR/logs (no scheduler log here; a kernel SIGKILL OOM leaves no trace)"
-  fi
-  kv "Stopped during" "$LAST_STAGE"
-  [[ -n ${LAST_SCF:-} ]] && kv "Last SCF line" "$LAST_SCF"
-  fail "Kill reason: $KILL_REASON"
-  note "last non-empty OUTCAR lines:"; printf '%s\n' "$TAIL3" | sed 's/^/        /'
-
-  # likely physical cause, tied to calc type
-  if ((OOM||VMEM)) || [[ $KILL_REASON == truncated* ]]; then
-    if ((gw_family)); then
-      tip "GW memory is dominated by the polarizability / screened-Coulomb arrays, NOT DFT memory."
-      tip "Memory ~ ENCUTGW^3 (dominant) * NOMEGA * ISPIN / (ranks per k-group). Lower ENCUTGW, lower NOMEGA,"
-      tip "raise KPAR or total ranks, or for low-scaling raise NTAUPAR/NOMEGAPAR (more groups -> less mem/group)."
-    elif [[ $CALC_BASE == *relax* || $CALC_BASE == "static SCF" || $CALC_BASE == non-self* ]]; then
-      tip "DFT OOM scales with NKPTS*NBANDS*ENCUT and the FFT grid. Add nodes/ranks, raise KPAR (if NKPTS allows),"
-      tip "set NCORE>1 to spread bands across cores, or trim NBANDS to the minimum you actually need."
-    fi
-  elif ((WALL)); then
-    tip "Walltime kill: request more time, or restart from WAVECAR/CHGCAR (ISTART=1 / ICHARG=1) to continue."
-  fi
-fi
-
-# ---- hard error signatures (PRICEL handled separately, see below) ----
-ERRS=$(grep -nEi 'VERY BAD NEWS|internal error|ZBRENT: fatal|EDDDAV.*ZHEGV|call to ZHEGV|BRMIX: very serious|SGRCON|Fatal error|please rerun|ERROR FEXCP|ERROR: missing' "$OUT" \
-       | grep -viE 'internal error in subroutine PRICEL' | head -20 || true)
-if [[ -n $ERRS ]]; then
-  fail "Fatal error signatures in OUTCAR:"; printf '%s\n' "$ERRS" | sed 's/^/        /'
-else
-  ok "No fatal error signatures in OUTCAR (PRICEL checked separately)."
-fi
-
-# ---- PRICEL: distinguish the benign notice from the genuine internal error ----
-if grep -qi 'internal error in subroutine PRICEL' "$OUT"; then
-  fail "PRICEL internal error: symmetry/primitive-cell detection FAILED."
-  tip "Atoms slightly off ideal sites or a bad lattice. Tighten/loosen SYMPREC, or set ISYM=0 to bypass symmetry."
-elif grep -qi 'Subroutine PRICEL returns' "$OUT"; then
-  PRC=$(grep -A2 -i 'Subroutine PRICEL returns' "$OUT" | grep -vi 'returns' | grep -vE '^[[:space:]]*$' | head -1)
-  note "PRICEL notice (informational, printed at start-up, NOT a failure):"
-  [[ -n $PRC ]] && note "    \"$PRC\""
-  note "    VASP found a smaller/primitive cell than the one you supplied while building the"
-  note "    k-mesh symmetry. It does not stop the run and does not invalidate results."
-  if [[ $TERM == killed ]]; then
-    note "    -> Here the run was killed LATER; this PRICEL line is unrelated to the kill."
-  fi
-fi
-
-#==================== 3b. PLOTTABILITY / DATA COMPLETENESS ===================
-# For killed runs especially: did the data you care about survive to disk?
-hdr "Data completeness / plottability"
-PLOT_VERDICT="FULL"; PLOT_WHY=()
-
-# vasprun.xml well-formed? (the gate for pymatgen Vasprun/BSVasprun)
-VR_OK=0
-if [[ -s vasprun.xml ]]; then
-  if tail -c 8192 vasprun.xml | grep -q '</modeling>'; then VR_OK=1; fi
-fi
-
-# EIGENVAL complete? header line 6 = "NELECT NKPTS NBANDS"; count k-blocks (NF==4 floats)
-EIG_OK=0; EIG_HAVE=0; EIG_WANT=0
-if [[ -s EIGENVAL ]]; then
-  read -r EIG_WANT EIG_NB < <(awk 'NR==6{printf "%d %d", $2, $3; exit}' EIGENVAL)
-  EIG_HAVE=$(awk 'NR>6 && NF==4 && $1 ~ /^-?[0-9.]+$/ && $4 ~ /^-?[0-9.]+$/{c++} END{print c+0}' EIGENVAL)
-  if [[ ${EIG_WANT:-0} -gt 0 && ${EIG_HAVE:-0} -ge ${EIG_WANT:-1} ]]; then EIG_OK=1; fi
-fi
-
-# PROCAR complete? (needed for FAT bands) header line 2 has the counts
-PRO_OK=0; PRO_HAVE=0; PRO_WANT=0
-if [[ -s PROCAR ]]; then
-  PRO_WANT=$(awk 'NR==2{for(i=1;i<=NF;i++) if($i=="k-points:"){print $(i+1); exit}}' PROCAR)
-  PRO_HAVE=$(grep -cE '^k-point[[:space:]]+[0-9]+' PROCAR)
-  PRO_WANT=${PRO_WANT:-0}
-  if [[ ${PRO_WANT:-0} -gt 0 ]]; then
-    # PROCAR repeats the k-block per spin channel
-    need=$PRO_WANT; [[ ${ISPIN%.*} == 2 ]] && need=$((PRO_WANT*2))
-    [[ ${PRO_HAVE:-0} -ge $need ]] && PRO_OK=1
-  fi
-fi
-
-# final eigenvalue block inside OUTCAR complete? (skip the "plane waves per k-point" listing)
-OUTEIG_HAVE=$(awk '
-  /spin component/{sp=$NF}
-  /^[[:space:]]*k-point[[:space:]]+[0-9]+[[:space:]]*:/ && $0 !~ /plane waves/ {k[sp"|"$2]=1}
-  END{n=0; for(i in k)n++; print n+0}' "$OUT")
-OUTEIG_OK=0
-if [[ -n ${NKPTS:-} && ${NKPTS%.*} -gt 0 ]]; then
-  want=${NKPTS%.*}; [[ ${ISPIN%.*} == 2 ]] && want=$((want*2))
-  [[ ${OUTEIG_HAVE:-0} -ge $want ]] && OUTEIG_OK=1
-fi
-
-# QP table completeness (GW only)
-QP_OK=0; QP_HAVE=0
-if ((gw_family)); then
-  QP_HAVE=$(awk '
-    /QP shifts/ && /iteration/ { delete K; next }    # genuine new GW iteration banner
-    /^[[:space:]]*k-point[[:space:]]+[0-9]+[[:space:]]*:/ && $0 !~ /plane waves/ { kp=$2+0 }
-    /KS-energies/ && /QP-energies/ { K[kp]=1 }
-    END{ n=0; for(i in K)n++; print n+0 }' "$OUT")
-  if [[ -n ${NKPTS:-} && ${QP_HAVE:-0} -ge ${NKPTS%.*} ]]; then QP_OK=1; fi
-fi
-
-kv "vasprun.xml well-formed" "$([[ $VR_OK == 1 ]] && echo 'yes (</modeling> closed)' || echo 'NO / missing')"
-[[ -s EIGENVAL ]] && kv "EIGENVAL k-blocks"  "${EIG_HAVE}/${EIG_WANT:-?}"
-[[ -s PROCAR   ]] && kv "PROCAR k-blocks"    "${PRO_HAVE}/$([[ ${ISPIN%.*} == 2 ]] && echo $((${PRO_WANT:-0}*2)) || echo ${PRO_WANT:-?}) (fat bands)"
-kv "OUTCAR final eig blocks"  "${OUTEIG_HAVE}/$([[ ${ISPIN%.*} == 2 ]] && echo $((${NKPTS%.*}*2)) || echo ${NKPTS%.*})"
-((gw_family)) && kv "QP table k-points" "${QP_HAVE}/${NKPTS%.*}"
-
-# ---- verdict ----
-if ((gw_family)); then
-  # GW: the deliverable is the QP table, so completeness is judged on it (footer or not)
-  if   ((QP_OK)); then PLOT_VERDICT="PLOTTABLE"; PLOT_WHY+=("QP table complete for all k-points")
-  elif [[ ${QP_HAVE:-0} -gt 0 ]]; then PLOT_VERDICT="PARTIAL"; PLOT_WHY+=("QP table only partially written (${QP_HAVE}/${NKPTS%.*} k-points)")
-  else PLOT_VERDICT="NOT USABLE"; PLOT_WHY+=("no QP energies were written (run stopped before/inside the GW step)")
-  fi
-  # the underlying DFT eigenvalues may still be usable
-  if ((OUTEIG_OK)); then PLOT_WHY+=("note: the preceding DFT eigenvalues ARE complete (${OUTEIG_HAVE} blocks) if you only need DFT-level bands")
-  fi
-elif [[ $TERM == normal || $TERM == completed-no-footer ]]; then
-  PLOT_VERDICT="FULL"
-  PLOT_WHY+=("run completed ($([[ $TERM == normal ]] && echo 'timing footer present' || echo 'reached required accuracy; footer absent but data complete'))")
-  [[ $VR_OK == 0 ]] && PLOT_WHY+=("verify the standard outputs (vasprun.xml/EIGENVAL/PROCAR) are present in the directory")
-else
-  # killed mid-run, non-GW: judge by what survived to disk
-  if   ((VR_OK)); then PLOT_VERDICT="PLOTTABLE"; PLOT_WHY+=("vasprun.xml is well-formed -> pymatgen Vasprun/BSVasprun will parse it")
-  elif ((EIG_OK)); then PLOT_VERDICT="PLOTTABLE"; PLOT_WHY+=("EIGENVAL is complete -> read bands via pymatgen Eigenval/Procar")
-  elif ((OUTEIG_OK)); then PLOT_VERDICT="PARTIAL"; PLOT_WHY+=("eigenvalues complete in OUTCAR but vasprun/EIGENVAL truncated -> scrape from OUTCAR, pymatgen XML path may fail")
-  else PLOT_VERDICT="NOT USABLE"; PLOT_WHY+=("eigenvalues incomplete and vasprun.xml truncated")
-  fi
-  if [[ $PLOT_VERDICT == PLOTTABLE || $PLOT_VERDICT == PARTIAL ]] && [[ -s PROCAR && $PRO_OK == 0 ]]; then
-    PLOT_WHY+=("but PROCAR is truncated (${PRO_HAVE} blocks) -> FAT-band overlays will fail; plain bands still OK")
-  fi
-fi
-
-case "$PLOT_VERDICT" in
-  FULL)        ok   "PLOTTABLE (full): $(IFS=';'; echo "${PLOT_WHY[*]}")";;
-  PLOTTABLE)   ok   "PLOTTABLE: $(IFS=';'; echo "${PLOT_WHY[*]}")";;
-  PARTIAL)     warn "PARTIALLY plottable: $(IFS=';'; echo "${PLOT_WHY[*]}")";;
-  *)           fail "NOT usable for plotting: $(IFS=';'; echo "${PLOT_WHY[*]}")";;
-esac
-note "Rule of thumb: a SIGKILL (kernel OOM) can land AFTER all eigenvalues/QP energies are flushed -> still"
-note "plottable; if it lands mid-write, vasprun.xml/PROCAR truncate mid-tag and pymatgen throws a parse error."
 
 #============================ 4. ELECTRONIC SCF =============================
 hdr "Electronic (SCF) convergence"
@@ -538,6 +384,111 @@ if [[ $CALC_BASE == *relax* ]]; then
               if(up>0) printf "  __ENUP__ %d uphill energy move(s) (step too large / rough PES?)\n", up;
               else     printf "  energy monotonically non-increasing across ionic steps.\n" }' "$OSZ" \
     | while IFS= read -r l; do [[ $l == *"__ENUP__"* ]] && { warn "${l#  __ENUP__ }"; continue; }; printf '%s\n' "$l"; done
+  fi
+fi
+
+#=================== 5b. STRUCTURE EQUILIBRIUM (non-relax) ==================
+# "Is the geometry I am sitting on actually relaxed?" A STATIC run answers this
+# completely: VASP prints the forces and the stress tensor at that geometry
+# whether or not you asked it to move anything. Previously the whole force
+# analysis was gated behind `CALC_BASE == *relax*`, so a static SCF -- the very
+# run you do to VERIFY a relaxation -- reported no forces at all.
+# Ions are judged by the forces, the cell by the stress: they are independent,
+# and a structure can be converged in one and not the other.
+if [[ $CALC_BASE != *relax* ]] && grep -qa 'TOTAL-FORCE' "$OUT"; then
+  hdr "Structure equilibrium (is this geometry relaxed?)"
+  eval "$(awk '
+    /TOTAL-FORCE/ { inb=1; st=0; cmax=0; ss=0; n=0; im=0; mx=0; my=0; mz=0; next }
+    inb && /^[[:space:]]*-+[[:space:]]*$/ { if(!st){st=1;next} else {inb=0;st=0;next} }
+    inb && st {
+      n++
+      ax=($4<0?-$4:$4); ay=($5<0?-$5:$5); az=($6<0?-$6:$6)
+      if(ax>mx)mx=ax; if(ay>my)my=ay; if(az>mz)mz=az
+      m=sqrt($4*$4+$5*$5+$6*$6); ss+=m*m
+      if(m>cmax){cmax=m; im=n}
+      F_MAX=cmax; F_RMS=sqrt(ss/n); F_N=n; F_ION=im; MX=mx; MY=my; MZ=mz }
+    /total drift:/ { dx=$3; dy=$4; dz=$5 }
+    # stress: "  in kB   XX YY ZZ XY YZ ZX" (last ionic step wins)
+    /^[[:space:]]*in kB/ { sxx=$3; syy=$4; szz=$5; sxy=$6; syz=$7; szx=$8; HAVE_S=1 }
+    # VASP really does misspell it "Pullay"; match both.
+    /external pressure/ {
+      for(i=1;i<=NF;i++){ if($i=="pressure" && $(i+1)=="=") P=$(i+2)
+                          if($i ~ /^Pu?ll?ay$/ && $(i+2)=="=") PUL=$(i+3) } }
+    # NB: -0.0 < 0 is FALSE in awk, so a naive abs() propagates the sign and the
+    # report prints "-0.0000" for a stress component that is exactly zero.
+    function a(x){ x=x+0; if(x<0) return -x; return x==0 ? 0 : x }
+    END{
+      if(F_N+0==0){ print "NOFORCE=1"; exit }
+      printf "F_MAX=%.5f\nF_RMS=%.5f\nF_N=%d\nF_ION=%d\n", F_MAX, F_RMS, F_N, F_ION
+      printf "MX=%.6f\nMY=%.6f\nMZ=%.6f\n", MX, MY, MZ
+      if(dx!="") printf "DRIFT=%.5f\n", sqrt(dx*dx+dy*dy+dz*dz)
+      if(HAVE_S){
+        sd=a(sxx); if(a(syy)>sd)sd=a(syy); if(a(szz)>sd)sd=a(szz)
+        so=a(sxy); if(a(syz)>so)so=a(syz); if(a(szx)>so)so=a(szx)
+        printf "S_DIAG=%.4f\nS_OFF=%.4f\nHAVE_S=1\n", sd, so }
+      if(P!="")   printf "PRESS=%.4f\n", P
+      if(PUL!="") printf "PULAY=%.4f\n", PUL }' "$OUT")"
+
+  if [[ -n ${NOFORCE:-} ]]; then
+    warn "TOTAL-FORCE header present but no force rows parsed (OUTCAR truncated mid-block)."
+  else
+  note "Forces and stress are printed at THIS geometry, so they judge the"
+  note "structure directly -- no relaxation run is needed to answer the question."
+  kv "max |F| (eV/A)"      "$F_MAX   on ion $F_ION of $F_N"
+  kv "RMS |F| (eV/A)"      "$F_RMS"
+  [[ -n ${DRIFT:-} ]] && kv "total drift |d| (eV/A)" "$DRIFT"
+
+  # A Cartesian direction with identically zero force on EVERY ion is locked by
+  # symmetry, not converged by the optimiser. Worth saying: it means the run never
+  # explored that direction, so "relaxed" holds only within the imposed symmetry.
+  LOCKED=""
+  awk -v v="$MX" 'BEGIN{exit !(v<1e-9)}' && LOCKED="${LOCKED}x "
+  awk -v v="$MY" 'BEGIN{exit !(v<1e-9)}' && LOCKED="${LOCKED}y "
+  awk -v v="$MZ" 'BEGIN{exit !(v<1e-9)}' && LOCKED="${LOCKED}z "
+  [[ -n $LOCKED ]] && kv "symmetry-locked dirs" "${LOCKED% } (force identically 0 on every ion)"
+
+  if [[ -n ${HAVE_S:-} ]]; then
+    kv "max |stress| diag (kB)" "$S_DIAG"
+    kv "max |stress| shear (kB)" "$S_OFF"
+  fi
+  [[ -n ${PRESS:-} ]] && kv "external pressure (kB)" "$PRESS${PULAY:+   (Pulay corr $PULAY)}"
+
+  # --- IONS: use |EDIFFG| when the user set a force criterion, else 0.03 eV/A ---
+  FTHR=0.03; FSRC="default"
+  if [[ -n ${EDIFFG:-} ]] && awk -v g="$EDIFFG" 'BEGIN{exit !(g<0)}'; then
+    FTHR=$(awk -v g="$EDIFFG" 'BEGIN{printf "%.5f", -g}'); FSRC="EDIFFG"
+  fi
+  if awk -v f="$F_MAX" 'BEGIN{exit !(f<=0.01)}'; then
+    ok "IONS at equilibrium: max|F| = ${F_MAX} <= 0.01 eV/A (tight)."
+  elif awk -v f="$F_MAX" -v t="$FTHR" 'BEGIN{exit !(f<=t)}'; then
+    ok "IONS at equilibrium: max|F| = ${F_MAX} <= ${FTHR} eV/A (${FSRC})."
+  elif awk -v f="$F_MAX" 'BEGIN{exit !(f<=0.05)}'; then
+    warn "IONS marginal: max|F| = ${F_MAX} eV/A is above ${FTHR} (${FSRC}) but below 0.05 -- usable for energies, re-relax before forces/phonons."
+  else
+    warn "IONS NOT relaxed: max|F| = ${F_MAX} eV/A. This geometry is not a stationary point."
+  fi
+
+  # --- CELL: residual pressure maps to a volume error via P/B (B ~ 1000 kB for a
+  # typical solid), so 0.5 kB is ~0.05% in volume -- negligible; 2 kB ~0.2%.
+  if [[ -n ${PRESS:-} ]]; then
+    AP=$(awk -v p="$PRESS" 'BEGIN{printf "%.4f", (p<0?-p:p)}')
+    if awk -v p="$AP" 'BEGIN{exit !(p<=0.5)}'; then
+      ok "CELL at equilibrium: |P| = ${AP} kB <= 0.5 kB (~0.05% in volume)."
+    elif awk -v p="$AP" 'BEGIN{exit !(p<=2.0)}'; then
+      note "CELL nearly relaxed: |P| = ${AP} kB (~0.2% in volume). Fine for most properties."
+    else
+      warn "CELL NOT relaxed: |P| = ${AP} kB residual pressure -> re-relax with ISIF=3."
+    fi
+    if [[ -n ${HAVE_S:-} ]] && awk -v s="$S_OFF" 'BEGIN{exit !(s>0.1)}'; then
+      warn "Residual SHEAR ${S_OFF} kB (off-diagonal stress) -> the cell SHAPE is not relaxed, only its volume."
+    fi
+    # Pulay: with a basis frozen at the starting cell the pressure is biased. VASP
+    # prints the correction it applied; 0 means none was subtracted.
+    if [[ -z ${PULAY:-} ]] || awk -v p="${PULAY:-0}" 'BEGIN{exit !((p<0?-p:p)<1e-6)}'; then
+      tip "Pulay correction is 0: the stress is computed with the basis frozen at this cell, so |P| is biased by basis incompleteness. To trust it to <1 kB, re-run this static at ENCUT x1.3 and confirm the pressure barely moves."
+    fi
+  fi
+  [[ -n $LOCKED ]] && tip "Because ${LOCKED% } is symmetry-locked, small forces prove equilibrium only WITHIN the imposed symmetry. A symmetry-breaking distortion (Peierls/Jahn-Teller) would not show up here -- test it with ISYM=0 on a slightly perturbed POSCAR."
   fi
 fi
 
@@ -765,37 +716,152 @@ if ((gw_family)); then
       col=0; zc=0; ocl=0;
       for(i=1;i<=NF;i++){ tok=$i; if(tok=="No."||tok=="no.")continue; col++; U=toupper(tok);
                           if(U=="Z")zc=col; if(U ~ /OCCUPATION/)ocl=col }
-      inb=1; next }
+      inb=1; got=0; next }
     inb && $1 ~ /^[0-9]+$/ {
       b=$1+0; ks=$2+0; qp=$3+0;
       z=(zc>0 && zc<=NF)?$zc+0:0; o=(ocl>0 && ocl<=NF)?$ocl+0:$NF+0;
-      key=kp SUBSEP b; SEEN[key]=1; KS[key]=ks; QP[key]=qp; ZZ[key]=z; OC[key]=o; KPk[key]=kp; BI[key]=b; next }
-    inb && /^[[:space:]]*$/ { inb=0 }
+      key=kp SUBSEP b; SEEN[key]=1; KS[key]=ks; QP[key]=qp; ZZ[key]=z; OC[key]=o; KPk[key]=kp; BI[key]=b;
+      got=1; next }
+    # VASP prints a BLANK LINE between the column header and the first data row,
+    # so a blank line may only close the block once data has actually been read --
+    # otherwise every QP table is discarded and a finished GW run looks unfinished.
+    inb && /^[[:space:]]*$/ { if(got) inb=0; next }
     END{
       nc=0; for(k in SEEN)nc++;
       if(nc==0){print "NOQP"; exit}
       if(niter==0) niter=1;            # single-shot G0W0 may not print a "QP shifts" banner
-      ksv=-1e30;ksc=1e30;qpv=-1e30;qpc=1e30; zs=0;zn=0; vkk="";ckk="";vbi="";cbi="";
+      # The QP table carries BOTH columns -- KS-energies (the DFT/DFT+U starting
+      # eigenvalues) and QP-energies -- so the per-edge GW corrections come from
+      # this OUTCAR alone; the preceding DFT folder is never needed.
+      ksv=-1e30;ksc=1e30;qpv=-1e30;qpc=1e30; zs=0;zn=0;
+      vkk="";ckk="";vbi="";cbi=""; kvk="";kck="";kvb="";kcb="";
       for(k in SEEN){
-        if(OC[k]>0.5){ if(KS[k]>ksv)ksv=KS[k]; if(QP[k]>qpv){qpv=QP[k];vkk=KPk[k];vbi=BI[k]} }
-        else         { if(KS[k]<ksc)ksc=KS[k]; if(QP[k]<qpc){qpc=QP[k];ckk=KPk[k];cbi=BI[k]} }
+        if(OC[k]>0.5){ if(KS[k]>ksv){ksv=KS[k];kvk=KPk[k];kvb=BI[k]}
+                       if(QP[k]>qpv){qpv=QP[k];vkk=KPk[k];vbi=BI[k]} }
+        else         { if(KS[k]<ksc){ksc=KS[k];kck=KPk[k];kcb=BI[k]}
+                       if(QP[k]<qpc){qpc=QP[k];ckk=KPk[k];cbi=BI[k]} }
         if(ZZ[k]>0.01 && ZZ[k]<1.5){ zs+=ZZ[k]; zn++ } }
       ksgap=ksc-ksv; qpgap=qpc-qpv;
-      printf "  GW iterations (tables): %d\n", niter;
-      printf "  KS gap (DFT input)   : %.4f eV\n", ksgap;
+      kskind=(kvk==kck?"DIRECT":"INDIRECT");
       kind=(vkk==ckk?"DIRECT":"INDIRECT");
+      printf "  GW iterations (tables): %d\n", niter;
+      printf "  KS gap (DFT input)   : %.4f eV  (%s)\n", ksgap, kskind;
       printf "  QP gap (GW)          : %.4f eV  (%s)\n", qpgap, kind;
       printf "  gap renormalisation  : %+.4f eV  (QP - KS)\n", qpgap-ksgap;
-      printf "  QP VBM               : % .4f eV  band %s k-pt %s  (% .5f % .5f % .5f)\n", qpv,vbi,vkk,KX[vkk],KY[vkk],KZ[vkk];
-      printf "  QP CBM               : % .4f eV  band %s k-pt %s  (% .5f % .5f % .5f)\n", qpc,cbi,ckk,KX[ckk],KY[ckk],KZ[ckk];
+      printf "  band-edge shifts (QP - KS, same table -- no DFT folder needed):\n";
+      printf "    VBM : % .4f -> % .4f eV   %+.4f eV   band %s  k-pt %s -> %s\n",
+             ksv, qpv, qpv-ksv, vbi, kvk, vkk;
+      printf "    CBM : % .4f -> % .4f eV   %+.4f eV   band %s  k-pt %s -> %s\n",
+             ksc, qpc, qpc-ksc, cbi, kck, ckk;
+      printf "  QP VBM at k-pt %s  (% .5f % .5f % .5f)\n", vkk,KX[vkk],KY[vkk],KZ[vkk];
+      printf "  QP CBM at k-pt %s  (% .5f % .5f % .5f)\n", ckk,KX[ckk],KY[ckk],KZ[ckk];
+      # A rigid ("scissor") correction leaves the extrema where they were. If an
+      # edge migrates to another k-point the correction is k-dependent, which is
+      # physical but far more sensitive to ENCUTGW/NBANDS convergence.
+      if(kvk!=vkk || kck!=ckk) print "__EDGEMOVE__";
+      if(qpgap<ksgap) print "__GAPCLOSE__";
       if(zn>0){ printf "  mean Z (renorm.)     : %.3f  over %d states\n", zs/zn, zn;
                 if(zs/zn<0.6) print "__LOWZ__" }
     }' "$OUT" \
   | while IFS= read -r l; do case "$l" in
       NOQP)       warn "No 'KS-energies/QP-energies' table found -> not a finished GW run, or output not written (likely killed before the QP step).";;
+      *__EDGEMOVE__*) note "A band edge MOVED to a different k-point: the GW correction is k-dependent, not a rigid scissor. Physical, but more sensitive to ENCUTGW/NBANDS -- converge before quoting the gap.";;
+      *__GAPCLOSE__*) note "QP gap is SMALLER than the KS gap -- GW usually OPENS it. The common cause is a DFT start that already over-opened the gap, typically a large Hubbard U on the conduction-band orbital in the step that wrote the WAVECAR (this OUTCAR cannot see that: check the INCAR of the preceding run). The result is then starting-point dependent -> cross-check with G0W0 on the plain (U=0) start.";;
       *__LOWZ__*) warn "Mean Z < 0.6: strong self-energy / near-breakdown of perturbation theory -> check NBANDS, NOMEGA, ENCUTGW convergence.";;
       *) printf '%s\n' "$l";; esac; done
   note "GW gaps converge SLOWLY in NBANDS and NOMEGA, and ~ENCUTGW^3 in basis. Verify against a convergence series."
+fi
+
+#==================== 9b. META-GGA CONSISTENCY (tau-dependent) ==============
+# A tau-dependent meta-GGA (SCAN/R2SCAN/TPSS/MBJ) is NOT a functional of the
+# density alone: the XC potential also needs the kinetic-energy density
+# tau(r) = SUM_nk f_nk |grad psi_nk|^2, built from the OCCUPIED ORBITALS over the
+# whole BZ. The CHGCAR holds n(r) and nothing else, so the ordinary band/DOS
+# recipe (freeze the charge, ICHARG=11 along a k-path) cannot rebuild the
+# Hamiltonian. VASP does not abort -- it returns eigenvalues from the wrong
+# potential, and they look completely normal. Everything below exists because
+# nothing else in the output complains.
+if [[ -n ${_mgga:-} ]]; then
+  hdr "meta-GGA consistency (${_mgga})"
+
+  # --- POTCAR must carry core kinetic-energy-density information -------------
+  if [[ -s POTCAR ]]; then
+    _ked=$(grep -c "kinetic energy-density" POTCAR 2>/dev/null || true)
+    _ked=${_ked//[^0-9]/}; _ked=${_ked:-0}
+    _nspec=$(awk '/VRHFIN/{n++} END{print n+0}' POTCAR 2>/dev/null); _nspec=${_nspec:-0}
+    if (( _ked > 0 )); then
+      ok "POTCAR supports meta-GGA: ${_ked} 'kinetic energy-density' block(s) for ${_nspec} species."
+      if (( _nspec > 0 && _ked < _nspec )); then
+        warn "Only ${_ked} of ${_nspec} species carry it -- the rest fall back to a core tau that is not consistent with ${_mgga}."
+      fi
+    else
+      fail "POTCAR has NO 'kinetic energy-density' block: these POTCARs cannot do a tau-dependent meta-GGA correctly."
+      tip "Check for _GW-family POTCARs (O_GW is the classic offender). The R2SCAN branch needs standard POTCARs; they are NOT interchangeable with the GW branch."
+    fi
+  else
+    note "No POTCAR here -- cannot verify meta-GGA (kinetic energy-density) support."
+  fi
+
+  # --- the silent trap -------------------------------------------------------
+  _ich=${ICHARG%.*}
+  if [[ $_ich =~ ^-?[0-9]+$ ]] && (( _ich >= 10 )); then
+    fail "ICHARG=${_ich} with METAGGA=${_mgga}: the charge density was frozen, but tau is NOT in the CHGCAR."
+    warn "  These eigenvalues come from the wrong potential. VASP did not complain."
+    tip "Redo self-consistently: ICHARG=0, ISTART=1 (copy the Scf WAVECAR), regular mesh in KPOINTS, high-symmetry path in KPOINTS_OPT."
+  elif [[ $_ich =~ ^-?[0-9]+$ ]]; then
+    ok "ICHARG=${_ich} -- self-consistent, as a tau-dependent functional requires."
+  fi
+
+  # --- LASPH is mandatory, LMAXTAU governs the one-centre expansion of tau ----
+  if [[ $(getlog LASPH) == T ]]; then
+    ok "LASPH=.TRUE. -- required: without it the one-centre terms use only a spherically averaged n and tau."
+  else
+    fail "LASPH is not .TRUE.: mandatory for meta-GGA. One-centre contributions would be computed from spherically averaged density and tau."
+  fi
+  _lmt=$(getp LMAXTAU); _lmt=${_lmt%.*}
+  if [[ $_lmt =~ ^[0-9]+$ ]] && (( _lmt < 6 )); then
+    warn "LMAXTAU=${_lmt} < 6: too low for d elements. The default with LASPH=.TRUE. is 6 -- do not lower it."
+  fi
+
+  # --- GAMMA TEST: audit a derived run against its own Scf -------------------
+  # Gamma sits in the Scf's regular mesh AND at the start of essentially every
+  # high-symmetry path. If both runs solved the same Hamiltonian its eigenvalues
+  # must agree. This is the decisive check on bands/DOS produced with the wrong
+  # recipe -- and it needs no reference data, only the sibling Scf.
+  _scf=""
+  for _c in ../Scf ../SCF ../scf ../1_Scf ../0_Scf; do
+    [[ -f $_c/OUTCAR ]] && { _scf=$_c; break; }
+  done
+  if [[ -n $_scf ]]; then
+    # First eigenvalue block of the last iteration = k-point 1. VASP orders the
+    # mesh with Gamma first for a Gamma-centred grid, and a path almost always
+    # starts there; the coordinates are printed so the comparison is checkable.
+    _gam(){ awk '/ k-point *1 *:/{k=NR; delete v; n=0; coord=$0}
+                 k && NR>k+1 && NF>=2 && $1+0>0 { v[++n]=$2 }
+                 k && NR>k+1 && NF<2 && n>0 { print coord; for(i=1;i<=n&&i<=6;i++) printf "%s ", v[i]; print ""; k=0; n=0 }
+                 END{ if(n>0){ print coord; for(i=1;i<=n&&i<=6;i++) printf "%s ", v[i]; print "" } }' "$1" | tail -2; }
+    _a=$(_gam "$_scf/OUTCAR"); _b=$(_gam "$OUT")
+    _ea=$(printf '%s\n' "$_a" | tail -1); _eb=$(printf '%s\n' "$_b" | tail -1)
+    if [[ -n $_ea && -n $_eb ]]; then
+      _dmax=$(awk -v a="$_ea" -v b="$_eb" 'BEGIN{
+          na=split(a,A," "); nb=split(b,B," "); n=(na<nb?na:nb); m=0
+          for(i=1;i<=n;i++){ d=A[i]-B[i]; if(d<0)d=-d; if(d>m)m=d }
+          printf "%.4f", m }')
+      kv "Scf reference"        "$_scf/OUTCAR"
+      kv "1st k-pt eigenvalues" "this run : ${_eb% }"
+      kv "                    " "Scf      : ${_ea% }"
+      kv "max |difference| (eV)" "$_dmax"
+      if awk -v d="$_dmax" 'BEGIN{exit !(d<=0.01)}'; then
+        ok "Eigenvalues agree to ${_dmax} eV -> both runs solved the SAME Hamiltonian. The data is consistent."
+      elif awk -v d="$_dmax" 'BEGIN{exit !(d<=0.05)}'; then
+        note "Eigenvalues differ by ${_dmax} eV -- small; a denser mesh shifts things slightly. Probably fine, but confirm the k-point coordinates above match."
+      else
+        fail "Eigenvalues differ by ${_dmax} eV at the same k-point -> these runs did NOT solve the same Hamiltonian."
+        warn "  Classic cause: this run used the GGA recipe (ICHARG=11) with a meta-GGA. Redo it."
+      fi
+      note "Compare the printed k-point coordinates: the test is only meaningful if both are the same point."
+    fi
+  fi
 fi
 
 #======================= 10. PITFALLS & RECOMMENDATIONS =====================
@@ -818,7 +884,7 @@ if [[ $ISM =~ ^-?[0-9]+$ ]]; then
   fi
 fi
 
-# --- LDA+U geometry consistency (your CuVS3 0_GGA -> 1_GGA_U workflow) ---
+# --- LDA+U geometry consistency (a GGA -> GGA+U workflow) ---
 if [[ $LDAU == T && ( $CALC_BASE == "static SCF" || ((gw_family)) ) ]]; then
   warn "LDA+U active in a non-relaxing run: make sure the GEOMETRY was relaxed with the SAME LDAU settings."
   tip "A +U static on a plain-GGA geometry is inconsistent; re-relax under identical LDAUU/LDAUL/LDAUJ first."
@@ -884,12 +950,11 @@ if [[ -n ${ETOT:-} && ${NIONS%.*} -gt 0 ]]; then
   kv "Energy / atom (eV)" "$(awk -v e="$ETOT" -v n="${NIONS%.*}" 'BEGIN{printf "%.6f", e/n}')"
 fi
 kv "Calculation"  "$CALC_BASE  [$CALC_XC]"
-case "$TERM" in
-  normal)              kv "Termination" "normal (timing footer present)";;
-  completed-no-footer) kv "Termination" "completed (reached required accuracy; footer absent -> OUTCAR truncated post-run, not a crash)";;
-  *)                   kv "Termination" "KILLED: ${KILL_REASON:-cause not determined}";;
-esac
-kv "Plottability" "$PLOT_VERDICT"
+if grep -q 'General timing and accounting' "$OUT"; then kv "Completion" "normal (timing footer present)"
+elif ((RELAX_DONE));                             then kv "Completion" "converged; footer absent (OUTCAR truncated post-run)"
+elif ((IS_RELAX)); then kv "Completion" "ionic loop UNFINISHED (still running, or stopped before EDIFFG)"
+elif ((SCF_CONVERGED));                          then kv "Completion" "SCF converged; footer absent (OUTCAR truncated post-run)"
+else kv "Completion" "incomplete -> run 'vasp-diagnose' for the cause + data salvage"; fi
 
 echo
 if [[ $FAILS -gt 0 ]]; then

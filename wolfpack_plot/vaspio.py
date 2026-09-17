@@ -160,11 +160,30 @@ def read_fermi(scf_dir: Path, fallback_dir=None) -> float:
 
 def read_bands(bands_dir: Path, efermi: float):
     """Read the band structure + projections from Bands/ into a dict."""
-    vxml, kpts = bands_dir / "vasprun.xml", bands_dir / "KPOINTS"
+    vxml = bands_dir / "vasprun.xml"
     if not vxml.is_file():
         raise FileNotFoundError(f"Missing {vxml}")
+
+    # WHICH file holds the k-PATH?
+    #
+    # Ordinary GGA band run : KPOINTS is line-mode and IS the path.
+    # meta-GGA / hybrid     : KPOINTS is a regular MESH (it drives the
+    #                         self-consistent part, needed because tau and the
+    #                         Fock term cannot be reconstructed from the CHGCAR)
+    #                         and the path lives in KPOINTS_OPT.
+    #
+    # pymatgen already reads the EIGENVALUES from the KPOINTS_OPT block of
+    # vasprun.xml on its own (get_band_structure(..., ignore_kpoints_opt=False),
+    # the default). What it cannot guess is which file to take the high-symmetry
+    # LABELS from -- and passing the mesh KPOINTS here would silently label a
+    # meta-GGA band structure with the mesh, producing a figure with no ticks.
+    kopt = bands_dir / "KPOINTS_OPT"
+    kmesh = bands_dir / "KPOINTS"
+    kpts = kopt if kopt.is_file() and kopt.stat().st_size > 0 else kmesh
     if not kpts.is_file():
-        raise FileNotFoundError(f"Missing {kpts} (line-mode KPOINTS required).")
+        raise FileNotFoundError(
+            f"Missing {kmesh}: a band run needs either a line-mode KPOINTS or, "
+            "for meta-GGA/hybrid, a regular-mesh KPOINTS plus KPOINTS_OPT.")
 
     vr = BSVasprun(str(vxml), parse_projected_eigen=True)
     soc = bool(vr.parameters.get("LSORBIT", False))
@@ -209,7 +228,44 @@ def read_dos(dos_dir: Path, efermi: float):
     cdos = vr.complete_dos
     energies = np.asarray(cdos.energies, dtype=float) - efermi
     total = {sp: np.asarray(d, dtype=float) for sp, d in cdos.densities.items()}
-    return dict(cdos=cdos, energies=energies, total=total)
+    # structure + orbital count are normally taken from the band data; carry them
+    # here too so a DOS-only folder (no band run alongside) can still resolve
+    # projection groups and title the figure.
+    structure = getattr(cdos, "structure", None)
+    n_orb = 0
+    try:
+        pdos = getattr(cdos, "pdos", None) or {}
+        if pdos:
+            n_orb = len(next(iter(pdos.values())))
+    except (StopIteration, TypeError):
+        n_orb = 0
+    return dict(cdos=cdos, energies=energies, total=total,
+                structure=structure, n_orb=n_orb)
+
+
+def auto_energy_window_dos(dos_data, pad_frac=0.02, step=0.5):
+    """Energy window for a DOS-only figure: the range where the DOS is non-zero.
+
+    Mirrors auto_energy_window() for bands. Falls back to the full grid when the
+    density never rises above the noise floor.
+    """
+    E = np.asarray(dos_data["energies"], dtype=float)
+    if E.size == 0:
+        return (EMIN if EMIN is not None else -4.0,
+                EMAX if EMAX is not None else 4.0)
+    tot = None
+    for arr in dos_data["total"].values():
+        a = np.abs(np.asarray(arr, dtype=float))
+        tot = a if tot is None else tot + a
+    if tot is None or not np.any(tot > 0):
+        return float(E.min()), float(E.max())
+    thresh = float(tot.max()) * 1e-3
+    nz = np.nonzero(tot > thresh)[0]
+    lo, hi = float(E[nz[0]]), float(E[nz[-1]])
+    if hi <= lo:
+        return float(E.min()), float(E.max())
+    pad = max((hi - lo) * pad_frac, 0.1)
+    return float(_nice(lo - pad, step, up=False)), float(_nice(hi + pad, step, up=True))
 
 
 # --------------------------------------------------------------------------- #
