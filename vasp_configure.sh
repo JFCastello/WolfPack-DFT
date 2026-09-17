@@ -794,9 +794,22 @@ if [[ "$WP_DEBUG_PARTITION" == "$WP_MAIN_PARTITION" ]]; then
     note "DEBUG partition == MAIN ('$WP_MAIN_PARTITION'): tests will run there, but"
     note "vasp-test will still obey the DEBUG core cap and DEBUG memory margin below."
 fi
-_dbg_cap="$(detect_core_cap "$WP_DEBUG_PARTITION")"
-if [[ -n $_dbg_cap ]]; then note "  detected DEBUG cap: ${_dbg_cap} cores"; wp_why; fi
-: "${WP_DEBUG_MAX_CORES:=$_dbg_cap}"
+# This is NOT "the largest job SLURM would accept" -- it is "how big should the
+# validation benchmark be". Those differ by orders of magnitude: a site may allow
+# 2400 cores on its dev queue, but the benchmark only has to reproduce the chosen
+# KPAR x NCORE long enough to measure memory and parallel efficiency, inside a
+# short dev walltime. Sizing it to the site maximum would queue a 2400-rank job
+# for a 15-minute measurement. So the SLURM limit is an upper bound, and the
+# benchmark is capped at two nodes, which is what the test actually needs.
+_dbg_allowed="$(detect_core_cap "$WP_DEBUG_PARTITION")"
+if [[ -n $_dbg_allowed ]]; then note "  SLURM would allow: ${_dbg_allowed} cores"; wp_why; fi
+_dbg_bench=$(( ${WP_DEBUG_CPUS_PER_NODE:-0} * 2 ))
+if [[ -n $_dbg_allowed ]] && (( _dbg_bench > _dbg_allowed )); then _dbg_bench=$_dbg_allowed; fi
+if (( _dbg_bench > 0 )); then
+    note "  benchmark size   : ${_dbg_bench} cores (2 x ${WP_DEBUG_CPUS_PER_NODE}/node)"
+    note "                     the test only has to reproduce KPAR x NCORE, not fill the queue"
+fi
+: "${WP_DEBUG_MAX_CORES:=$_dbg_bench}"
 ask WP_DEBUG_MAX_CORES "Max total cores for a DEBUG/test job" "$WP_DEBUG_MAX_CORES"
 echo
 
