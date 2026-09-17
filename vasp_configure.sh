@@ -268,10 +268,14 @@ detect_custom_vasp() {
             seen[$exe]=1
             ver="$(printf '%s' "$exe" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
             printf '%s\t[custom] vasp %s -> %s\n' "$exe" "${ver:-?}" "$(_shorten "$exe")"
+        # A real VASP binary has NO extension: vasp_std, vasp_gam, vasp_ncl,
+        # vasp_std_w90. Everything with a dot in the name is something else --
+        # widening the filter to vasp_* started offering tools/vasp_potcarh5.py
+        # as a VASP build, and picking it would leave every job unable to start.
+        # Rejecting any basename containing a dot covers .py .sh .o .a .so.1
+        # .f90 .mod .wpmeta in one rule, with no list to keep up to date.
         done < <(find -L "$r" -maxdepth 8 \( -type f -o -type l \) -perm -u+x \
-                      -name 'vasp_*' ! -name '*.o' ! -name '*.a' ! -name '*.so*' \
-                      ! -name '*.f90' ! -name '*.F' ! -name '*.mod' ! -name '*.wpmeta' \
-                      2>/dev/null)
+                      -name 'vasp_*' ! -name '*.*' 2>/dev/null)
     done
 }
 
@@ -293,6 +297,22 @@ configure_custom() {
         note "read $(_shorten "$meta")${v_feats:+   (features: $v_feats)}"
     fi
     WP_VASP_STD="${v_exe:-$exe}"
+    # A build directory holds vasp_std, vasp_gam and vasp_ncl side by side, but
+    # only the chosen one was recorded -- GAM and NCL kept the bare default name.
+    # Those are not on PATH for a self-compiled build, so the first gamma-only or
+    # spin-orbit job dies with "execve(): vasp_gam: No such file or directory",
+    # long after this wizard ran and with nothing pointing back to here. Adopt the
+    # siblings that actually sit next to the binary the user picked.
+    local _sib _dir _base
+    _dir="$(dirname "$WP_VASP_STD")"; _base="$(basename "$WP_VASP_STD")"
+    for _sib in gam ncl; do
+        local _cand="${_dir}/${_base/_std/_${_sib}}"
+        [[ "$_base" == *_std* && -x "$_cand" ]] || continue
+        case "$_sib" in
+            gam) WP_VASP_GAM="$_cand"; note "  sibling found   : $_cand" ;;
+            ncl) WP_VASP_NCL="$_cand"; note "  sibling found   : $_cand" ;;
+        esac
+    done
     if [[ -n "$v_mods" ]]; then
         WP_VASP_MODULES="$v_mods"
     else
