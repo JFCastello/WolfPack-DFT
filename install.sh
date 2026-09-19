@@ -45,6 +45,10 @@ COMMAND_MAP=(
     "vasp-test|vasp_test.sh"
     "vasp-recommend-slurm|vasp_recommend_slurm.py"
     "vasp-diagnose|vasp_diagnose.sh"
+    # One implementation, two entry points: the script picks its mode from the
+    # name it was invoked as.
+    "vasp-scf-loop|vasp_chain.sh"
+    "vasp-relax-loop|vasp_chain.sh"
     "vasp-check|vasp_check.sh"
     "vasp-clean|vasp_clean.sh"
     "vasp-nuke|vasp_nuke.sh"

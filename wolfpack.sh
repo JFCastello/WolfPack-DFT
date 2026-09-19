@@ -58,6 +58,10 @@ WolfPack-DFT commands
     vasp-recommend-slurm    STAGE 2  KPAR/NCORE/NPAR + memory + slurm.sh
     vasp-test               STAGE 3  benchmark the fixed config -> slurm_vasptest.sh
 
+  CHUNKED RUNS  (for queues that punish a long walltime)
+    vasp-scf-loop           Converge an SCF as a chain of short, self-resubmitting jobs
+    vasp-relax-loop         Same for a structural relaxation  (not implemented yet)
+
   DIAGNOSIS
     vasp-diagnose           Why did a run die?  (OOM/TIME/CRASH) + data salvage
     vasp-check              Physics sanity: gap, metal/insulator, magnetism, CBM/VBM

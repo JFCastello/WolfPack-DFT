@@ -135,3 +135,12 @@ QP_audit.png
 
 # Stray file produced by a shell redirect typo (a memory figure used as a name):
 554308
+
+# --- chunked-run state (vasp-scf-loop / vasp-relax-loop) -------------------
+# Live state, per-chunk archives and the rendered job for a chained run. Local
+# to one calculation, never versioned.
+wolfpack_chain/
+INCAR.chain.bak
+CONTCAR.rejected
+VASP-chain-*.out
+VASP-chain-*.err
