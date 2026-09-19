@@ -310,8 +310,31 @@ fi
 #============================ 4. ELECTRONIC SCF =============================
 hdr "Electronic (SCF) convergence"
 NONSCF=0; [[ $CALC_BASE == non-self* || ${ICHARG%.*} == 11 ]] && NONSCF=1
+# A NELM that the user deliberately capped is not non-convergence. Two cases where
+# reaching it is the INTENDED outcome, not a failure:
+#   * NELM=1 -- you asked for exactly one step, so "it took one" cannot be a
+#     shortfall. This is the GW first step (ALGO=Exact, NELM=1, LOPTICS=.TRUE.),
+#     which this very script recommends a few sections further down; flagging it
+#     as non-convergence contradicted our own advice on a correct run.
+#   * ALGO=Exact / IALGO=90 -- a one-shot LAPACK diagonalisation, which does not
+#     self-consist by construction.
+DELIBERATE_CAP=0
+[[ ${NELM%.*} == 1 ]] && DELIBERATE_CAP=1
+_algo="$(gettag ALGO "$OUT")"; [[ -z $_algo ]] && _algo="$(gettag ALGO "$INC")"
+[[ ${_algo^^} == EXACT || ${_algo^^} == DIAG ]] && DELIBERATE_CAP=1
 if [[ -s $OSZ ]]; then
-  awk -v nelm="${NELM%.*}" '
+  # NB: `while ... done < <(cmd)`, NOT `cmd | while`. A pipeline runs its right-hand
+  # side in a SUBSHELL, so every warn/fail raised in the loop body incremented a copy
+  # of WARNS/FAILS that was discarded on exit -- the counters, and therefore the exit
+  # status, never saw them. Process substitution keeps the body in this shell.
+  while IFS= read -r line; do
+      if [[ $line == *"__NELMHIT__"* ]]; then
+        if ((NONSCF)); then note "${line#  __NELMHIT__ } (expected: fixed-charge run does not self-consist)"
+        elif ((DELIBERATE_CAP)); then
+          note "${line#  __NELMHIT__ } (expected: NELM=${NELM%.*}${_algo:+ with ALGO=$_algo} is a deliberate single-shot step, not a failed SCF)"
+        else fail "${line#  __NELMHIT__ } -> non-convergence; raise NELM, adjust mixing (AMIX/BMIX), or ALGO."; fi
+      else printf '%s\n' "$line"; fi
+  done < <(awk -v nelm="${NELM%.*}" '
     /^[[:space:]]*[A-Za-z]+:[[:space:]]+[0-9]+[[:space:]]/ { ec++; next }
     /F=/ { ionic++; tot+=ec; maxec=(ec>maxec?ec:maxec);
            if (nelm>0 && ec>=nelm) { stuck++; bad[stuck]=ionic" ("ec")"; } ec=0 }
@@ -319,13 +342,7 @@ if [[ -s $OSZ ]]; then
          printf "  max SCF iters/step : %d  (NELM=%s)\n", maxec, (nelm>0?nelm:"?");
          printf "  total SCF iters    : %d\n", tot;
          if (stuck>0){ printf "  __NELMHIT__ %d step(s) hit NELM:", stuck;
-            for(i=1;i<=stuck && i<=8;i++) printf " %s", bad[i]; printf "\n" } }' "$OSZ" \
-  | while IFS= read -r line; do
-      if [[ $line == *"__NELMHIT__"* ]]; then
-        if ((NONSCF)); then note "${line#  __NELMHIT__ } (expected: fixed-charge run does not self-consist)"
-        else fail "${line#  __NELMHIT__ } -> non-convergence; raise NELM, adjust mixing (AMIX/BMIX), or ALGO."; fi
-      else printf '%s\n' "$line"; fi
-    done
+            for(i=1;i<=stuck && i<=8;i++) printf " %s", bad[i]; printf "\n" } }' "$OSZ")
   if ! awk -v nelm="${NELM%.*}" '/^[[:space:]]*[A-Za-z]+:[[:space:]]+[0-9]+/{n=$2} /F=/{if(nelm>0 && n>=nelm)c++} END{exit (c>0?0:1)}' "$OSZ"; then
     ((NONSCF)) || ok "Every ionic step converged electronically below NELM."
   fi
@@ -352,7 +369,8 @@ if [[ $CALC_BASE == *relax* ]]; then
   else
     warn "No 'reached required accuracy' -> relaxation did NOT meet EDIFFG (still running / hit NSW / killed)."
   fi
-  awk '
+  while IFS= read -r l; do [[ $l == *"__NOFORCE__"* ]] && { warn "No TOTAL-FORCE block found."; continue; }; printf '%s\n' "$l"
+  done < <(awk '
     /TOTAL-FORCE/ { inb=1; started=0; cmax=0; ss=0; n=0; next }
     inb && /^[[:space:]]*-+[[:space:]]*$/ {
       if(!started){started=1; next}
@@ -364,8 +382,7 @@ if [[ $CALC_BASE == *relax* ]]; then
          printf "  final max |F| (eV/A) : %.4f\n", fmax;
          printf "  final RMS |F| (eV/A) : %.4f   over %d atoms\n", frms, fn;
          if(dx!=""){d=sqrt(dx*dx+dy*dy+dz*dz); printf "  total drift |d|      : %.4f   [%.1e %.1e %.1e]\n", d, dx,dy,dz}
-         s=(blk>12?blk-11:1); printf "  max|F| trajectory    :"; for(i=s;i<=blk;i++) printf " %.3f", traj[i]; printf "\n" }' "$OUT" \
-  | while IFS= read -r l; do [[ $l == *"__NOFORCE__"* ]] && { warn "No TOTAL-FORCE block found."; continue; }; printf '%s\n' "$l"; done
+         s=(blk>12?blk-11:1); printf "  max|F| trajectory    :"; for(i=s;i<=blk;i++) printf " %.3f", traj[i]; printf "\n" }' "$OUT")
 
   FMAX=$(awk '/TOTAL-FORCE/{inb=1;st=0;cmax=0;next}
               inb&&/^[[:space:]]*-+[[:space:]]*$/{if(!st){st=1;next}else{fm=cmax;inb=0;st=0;next}}
@@ -377,13 +394,13 @@ if [[ $CALC_BASE == *relax* ]]; then
   else note "EDIFFG>=0 -> energy-based stopping; force threshold not applied."; fi
 
   if [[ -s $OSZ ]]; then
-    awk '/F=/{e=$3; gsub(/[Dd]/,"E",e); v[++k]=e+0}
+    while IFS= read -r l; do [[ $l == *"__ENUP__"* ]] && { warn "${l#  __ENUP__ }"; continue; }; printf '%s\n' "$l"
+    done < <(awk '/F=/{e=$3; gsub(/[Dd]/,"E",e); v[++k]=e+0}
          END{ if(k<2){print "  single ionic point (monotonicity n/a)"; exit}
               up=0; for(i=2;i<=k;i++) if(v[i]>v[i-1]+1e-6) up++;
               printf "  ionic energy steps   : %d   dE(last)= %.3e eV\n", k, v[k]-v[k-1];
               if(up>0) printf "  __ENUP__ %d uphill energy move(s) (step too large / rough PES?)\n", up;
-              else     printf "  energy monotonically non-increasing across ionic steps.\n" }' "$OSZ" \
-    | while IFS= read -r l; do [[ $l == *"__ENUP__"* ]] && { warn "${l#  __ENUP__ }"; continue; }; printf '%s\n' "$l"; done
+              else     printf "  energy monotonically non-increasing across ionic steps.\n" }' "$OSZ")
   fi
 fi
 
@@ -526,16 +543,16 @@ if [[ ${ISPIN%.*} == 2 || $LSORBIT == T ]]; then
   if [[ -n $PERAT ]]; then
     note "per-atom m_tot (uB):"
     printf '%s\n' "$PERAT" | tr ' ' '\n' | awk -F: 'NF==2{printf "  ion %-4s % 7.3f", $1, $2; if(++c%5==0)printf "\n"} END{if(c%5)printf "\n"}'
-    awk -v s="$PERAT" 'BEGIN{
+    while IFS= read -r l; do case "$l" in
+        *__NONMAG__*) note "Negligible local moments everywhere -> nonmagnetic solution (consistent with closed-shell ions, e.g. Cu+ d10 / V5+ d0). If you expected magnetism, re-seed MAGMOM, check NUPDOWN and ISYM.";;
+        *__AFM__*)    ok "Zero net moment but large alternating local moments -> antiferromagnetic ordering (physical).";;
+        *)            printf '%s\n' "$l";; esac
+    done < <(awk -v s="$PERAT" 'BEGIN{
       n=split(s,a," "); sum=0; absmax=0; nbig=0;
       for(i=1;i<=n;i++){ split(a[i],b,":"); m=b[2]+0; sum+=m; am=(m<0?-m:m); if(am>absmax)absmax=am; if(am>0.2)nbig++ }
       printf "  sum m = %+.3f uB ; max|m| = %.3f uB ; sites |m|>0.2 = %d\n", sum, absmax, nbig;
       if(absmax<0.1){ print "__NONMAG__" }
-      else if((sum<0?-sum:sum)<0.1 && nbig>=2){ print "__AFM__" } }' \
-    | while IFS= read -r l; do case "$l" in
-        *__NONMAG__*) note "Negligible local moments everywhere -> nonmagnetic solution (consistent with closed-shell ions, e.g. Cu+ d10 / V5+ d0). If you expected magnetism, re-seed MAGMOM, check NUPDOWN and ISYM.";;
-        *__AFM__*)    ok "Zero net moment but large alternating local moments -> antiferromagnetic ordering (physical).";;
-        *)            printf '%s\n' "$l";; esac; done
+      else if((sum<0?-sum:sum)<0.1 && nbig>=2){ print "__AFM__" } }')
   else
     if [[ -n ${NETMAG:-} ]] && awk -v m="$NETMAG" 'BEGIN{exit !((m<0?-m:m)<0.05)}'; then
       note "Per-atom block absent (LORBIT=0), but net moment ~0 -> nonmagnetic / fully compensated. Set LORBIT=11 to resolve per-site moments (AFM vs nonmagnetic)."
@@ -551,7 +568,10 @@ EF=$(grep 'E-fermi' "$OUT" | tail -n1 | awk '{for(i=1;i<=NF;i++) if($i=="E-fermi
 kv "E-fermi (eV)" "${EF:-?}"
 
 # --- VASP's OWN gap determination (authoritative; prints VBM/CBM with k-coords) ---
-awk '
+while IFS= read -r l; do
+    [[ $l == NOVASPGAP ]] && { note "VASP did not print an explicit gap block (metal, or ISMEAR/run type suppresses it) -> using occupation scan below."; continue; }
+    printf '%s\n' "$l"
+done < <(awk '
   /val\. band max:/ {
     for(i=1;i<=NF;i++) if($i=="@"){ai=i} ; for(i=1;i<=NF;i++) if($i=="="){ei=i}
     vmax=$(ai-1)+0; vx=$(ei+1); vy=$(ei+2); vz=$(ei+3); next }
@@ -565,14 +585,15 @@ awk '
     printf "  fundamental gap (VASP): %.4f eV   (%s)\n", sg, kind;
     printf "  VBM (val. band max)  : % .4f eV   @ k = (%s %s %s)\n", svm, svx,svy,svz;
     printf "  CBM (cond. band min) : % .4f eV   @ k = (%s %s %s)\n", scm, scx,scy,scz;
-  }' "$OUT" \
-| while IFS= read -r l; do
-    [[ $l == NOVASPGAP ]] && { note "VASP did not print an explicit gap block (metal, or ISMEAR/run type suppresses it) -> using occupation scan below."; continue; }
-    printf '%s\n' "$l"
-  done
+  }' "$OUT")
 
 # --- independent occupation-based cross-check (also catches partial occupancy / metal) ---
-awk -v ef="${EF:-0}" '
+while IFS= read -r l; do case "$l" in
+    NODATA) warn "No final eigenvalue block in OUTCAR (NWRITE too low or truncated).";;
+    *__INSULATOR__*) ok "No partial occupations across E_F -> clean insulator/semiconductor.";;
+    *__METAL__*)     warn "VBM>=CBM with fractional occupations -> metallic (or smearing bridges a tiny gap).";;
+    *) printf '%s\n' "$l";; esac
+done < <(awk -v ef="${EF:-0}" '
   function abs(x){return x<0?-x:x}
   /spin component/ { sp=$NF+0; next }
   /^[[:space:]]*k-point[[:space:]]+[0-9]+[[:space:]]*:/ && $0 !~ /plane waves/ {
@@ -610,12 +631,7 @@ awk -v ef="${EF:-0}" '
       np=0; for(k in SEEN){o=O[k]; if(o>plo&&o<phi)np++}
       if(np==0) print "__INSULATOR__"; else printf "  %d partially-occupied state(s) near E_F\n", np;
     } else { printf "  [xcheck] gap (occ)    : %.4f eV\n", (gap>0?gap:0); print "__METAL__"; }
-  }' "$OUT" \
-| while IFS= read -r l; do case "$l" in
-    NODATA) warn "No final eigenvalue block in OUTCAR (NWRITE too low or truncated).";;
-    *__INSULATOR__*) ok "No partial occupations across E_F -> clean insulator/semiconductor.";;
-    *__METAL__*)     warn "VBM>=CBM with fractional occupations -> metallic (or smearing bridges a tiny gap).";;
-    *) printf '%s\n' "$l";; esac; done
+  }' "$OUT")
 note "This is the Kohn-Sham (DFT/DFT+U) gap. For the optical/QP gap use the GW section."
 
 #=================== 8b. OCCUPIED BANDS & NBANDS FOR GW =====================
@@ -704,7 +720,13 @@ fi
 #======================= 9. G0W0 / GW QUASIPARTICLE ========================
 if ((gw_family)); then
   hdr "GW / quasiparticle analysis"
-  awk '
+  while IFS= read -r l; do case "$l" in
+      NOQP)       warn "No 'KS-energies/QP-energies' table found -> not a finished GW run, or output not written (likely killed before the QP step).";;
+      *__EDGEMOVE__*) note "A band edge MOVED to a different k-point: the GW correction is k-dependent, not a rigid scissor. Physical, but more sensitive to ENCUTGW/NBANDS -- converge before quoting the gap.";;
+      *__GAPCLOSE__*) note "QP gap is SMALLER than the KS gap -- GW usually OPENS it. The common cause is a DFT start that already over-opened the gap, typically a large Hubbard U on the conduction-band orbital in the step that wrote the WAVECAR (this OUTCAR cannot see that: check the INCAR of the preceding run). The result is then starting-point dependent -> cross-check with G0W0 on the plain (U=0) start.";;
+      *__LOWZ__*) warn "Mean Z < 0.6: strong self-energy / near-breakdown of perturbation theory -> check NBANDS, NOMEGA, ENCUTGW convergence.";;
+      *) printf '%s\n' "$l";; esac
+  done < <(awk '
     function abs(x){return x<0?-x:x}
     /QP shifts/ && /iteration/ {        # start of a new GW/QP iteration -> reset
       delete SEEN; delete KS; delete QP; delete ZZ; delete OC; delete KPk; delete BI;
@@ -762,13 +784,7 @@ if ((gw_family)); then
       if(qpgap<ksgap) print "__GAPCLOSE__";
       if(zn>0){ printf "  mean Z (renorm.)     : %.3f  over %d states\n", zs/zn, zn;
                 if(zs/zn<0.6) print "__LOWZ__" }
-    }' "$OUT" \
-  | while IFS= read -r l; do case "$l" in
-      NOQP)       warn "No 'KS-energies/QP-energies' table found -> not a finished GW run, or output not written (likely killed before the QP step).";;
-      *__EDGEMOVE__*) note "A band edge MOVED to a different k-point: the GW correction is k-dependent, not a rigid scissor. Physical, but more sensitive to ENCUTGW/NBANDS -- converge before quoting the gap.";;
-      *__GAPCLOSE__*) note "QP gap is SMALLER than the KS gap -- GW usually OPENS it. The common cause is a DFT start that already over-opened the gap, typically a large Hubbard U on the conduction-band orbital in the step that wrote the WAVECAR (this OUTCAR cannot see that: check the INCAR of the preceding run). The result is then starting-point dependent -> cross-check with G0W0 on the plain (U=0) start.";;
-      *__LOWZ__*) warn "Mean Z < 0.6: strong self-energy / near-breakdown of perturbation theory -> check NBANDS, NOMEGA, ENCUTGW convergence.";;
-      *) printf '%s\n' "$l";; esac; done
+    }' "$OUT")
   note "GW gaps converge SLOWLY in NBANDS and NOMEGA, and ~ENCUTGW^3 in basis. Verify against a convergence series."
 fi
 
