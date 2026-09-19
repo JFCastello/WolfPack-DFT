@@ -75,7 +75,8 @@ WolfPack-DFT commands
     run-nscf-steps          Chained NSCF (bands/DOS) workflow
     collect-u-data          Gather data for a Hubbard-U fit
     vasp-calculate-u        Linear-response U from the collected data
-    build-supercell         Build a supercell from POSCAR
+    build-supercell         Build a supercell from POSCAR, or enumerate magnetic
+                            orderings into ready-to-run folders (--magnetic-configs)
     vasp-clean              Remove regenerable outputs (keeps inputs)
     vasp-nuke               Remove everything except the inputs
 

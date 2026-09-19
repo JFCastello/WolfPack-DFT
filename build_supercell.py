@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-make_supercell.py — Build a VASP supercell from a POSCAR file.
+build_supercell.py  (invoked on PATH as: build-supercell)
+Build a VASP supercell from a POSCAR, or enumerate magnetic orderings.
 
 ==================================================================
 WHAT THIS SCRIPT DOES
@@ -86,20 +87,404 @@ PHYSICAL / PRACTICAL NOTES
    cell instead if you really need it.
 
 ==================================================================
+MAGNETIC CONFIGURATIONS  (--magnetic-configs)
+==================================================================
+A second, separate mode. Instead of building one supercell it
+enumerates the inequivalent collinear spin orderings of ./POSCAR
+and writes one ready-to-run folder per ordering, grouped by type:
+
+  magnetic_configs/
+    00_NM/config_01/    POSCAR INCAR KPOINTS POTCAR
+    01_FM/config_01/
+    02_AFM/config_01/ config_02/ ...
+    03_FiM/config_01/
+    SUMMARY.txt         <- the index: type, net moment, cell, notes
+
+Each folder gets an INCAR derived from ./INCAR with only ISPIN and
+MAGMOM changed. Points worth knowing:
+
+* MAGMOM MAGNITUDES come from your own INCAR's MAGMOM when it has
+  one (per element, largest |value|); the SIGNS come from each
+  ordering. Without a MAGMOM it falls back to pymatgen's defaults,
+  which are high-spin (V 5, Fe 5, Ni 5, Cu 1.73) and usually differ
+  from what you would have chosen. The output says which was used.
+
+* NUPDOWN IS DELIBERATELY NOT SET, and an inherited one is
+  commented out: it would force every ordering to the same total
+  moment, which is the opposite of what you are comparing. The
+  MAGMOM seed is what steers each calculation, and an ordering that
+  collapses to another is telling you something real.
+
+* CELLS DIFFER. pymatgen reduces to the primitive cell first and
+  antiferromagnetic orderings often need a supercell, so folders
+  can have more or fewer atoms than your POSCAR. Compare energies
+  PER ATOM. KPOINTS is rescaled to keep the reciprocal-space
+  spacing roughly constant.
+
+* THE POTCAR IS CHECKED, NOT ASSUMED. Enumeration can reorder the
+  species blocks; a POTCAR whose order no longer matches is NOT
+  copied, and the folder says so. Copying it blindly would give a
+  run that completes and is silently meaningless.
+
+Needs the enumlib binaries (enum.x, makestr.x), which install.sh
+pulls into the conda environment. Without them pymatgen can only
+build the ferromagnetic ordering.
+
+==================================================================
 USAGE
 ==================================================================
-  ./make_supercell.py POSCAR                       # default 2x2x2
-  ./make_supercell.py POSCAR -s 3 3 1              # 3x3x1 slab
-  ./make_supercell.py POSCAR -s 2 2 2 --sort       # group species
-  ./make_supercell.py POSCAR -s -1 1 1 1 -1 1 1 1 -1 -o POSCAR_conv
+  build-supercell POSCAR                           # default 2x2x2
+  build-supercell POSCAR -s 3 3 1                  # 3x3x1 slab
+  build-supercell POSCAR -s 2 2 2 --sort           # group species
+  build-supercell POSCAR -s -1 1 1 1 -1 1 1 1 -1 -o POSCAR_conv
         # primitive FCC -> conventional cubic via full 3x3 matrix
+
+  build-supercell --magnetic-configs --dry-run     # look before writing
+  build-supercell --magnetic-configs               # write the folders
+  build-supercell --magnetic-configs --magnetic-species V
+        # treat only V as magnetic, ignoring Cu
 """
 
 import argparse
 import sys
+import re
+import shutil
 from pathlib import Path
 
 from pymatgen.io.vasp import Poscar
+
+
+# =============================================================================
+# MAGNETIC CONFIGURATION ENUMERATION  (--magnetic-configs)
+# =============================================================================
+# Finding a system's magnetic ground state means computing several spin
+# orderings and comparing their energies. Setting those up by hand is tedious
+# and easy to get wrong: MAGMOM has to line up site-for-site with the POSCAR,
+# and a slip produces a calculation that converges to something else without
+# ever complaining.
+#
+# The enumeration itself is pymatgen's. It needs the external enumlib binaries
+# (enum.x, makestr.x); without them EVERY antiferromagnetic and ferrimagnetic
+# strategy raises RuntimeError at construction, and only the ferromagnetic case
+# -- which pymatgen special-cases in Python -- survives. install.sh pulls
+# enumlib in with the rest of the conda environment.
+
+MAG_DIR = "magnetic_configs"
+
+
+def _magnetic_elements(structure):
+    """Elements in `structure` that pymatgen treats as magnetic.
+
+    Uses pymatgen's own DEFAULT_MAGMOMS table rather than a list of our own, so
+    detection agrees with what the enumerator will actually do: anything absent
+    from that table is treated as non-magnetic (moment 0) downstream.
+    """
+    from pymatgen.analysis.magnetism.analyzer import DEFAULT_MAGMOMS
+    known = {k.rstrip("+-0123456789") for k in DEFAULT_MAGMOMS}
+    return [el.symbol for el in structure.composition.elements if el.symbol in known]
+
+
+def _magmom_magnitudes_from_incar(incar, structure):
+    """Per-ELEMENT moment magnitudes taken from the root INCAR's MAGMOM.
+
+    Per element, not per site, deliberately: under supercell expansion a site
+    index means nothing, while the element still does. The magnitude kept for an
+    element is the largest |value| it carries, and the SIGNS come from each
+    enumerated ordering, never from here.
+
+    Returns None when the INCAR has no usable MAGMOM, so the caller can fall
+    back to pymatgen's defaults and say which it used.
+    """
+    mm = incar.get("MAGMOM")
+    if not mm or len(mm) != len(structure):
+        return None
+    out = {}
+    for site, m in zip(structure, mm):
+        sym = site.specie.symbol
+        out[sym] = max(out.get(sym, 0.0), abs(float(m)))
+    return {k: v for k, v in out.items() if v > 0} or None
+
+
+def _incar_set_line(text, key, value, note=""):
+    """Replace KEY's whole line in INCAR text, or append it.
+
+    Whole-line replacement, because whether VASP honours the first or the last
+    occurrence of a repeated tag is version-dependent -- appending a duplicate
+    would make the result depend on the build. Anchoring after the tag also
+    keeps MAGMOM from matching a commented line.
+    """
+    line = f"{key} = {value}" + (f"   # {note}" if note else "")
+    pat = re.compile(rf"^[ \t]*{key}[ \t]*=.*$", re.IGNORECASE | re.MULTILINE)
+    if pat.search(text):
+        return pat.sub(line, text, count=1)
+    return text.rstrip("\n") + "\n" + line + "\n"
+
+
+def _incar_comment_line(text, key, note):
+    """Comment KEY out, preserving it for the record."""
+    pat = re.compile(rf"^([ \t]*)({key}[ \t]*=.*)$", re.IGNORECASE | re.MULTILINE)
+    return pat.sub(rf"\1# \2   # {note}", text)
+
+
+def _potcar_species(potcar_path):
+    """Element symbols in POTCAR order, from the TITEL lines.
+
+    A TITEL reads "PAW_PBE Cu_sv_GW 10Dec2015"; the element is the second field
+    with any suffix (_sv, _pv, _GW, _3) stripped.
+    """
+    syms = []
+    try:
+        for ln in Path(potcar_path).read_text(errors="replace").splitlines():
+            if "TITEL" in ln:
+                parts = ln.split("=", 1)[-1].split()
+                if len(parts) >= 2:
+                    syms.append(parts[1].split("_")[0])
+    except OSError:
+        return []
+    return syms
+
+
+def _rescale_kpoints(kpts, ref_abc, new_abc):
+    """Scale an automatic mesh so k-point DENSITY stays roughly constant.
+
+    A supercell samples reciprocal space more finely for the same mesh, so
+    reusing the root KPOINTS would oversample it -- wasted time, and energies
+    that are not comparable at equal cost. Only a Gamma/Monkhorst mesh is
+    touched; a line-mode or explicit list is returned unchanged, because
+    rescaling that automatically would be guessing.
+    """
+    from pymatgen.io.vasp.inputs import Kpoints
+    style = str(kpts.style).lower()
+    if "gamma" not in style and "monkhorst" not in style:
+        return None
+    mesh = list(kpts.kpts[0])
+    if len(mesh) != 3:
+        return None
+    new = [max(1, int(round(m * r / n))) for m, r, n in zip(mesh, ref_abc, new_abc)]
+    if new == mesh:
+        return None
+    maker = Kpoints.gamma_automatic if "gamma" in style else Kpoints.monkhorst_automatic
+    return maker(tuple(new), kpts.kpts_shift or (0, 0, 0)), mesh, new
+
+
+def _ordering_of(structure):
+    """Classify a spin-bearing structure as FM / AFM / FiM / NM."""
+    from pymatgen.analysis.magnetism.analyzer import CollinearMagneticStructureAnalyzer
+    a = CollinearMagneticStructureAnalyzer(
+        structure, overwrite_magmom_mode="none", make_primitive=False)
+    return a.ordering.name
+
+
+def _spins(structure):
+    """Moments in SITE ORDER, from the same object the POSCAR is written from.
+
+    Poscar silently DROPS spin when it writes: a Species(spin=...) structure is
+    serialised with bare element symbols. So MAGMOM and the POSCAR can only be
+    kept consistent by deriving both from one object in one order -- never by
+    re-reading the file, and never after a sort().
+    """
+    out = []
+    for site in structure:
+        s = getattr(site.specie, "spin", None)
+        if s is None:
+            s = site.properties.get("magmom", 0.0)
+        out.append(float(s or 0.0))
+    return out
+
+
+def enumerate_magnetic(args):
+    """Write one folder per inequivalent spin ordering, grouped by type."""
+    from pymatgen.io.vasp import Incar, Poscar
+    from pymatgen.io.vasp.inputs import Kpoints
+
+    root = Path(".")
+    if not args.poscar.is_file():
+        sys.exit(f"error: '{args.poscar}' not found (run this in the calculation folder)")
+
+    poscar_in = Poscar.from_file(str(args.poscar), check_for_potcar=False)
+    ref = poscar_in.structure
+    ref_abc = ref.lattice.abc
+
+    # ---- which atoms carry a moment -------------------------------------
+    if args.magnetic_species:
+        mag_els = [s.strip() for s in args.magnetic_species.split(",") if s.strip()]
+        present = {el.symbol for el in ref.composition.elements}
+        unknown = [e for e in mag_els if e not in present]
+        if unknown:
+            sys.exit(f"error: {', '.join(unknown)} not in this structure "
+                     f"(it has {', '.join(sorted(present))})")
+    else:
+        mag_els = _magnetic_elements(ref)
+        if not mag_els:
+            sys.exit("error: no magnetic elements detected in "
+                     f"{ref.composition.reduced_formula}.\n"
+                     "       Detection uses pymatgen's default-moment table; if an element\n"
+                     "       here should be magnetic, name it: --magnetic-species Fe,Ni")
+
+    # ---- moment magnitudes ----------------------------------------------
+    incar_path = root / "INCAR"
+    incar_text = incar_path.read_text() if incar_path.is_file() else ""
+    magnitudes, mag_src = None, "pymatgen defaults (high-spin)"
+    if incar_text:
+        try:
+            magnitudes = _magmom_magnitudes_from_incar(Incar.from_file(str(incar_path)), ref)
+        except Exception:
+            magnitudes = None
+        if magnitudes:
+            mag_src = "MAGMOM in ./INCAR"
+    default_magmoms = {e: magnitudes[e] for e in mag_els if magnitudes and e in magnitudes} or None
+
+    print(f"Structure : {ref.composition.reduced_formula}  ({len(ref)} sites)")
+    print(f"Magnetic  : {', '.join(mag_els)}")
+    print(f"Magnitudes: {mag_src}"
+          + (f"  -> {default_magmoms}" if default_magmoms else ""))
+
+    # ---- enumerate --------------------------------------------------------
+    # enumlib's adaptor emits UserWarnings about dummy species and missing
+    # Wyckoff properties on every single structure it builds. They are internal
+    # bookkeeping, not something the user can act on, and they bury the report.
+    import warnings
+    from pymatgen.analysis.magnetism.analyzer import MagneticStructureEnumerator
+    strategies = (tuple(s.strip() for s in args.strategies.split(",") if s.strip())
+                  if args.strategies else ("ferromagnetic", "antiferromagnetic"))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            enum = MagneticStructureEnumerator(
+                ref, default_magmoms=default_magmoms, strategies=strategies,
+                automatic=not args.strategies, max_orderings=args.max_orderings)
+    except RuntimeError as e:
+        if "enumlib" in str(e).lower() or "Enumlib" in str(e):
+            sys.exit("error: the magnetic enumeration needs the enumlib binaries "
+                     "(enum.x, makestr.x),\n"
+                     "       which are not on PATH. Without them pymatgen can only build the\n"
+                     "       ferromagnetic ordering -- every AFM and ferrimagnetic strategy\n"
+                     "       fails.\n\n"
+                     "       Install into the toolkit environment:\n"
+                     "           conda install -c conda-forge enumlib\n")
+        raise
+    except ValueError as e:
+        if "Too many magnetic sites" in str(e):
+            sys.exit("error: too many symmetrically distinct magnetic sites for pymatgen's\n"
+                     "       enumerator, which refuses above 8.\n"
+                     "       Narrow the problem with --magnetic-species, or start from a\n"
+                     "       smaller primitive cell.\n")
+        raise
+
+    # ---- collect, with the non-magnetic reference first --------------------
+    entries = []
+    nm = ref.copy()
+    nm.add_site_property("magmom", [0.0] * len(nm))
+    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments"))
+    for struct, origin in zip(enum.ordered_structures, enum.ordered_structure_origins):
+        entries.append((_ordering_of(struct), struct, origin))
+
+    order = {"NM": 0, "FM": 1, "AFM": 2, "FiM": 3}
+    entries.sort(key=lambda e: order.get(e[0], 9))
+
+    # ---- POTCAR validity ---------------------------------------------------
+    pot_path = root / "POTCAR"
+    pot_syms = _potcar_species(pot_path) if pot_path.is_file() else []
+
+    kpt_path = root / "KPOINTS"
+    kpts_in = None
+    if kpt_path.is_file():
+        try:
+            kpts_in = Kpoints.from_file(str(kpt_path))
+        except Exception:
+            kpts_in = None
+
+    out_root = root / MAG_DIR
+    if args.dry_run:
+        print(f"\n[dry run] would write {len(entries)} configuration(s) under {MAG_DIR}/\n")
+    elif out_root.exists():
+        sys.exit(f"error: {MAG_DIR}/ already exists -- move or remove it first")
+
+    summary, counts, made = [], {}, 0
+    for kind, struct, origin in entries:
+        counts[kind] = counts.get(kind, 0) + 1
+        folder = out_root / f"{order.get(kind, 9):02d}_{kind}" / f"config_{counts[kind]:02d}"
+        spins = _spins(struct)
+        net = sum(spins)
+        # pymatgen reduces the input to its PRIMITIVE cell before enumerating,
+        # so a configuration can have FEWER sites than the POSCAR it came from.
+        # Calling that a supercell would be backwards.
+        if len(struct) > len(ref):
+            cellnote = f"SUPERCELL x{len(struct) / len(ref):g}"
+        elif len(struct) < len(ref):
+            cellnote = f"primitive cell ({len(ref)} -> {len(struct)} sites)"
+        else:
+            cellnote = ""
+        expanded = len(struct) != len(ref)
+        note = ""
+
+        if not args.dry_run:
+            folder.mkdir(parents=True, exist_ok=True)
+            # POSCAR and MAGMOM come from ONE object in ONE order; never re-read.
+            Poscar(struct, comment=f"{poscar_in.comment} | {kind} ({origin})"
+                   ).write_file(str(folder / "POSCAR"))
+
+            txt = incar_text
+            txt = _incar_set_line(txt, "ISPIN", "2", "spin-polarised")
+            txt = _incar_set_line(txt, "MAGMOM",
+                                  Incar({"MAGMOM": spins}).get_str().split("=", 1)[1].strip(),
+                                  f"{kind} ordering ({origin})")
+            if re.search(r"^[ \t]*NUPDOWN[ \t]*=", txt, re.IGNORECASE | re.MULTILINE):
+                # An inherited NUPDOWN would force every ordering to the same
+                # total moment -- the opposite of what is being compared.
+                txt = _incar_comment_line(txt, "NUPDOWN",
+                                          "removed: it would force all orderings to one moment")
+            (folder / "INCAR").write_text(txt)
+
+            if kpts_in is not None:
+                res = _rescale_kpoints(kpts_in, ref_abc, struct.lattice.abc)
+                if res is None:
+                    shutil.copy2(kpt_path, folder / "KPOINTS")
+                else:
+                    newk, oldm, newm = res
+                    newk.write_file(str(folder / "KPOINTS"))
+                    note = f"KPOINTS {'x'.join(map(str, oldm))} -> {'x'.join(map(str, newm))}"
+
+            if pot_syms:
+                # Ask the POSCAR that was actually written, not the Structure.
+                # With spin-bearing species, Ni(spin=+4) and Ni(spin=-4) are two
+                # DIFFERENT species to pymatgen, so structure.symbol_set reports
+                # ('Ni','Ni','O') -- which never matches a POTCAR and would
+                # refuse to copy a perfectly good one. site_symbols is the
+                # species-block order VASP will actually read.
+                want = Poscar(struct).site_symbols
+                if pot_syms == want:
+                    shutil.copy2(pot_path, folder / "POTCAR")
+                else:
+                    note = (note + "; " if note else "") + \
+                        f"POTCAR NOT copied (needs {'+'.join(want)}, " \
+                        f"root has {'+'.join(pot_syms)})"
+            made += 1
+
+        summary.append((str(folder.relative_to(root)), kind, origin, len(struct),
+                        net, expanded, cellnote, note))
+
+    # ---- report ------------------------------------------------------------
+    hdr = (f"{'folder':<38} {'type':<4} {'origin':<12} {'sites':>5} {'net':>6}  notes")
+    lines = [hdr, "-" * len(hdr)]
+    for f, k, o, n, net, exp, cn, note in summary:
+        lines.append(f"{f:<38} {k:<4} {o:<12} {n:>5} {net:>+6.1f}  "
+                     f"{cn + '; ' if cn else ''}{note}")
+    body = "\n".join(lines)
+    print("\n" + body)
+
+    if not args.dry_run:
+        (out_root / "SUMMARY.txt").write_text(
+            f"Magnetic configurations from {args.poscar}\n"
+            f"Magnetic elements : {', '.join(mag_els)}\n"
+            f"Moment magnitudes : {mag_src}\n\n{body}\n\n"
+            "Cells of different size are NOT comparable directly -- compare energy PER ATOM.\n"
+            "NUPDOWN is deliberately unset: the MAGMOM seed guides each ordering, and\n"
+            "an ordering that collapses to another is telling you something real.\n")
+        print(f"\nWrote {made} configuration(s) under {MAG_DIR}/   (index: {MAG_DIR}/SUMMARY.txt)")
+        if any(s[5] for s in summary):
+            print("note: some cells were expanded -- compare energies PER ATOM, not per cell.",
+                  file=sys.stderr)
 
 
 def parse_scaling(values):
@@ -117,8 +502,9 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("poscar", type=Path,
-                   help="Input POSCAR file (any VASP 4/5 POSCAR is accepted)")
+    p.add_argument("poscar", type=Path, nargs="?", default=Path("POSCAR"),
+                   help="Input POSCAR file (any VASP 4/5 POSCAR is accepted). "
+                        "Defaults to ./POSCAR.")
     p.add_argument("-s", "--scaling", type=int, nargs="+", default=[2, 2, 2],
                    metavar="N",
                    help="Either 3 ints 'na nb nc' for a diagonal scaling, "
@@ -135,7 +521,46 @@ def main():
     p.add_argument("--cartesian", action="store_true",
                    help="Write Cartesian instead of Direct (fractional) "
                         "coordinates. Direct is recommended for supercells.")
+
+    m = p.add_argument_group("magnetic configuration enumeration")
+    m.add_argument("--magnetic-configs", action="store_true",
+                   help="Instead of building a supercell, enumerate the "
+                        "inequivalent collinear spin orderings of ./POSCAR and "
+                        "write one ready-to-run folder per ordering, grouped by "
+                        "type (NM / FM / AFM / FiM). Each folder gets a POSCAR, "
+                        "an INCAR derived from ./INCAR with ISPIN and MAGMOM "
+                        "set, a KPOINTS rescaled if the cell was expanded, and "
+                        "the POTCAR when its species order still matches. "
+                        "Requires the enumlib binaries.")
+    m.add_argument("--magnetic-species", metavar="EL,EL",
+                   help="Treat exactly these elements as magnetic, e.g. 'V,Fe'. "
+                        "Default: every element pymatgen has a default moment "
+                        "for.")
+    m.add_argument("--max-orderings", type=int, default=64, metavar="N",
+                   help="Cap on how many orderings to enumerate. Default: 64 "
+                        "(pymatgen's own).")
+    m.add_argument("--strategies", metavar="A,B",
+                   help="Enumeration families, comma-separated: ferromagnetic, "
+                        "antiferromagnetic, ferrimagnetic_by_motif, "
+                        "ferrimagnetic_by_species, antiferromagnetic_by_motif. "
+                        "Default: ferromagnetic + antiferromagnetic, plus "
+                        "whatever pymatgen adds automatically for this "
+                        "structure.")
+    m.add_argument("--dry-run", action="store_true",
+                   help="List what would be written, without creating anything.")
+
     args = p.parse_args()
+
+    # A separate mode: it enumerates orderings rather than building a supercell,
+    # so none of the scaling options apply to it.
+    if args.magnetic_configs:
+        if args.sort:
+            # Sorting a spin-bearing structure regroups sites by spin sign,
+            # which would silently break the POSCAR/MAGMOM correspondence.
+            sys.exit("error: --sort cannot be combined with --magnetic-configs "
+                     "(it would reorder sites away from their moments)")
+        enumerate_magnetic(args)
+        return
 
     if not args.poscar.is_file():
         sys.exit(f"error: '{args.poscar}' not found")

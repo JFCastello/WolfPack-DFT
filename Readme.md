@@ -129,7 +129,7 @@ pass `--purge-repo`.
 | `vasp-calculate-u` | `vasp_calculate_u.py` | Hubbard U workflow Step 4: linear fit → print U |
 | `vasp-plot-fatbandsdos` | `vasp_plot_fatbandsdos.py` | Fat-band + projected DOS figure (pymatgen; `wolfpack_plot/` package) |
 | `vasp-quick-plots` | `vasp_quick_plots.sh` | One figure per method (plain/one_orbital/duo/rgb/cmyk/stacked) into numbered `Plots/` sub-folders, projections auto-picked over an energy window |
-| `build-supercell` | `build_supercell.py` | Build a plain VASP supercell from a POSCAR |
+| `build-supercell` | `build_supercell.py` | Build a plain VASP supercell from a POSCAR, or **enumerate the inequivalent magnetic orderings** of a structure into ready-to-run folders (`--magnetic-configs`) |
 | `wolfpack` | `wolfpack.sh` | Print this README (`--help`), the plotting guide (`--plots`) or the command list (`--list`) |
 
 > Setup commands (run from this folder, not on `$PATH`): `./install.sh` and

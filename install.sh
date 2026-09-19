@@ -70,7 +70,13 @@ RETIRED_COMMANDS=(
 )
 
 # Conda packages required by the Python scripts (channel: conda-forge).
-CONDA_PKGS=(python numpy scipy matplotlib pymatgen)
+#
+# enumlib is a BINARY package, not a python module: it provides enum.x and
+# makestr.x, which pymatgen shells out to when enumerating magnetic orderings
+# (build-supercell --magnetic-configs). Without them every antiferromagnetic and
+# ferrimagnetic strategy raises RuntimeError at construction and only the
+# ferromagnetic case survives.
+CONDA_PKGS=(python numpy scipy matplotlib pymatgen enumlib)
 # Optional extras (best-effort; install failure is not fatal).
 CONDA_PKGS_OPTIONAL=(glow)
 
