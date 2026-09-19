@@ -55,6 +55,7 @@ DRY_RUN=0
 RECURSIVE=0
 AGGRESSIVE=0
 FORCE=0
+ALLOW_RUNNING_CHAIN=0
 VERBOSE=0
 DIRS=()
 
@@ -99,6 +100,11 @@ ${BOLD}OPTIONS${RESET}
   -r, --recursive     Look for VASP folders recursively under DIR
   -a, --aggressive    Also remove CHGCAR, LOCPOT, ELFCAR, etc.
   -f, --force         Don't ask for confirmation (use with care)
+  --allow-running-chain
+                      Clean even where a chunked run is live. Refused by default
+                      because WAVECAR, which is on the removal list, is that
+                      run's restart object between chunks. -f does NOT override
+                      this: -f skips a prompt, this is a correctness guard.
   -v, --verbose       Print extra info
   -h, --help          This help
   -V, --version       Print version
@@ -121,6 +127,7 @@ while [[ $# -gt 0 ]]; do
         -r|--recursive)  RECURSIVE=1; shift ;;
         -a|--aggressive) AGGRESSIVE=1; shift ;;
         -f|--force)      FORCE=1; shift ;;
+        --allow-running-chain) ALLOW_RUNNING_CHAIN=1; shift ;;
         -v|--verbose)    VERBOSE=1; shift ;;
         -h|--help)       usage; exit 0 ;;
         -V|--version)    echo "$PROGRAM $VERSION"; exit 0 ;;
@@ -189,11 +196,41 @@ gather_targets() {
 }
 
 # Clean a single VASP directory
+# Is a chunked run still live in this directory?
+#
+# Such a run keeps its restart objects -- WAVECAR above all -- in the calculation
+# folder between jobs, and WAVECAR is in DEFAULT_REMOVE. Deleting it mid-run makes
+# every later chunk restart from scratch, so the run silently never converges. A
+# stale marker (node crash, scancel) must not block cleaning forever, so the
+# scheduler is asked whether the job is genuinely still there.
+chain_is_running() {
+    local d="$1" env="$1/wolfpack_chain/chain.env" jid
+    [[ -f "$env" ]] || return 1
+    grep -qE '^[[:space:]]*chain_state="?running"?' "$env" 2>/dev/null || return 1
+    jid="$(tr -dc '0-9' < "$d/wolfpack_chain/RUNNING" 2>/dev/null)"
+    [[ -n "$jid" ]] || return 1
+    command -v squeue >/dev/null 2>&1 || return 0      # no scheduler -> stay cautious
+    [[ -n "$(squeue -h -j "$jid" 2>/dev/null)" ]]
+}
+
 clean_dir() {
     local d="$1"
 
     if ! is_vasp_dir "$d"; then
         [[ $VERBOSE -eq 1 ]] && echo "${DIM}skip (not VASP): $d${RESET}"
+        return 0
+    fi
+
+    # Checked HERE, per directory, and not once in main(): with -r over a parent
+    # this is what stops one command from wrecking every chain underneath it.
+    #
+    # -f does NOT override. -f suppresses the confirmation prompt, which is a
+    # convenience; this is a correctness guard, and the two must not share a flag.
+    if (( ! ALLOW_RUNNING_CHAIN )) && chain_is_running "$d"; then
+        local _jid; _jid="$(tr -dc '0-9' < "$d/wolfpack_chain/RUNNING" 2>/dev/null)"
+        echo "${YELLOW}!${RESET} ${BOLD}$d${RESET}: a chunked run is live here (job ${_jid}); refusing." >&2
+        echo "  ${DIM}Its WAVECAR is the restart object between chunks and is on the removal list.${RESET}" >&2
+        echo "  ${DIM}Stop it first, or pass --allow-running-chain if you are sure.${RESET}" >&2
         return 0
     fi
 

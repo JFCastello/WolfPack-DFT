@@ -29,6 +29,36 @@ dir="${1:-.}"
 
 cd "$dir" || exit 1
 
+# A chunked run keeps WAVECAR and CONTCAR live in this folder between jobs; both
+# are on the list below. Nuking them mid-run makes every later chunk restart from
+# scratch, so the run silently never converges.
+#
+# This script takes no options and asks nothing, which is exactly why a hard stop
+# belongs here: there is no prompt to think twice at. A stale marker (node crash,
+# scancel) must not block forever, so the scheduler is asked whether the job is
+# genuinely still there.
+if [[ -f wolfpack_chain/chain.env ]] \
+   && grep -qE '^[[:space:]]*chain_state="?running"?' wolfpack_chain/chain.env 2>/dev/null; then
+    _jid="$(tr -dc '0-9' < wolfpack_chain/RUNNING 2>/dev/null)"
+    _live=0
+    if [[ -n "$_jid" ]]; then
+        if command -v squeue >/dev/null 2>&1; then
+            [[ -n "$(squeue -h -j "$_jid" 2>/dev/null)" ]] && _live=1
+        else
+            _live=1                              # no scheduler -> stay cautious
+        fi
+    fi
+    if (( _live )); then
+        {
+            echo "REFUSING: a chunked run is live in $dir (job ${_jid})."
+            echo "  WAVECAR and CONTCAR are its restart objects between chunks and are on"
+            echo "  the removal list below. Nuking them would strand the run."
+            echo "  Stop it first, then re-run this."
+        } >&2
+        exit 2
+    fi
+fi
+
 rm -f CHG CHGCAR CONTCAR DOSCAR EIGENVAL IBZKPT OSZICAR OUTCAR \
       PCDAT PROCAR REPORT vasprun.xml WAVECAR XDATCAR WAVEDER \
       vaspout.h5 LOCPOT ELFCAR PROOUT TMPCAR HILLSPOT PENALTYPOT \

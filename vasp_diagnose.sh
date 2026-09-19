@@ -181,7 +181,10 @@ fi
 
 # --- decide the ROOT CAUSE (priority order) -------------------------------- #
 CAUSE="UNKNOWN"; EVIDENCE=""; FINISHED=0
-if [[ -f "$_oc" ]] && grep -qaE 'Total CPU time used|Voluntary context switches|reached required accuracy' "$_oc" 2>/dev/null; then
+# 'General timing and accounting' is the canonical footer header and is what
+# vasp-check uses as its primary completion test; leaving it out here made the two
+# tools disagree about whether the same OUTCAR terminated normally.
+if [[ -f "$_oc" ]] && grep -qaE 'General timing and accounting|Total CPU time used|Voluntary context switches|reached required accuracy' "$_oc" 2>/dev/null; then
     FINISHED=1
 fi
 _oom="$(_grep_logs 'oom-kill|out of memory|out-of-memory|killed by the cgroup|cgroup out-of-memory|Cannot allocate memory|insufficient virtual memory|memory exhausted|std::bad_alloc|severe.*allocat|OUT_OF_MEMORY')"
@@ -192,10 +195,47 @@ _relax=0
 if [[ -f "$_incar" ]] && grep -qiE '^[[:space:]]*NSW[[:space:]]*=[[:space:]]*([2-9]|[0-9]{2,})' "$_incar" 2>/dev/null; then
     _relax=1
 fi
+
+# --- ran out of iterations, which is NOT the same as finishing ------------- #
+# VASP exhausting NELM or NSW terminates NORMALLY and prints the timing footer,
+# so FINISHED is true and the run was being reported as COMPLETED -- identical to
+# a genuinely converged one. That is wrong for anyone, and it is the single most
+# misleading verdict this tool produced.
+#
+# Both tests need the counts AND the absence of the matching convergence marker:
+# the marker alone is not enough (in a relaxation the EDIFF line is printed once
+# per ionic step) and the count alone is not enough (a run can use every step and
+# converge on the last one).
+_osz="$DIR/OSZICAR"
+_nelm=""; _nsw=""; _nelm_cap=0; _nsw_cap=0
+if [[ -f "$_incar" ]]; then
+    _nelm="$(grep -m1 -oiE '^[[:space:]]*NELM[[:space:]]*=[[:space:]]*[0-9]+' "$_incar" | grep -oE '[0-9]+')"
+    _nsw="$(grep -m1 -oiE '^[[:space:]]*NSW[[:space:]]*=[[:space:]]*[0-9]+' "$_incar" | grep -oE '[0-9]+')"
+fi
+if (( FINISHED )) && [[ -s "$_osz" ]]; then
+    # electronic steps in the LAST ionic block, and the ionic-step count
+    _last_ec="$(awk '/^[[:space:]]*[A-Za-z]+:[[:space:]]+[0-9]+[[:space:]]/{ec++; next}
+                     /F=/{last=ec; ec=0} END{print (ec>0?ec:last)+0}' "$_osz")"
+    _nionic="$(grep -c 'F=' "$_osz" 2>/dev/null)"; _nionic="${_nionic//[^0-9]/}"; _nionic="${_nionic:-0}"
+    if [[ $_nelm =~ ^[0-9]+$ ]] && (( _nelm > 1 && _last_ec >= _nelm )) \
+       && ! grep -qaE 'aborting loop because EDIFF is reached' "$_oc" 2>/dev/null; then
+        _nelm_cap=1
+    fi
+    if (( _relax )) && [[ $_nsw =~ ^[0-9]+$ ]] && (( _nsw > 0 && _nionic >= _nsw )) \
+       && ! grep -qaiE 'reached required accuracy' "$_oc" 2>/dev/null; then
+        _nsw_cap=1
+    fi
+fi
 # A job SLURM still lists as RUNNING/PENDING has not failed and has not finished --
 # diagnosing it as either is wrong. This must be tested BEFORE any completion
 # heuristic: sacct is authoritative about the job's state, the OUTCAR is not.
-if [[ "$SACCT_STATE" == RUNNING* || "$SACCT_STATE" == PENDING* \
+#
+# WP_DIAG_ASSUME_ENDED=1 opts out. A caller running INSIDE the job it wants
+# diagnosed -- after VASP exits but before the batch script does -- is reported by
+# sacct as its own RUNNING self, so this branch would swallow every real cause.
+# Opt-in, because for every other caller sacct really is the better authority.
+if [[ "${WP_DIAG_ASSUME_ENDED:-0}" != "1" ]] \
+   && [[ "$SACCT_STATE" == RUNNING* || "$SACCT_STATE" == PENDING* \
       || "$SACCT_STATE" == REQUEUED* || "$SACCT_STATE" == RESIZING* ]]; then
     CAUSE="RUNNING"; EVIDENCE="sacct State=${SACCT_STATE} -- the job has not ended yet."
 elif [[ "$SACCT_STATE" == OUT_OF_MEMORY* || -n "$_oom" ]]; then
@@ -206,6 +246,10 @@ elif [[ -n "$_segv" ]]; then
     CAUSE="CRASH"; EVIDENCE="$_segv"
 elif [[ -n "$_miss" ]]; then
     CAUSE="MISSING_INPUT"; EVIDENCE="$_miss"
+elif (( _nelm_cap )); then
+    CAUSE="NELM_CAP"; EVIDENCE="the electronic loop used all ${_nelm} NELM steps without reaching EDIFF."
+elif (( _nsw_cap )); then
+    CAUSE="NSW_CAP"; EVIDENCE="the ionic loop used all ${_nsw} NSW steps without reaching EDIFFG."
 elif (( FINISHED )); then
     CAUSE="COMPLETED"; EVIDENCE="OUTCAR shows the run finished normally."
 elif [[ -f "$_oc" ]] && (( ! _relax )) \
@@ -286,9 +330,13 @@ if [[ "$CAUSE" == RUNNING ]]; then
     # Nothing is final while the job is alive: VASP writes EIGENVAL/DOSCAR/WAVECAR/
     # CHGCAR at the END, so mid-run they are empty and no verdict on the data holds.
     USABLE="IN_PROGRESS"; USE_WHY="job still running -- final outputs are not written yet"
-elif [[ "$CAUSE" == COMPLETED ]]; then
+elif [[ "$CAUSE" == COMPLETED || "$CAUSE" == NELM_CAP || "$CAUSE" == NSW_CAP ]]; then
     # Only claim "all outputs present" after actually confirming one is readable --
     # a 0-byte EIGENVAL/DOSCAR exists but contains nothing.
+    #
+    # NELM_CAP/NSW_CAP belong here: running out of iterations is a normal exit, so
+    # every output really was written. The data is complete, just not converged --
+    # which the CAUSE already says, and which USABLE has no business restating.
     if (( VR_OK || EIG_OK )); then USABLE="FULL"; USE_WHY="run finished; outputs verified readable"
     else USABLE="PARTIAL"; USE_WHY="run finished, but vasprun.xml/EIGENVAL are missing or empty"
     fi
@@ -333,6 +381,11 @@ case "$CAUSE" in
   MISSING_INPUT) echo "  ${c_r}ROOT CAUSE${c_0}      : MISSING/BAD INPUT file.";;
   COMPLETED) echo "  ${c_g}ROOT CAUSE${c_0}      : none -- the run appears to have FINISHED (not a failure).";;
   RUNNING) echo "  ${c_g}ROOT CAUSE${c_0}      : none -- the job is STILL RUNNING. Nothing to diagnose yet.";;
+  NELM_CAP) echo "  ${c_y}ROOT CAUSE${c_0}      : NELM EXHAUSTED -- the electronic loop used all ${_nelm} steps"
+            echo "                    without reaching EDIFF. VASP exits normally and prints its timing"
+            echo "                    footer either way, so this is NOT a crash and NOT convergence.";;
+  NSW_CAP)  echo "  ${c_y}ROOT CAUSE${c_0}      : NSW EXHAUSTED -- the ionic loop used all ${_nsw} steps without"
+            echo "                    reaching EDIFFG. Not a crash: the geometry simply is not converged yet.";;
   UNFINISHED) echo "  ${c_y}ROOT CAUSE${c_0}      : ionic loop UNFINISHED -- the relaxation never reached EDIFFG."
               echo "                    Not a crash: no OOM/walltime/segfault signature. Either it is still"
               echo "                    running, it hit NSW, or it was cancelled.";;
@@ -359,6 +412,12 @@ case "$CAUSE" in
   CRASH|MISSING_INPUT) echo "  fix             : not auto-fixable -- correct the input, then re-run the pipeline.";;
   RUNNING) echo "  next            : wait for the job to end, then re-run vasp-diagnose. 'vasp-check' already";
            echo "                    works on the partial OUTCAR if you want the physics so far.";;
+  NELM_CAP) echo "  fix             : restart from the WAVECAR this run wrote (ISTART=1) to continue the";
+            echo "                    same SCF, or raise NELM. If it keeps stalling the problem is the";
+            echo "                    electronic setup, not the step budget: try ALGO, AMIX/BMIX, ISMEAR.";;
+  NSW_CAP)  echo "  fix             : restart from CONTCAR (cp CONTCAR POSCAR) to continue relaxing. If";
+            echo "                    max|F| has plateaued above |EDIFFG|, the force NOISE FLOOR is the";
+            echo "                    limit, not the optimiser -- see LREAL/ADDGRID/EDIFF before raising NSW.";;
   UNFINISHED) echo "  fix             : if it hit NSW, restart from CONTCAR (cp CONTCAR POSCAR). If the forces";
               echo "                    plateau above |EDIFFG|, the force NOISE FLOOR is the limit, not the";
               echo "                    optimiser -- see LREAL/ADDGRID/EDIFF before raising NSW.";;

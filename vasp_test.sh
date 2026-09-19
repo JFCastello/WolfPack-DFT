@@ -542,6 +542,30 @@ avg_loop=$(awk '/LOOP:/{ k=split($0,a,"real time"); if(k>1){ s+=a[2]+0; c++ } }
                 END{ if(c>0) printf "%.2f", s/c; else printf "0" }' "$OUTCAR")
 avg_loop="${avg_loop:-0}"
 
+# Ionic-step timing and the fixed setup cost, for anything that has to budget a
+# walltime from this benchmark.
+#
+# 'LOOP:' is the ELECTRONIC step and 'LOOP+:' the IONIC one. They are distinct
+# literals -- "LOOP:" is not a substring of "LOOP+:" -- so the greps do not
+# overlap and neither needs to exclude the other (verified: 38 vs 1 on a real
+# OUTCAR, zero overlap).
+#
+# The residual  Elapsed - sum(LOOP:) - sum(LOOP+:)  is everything that is NOT a
+# step: process start-up, FFT planning, POTCAR/WAVECAR I/O. A chunked run pays
+# that once per chunk, so it has to be budgeted separately from the per-step
+# rate rather than smeared into it.
+sum_loop=$(awk '/LOOP:/{ k=split($0,a,"real time"); if(k>1) s+=a[2]+0 }
+                END{ printf "%.2f", s+0 }' "$OUTCAR")
+sum_loopplus=$(awk '/LOOP\+:/{ k=split($0,a,"real time"); if(k>1) s+=a[2]+0 }
+                    END{ printf "%.2f", s+0 }' "$OUTCAR")
+nionic=$(grep -c 'LOOP+:' "$OUTCAR" 2>/dev/null); nionic="${nionic//[^0-9]/}"; nionic="${nionic:-0}"
+# Mean electronic steps per ionic step -- 0 when the benchmark never completed an
+# ionic step, which callers must read as "no estimate available".
+scf_per_ionic=$(awk -v n="$nscf" -v i="$nionic" \
+    'BEGIN{ if(i>0) printf "%.2f", n/i; else printf "0" }')
+startup_s=$(awk -v w="$wall" -v e="$sum_loop" -v p="$sum_loopplus" \
+    'BEGIN{ r=w-e-p; if(r<0) r=0; printf "%.1f", r }')
+
 if posq "$maxrss_mb" && [[ -n "$RAW" ]]; then
     node_avail_gb=$(awk -v m="$NODE_MEM_MB" 'BEGIN{printf "%.0f", m/1024.0}')
     printf "  peak RAM / rank (MaxRSS) : %s MB   (heaviest single rank)\n" "$maxrss_mb"
@@ -662,7 +686,33 @@ elif (( _rc == 0 )); then
         cp -f "$OUTCAR" "$SUBMIT_DIR/.wolfpack/vasptest_OUTCAR" 2>/dev/null || true
         rm -rf "$RUNDIR"
     fi
-    { echo 'stage="test"'; } >> "$SUBMIT_DIR/.wolfpack/state.env" 2>/dev/null || true
+    # Persist what the benchmark MEASURED, not just that it ran. These numbers are
+    # the only per-step rate the pipeline ever obtains, and until now they reached
+    # report.out as prose and nothing else -- unreadable to any later stage.
+    #
+    # Health warning for consumers, encoded in test_lwave: the benchmark runs with
+    # LWAVE/LCHARG force-appended as .FALSE. on a throwaway INCAR, on the DEBUG
+    # partition, at test_ranks rather than the production count. So test_avg_loop
+    # contains NO WAVECAR I/O and is not a production per-step time. Treat it as a
+    # first estimate to be replaced by a real measurement, never as ground truth.
+    #
+    # stage= stays LAST: consumers `source` this file, so the last assignment wins.
+    {
+        echo "test_avg_loop=\"${avg_loop}\""
+        echo "test_nscf=\"${nscf}\""
+        echo "test_nionic=\"${nionic}\""
+        echo "test_scf_per_ionic=\"${scf_per_ionic}\""
+        echo "test_wall=\"${wall}\""
+        echo "test_startup_s=\"${startup_s}\""
+        echo "test_cpu_eff=\"${cpu_eff}\""
+        echo "test_ranks=\"${NTASKS}\""
+        # NOT $part: that is set in the launcher branch, which ends at `exec sbatch`
+        # and never reaches this code. Inside the job it is unset, and with `set -u`
+        # referencing it would abort the job outright. SLURM exports the real one.
+        echo "test_partition=\"${SLURM_JOB_PARTITION:-}\""
+        echo "test_lwave=\"F\""
+        echo 'stage="test"'
+    } >> "$SUBMIT_DIR/.wolfpack/state.env" 2>/dev/null || true
     hdr "DONE -- pipeline complete"
     echo "  DEFINITIVE job (measured memory): $DEFINITIVE   <- submit this"
     echo "  recommend's first pass kept as  : $SUBMIT_DIR/slurm.sh"
