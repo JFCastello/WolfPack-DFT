@@ -60,7 +60,7 @@ WolfPack-DFT commands
 
   CHUNKED RUNS  (for queues that punish a long walltime)
     vasp-scf-loop           Converge an SCF as a chain of short, self-resubmitting jobs
-    vasp-relax-loop         Same for a structural relaxation  (not implemented yet)
+    vasp-relax-loop         Same for a relaxation: chunks NSW, never NELM
 
   DIAGNOSIS
     vasp-diagnose           Why did a run die?  (OOM/TIME/CRASH) + data salvage
