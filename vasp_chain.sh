@@ -381,13 +381,24 @@ if [[ $ACTION == chunk ]]; then
         # yields forces that are simply wrong, and the optimiser then takes a
         # step based on them -- so the chain only ever cuts BETWEEN ionic steps.
         incar_set NSW  "$cap"                  "chunk ${idx} cap (vasp-relax-loop)"
-        incar_set NELM "$(int "${nelm_target:-60}")" \
-                       "full: a truncated SCF would give wrong forces"
+        _nelm_use=$(int "${nelm_target:-60}")
         if (( recovery )); then
-            say "recovery chunk: one ionic step with the full electronic budget"
-            note "the previous chunk's last ionic step ran out of NELM, so its forces"
-            note "were unreliable; this converges the electrons at that geometry first."
+            # The chain never caps NELM, so running out of it means the USER's own
+            # NELM was not enough at that geometry -- a convergence problem, not
+            # something the chunking caused. Taking one cautious step is therefore
+            # not a fix on its own: with the same budget it would most likely run
+            # out again. Raise it for this one step, which is the only change that
+            # addresses the cause.
+            _nelm_use=$(awk -v n="$_nelm_use" -v c="$NELM_CEIL" \
+                        'BEGIN{ v=int(n*1.5); if(v>c)v=c; if(v<n)v=n; print v }')
+            say "recovery chunk: one ionic step, NELM raised ${nelm_target} -> ${_nelm_use}"
+            note "the previous chunk's last ionic step ran out of NELM, so its forces were"
+            note "unreliable and VASP moved the ions with them. This converges the electrons"
+            note "at the geometry actually reached before taking any further ionic step."
+            state_set nelm_recovery "$_nelm_use"
         fi
+        incar_set NELM "$_nelm_use" \
+                       "full electronic budget: a truncated SCF gives wrong forces"
     fi
 
     incar_set LWAVE  ".TRUE."                  "the restart object between chunks"
