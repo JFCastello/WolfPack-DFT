@@ -334,6 +334,38 @@ Exit codes: `0` = PASS, `1` = at least one FAIL, `2` = usage error.
 
 ---
 
+### What the relaxation changed
+
+For any run with ionic steps, `vasp-check` diffs the starting `POSCAR` against
+the final `CONTCAR` and reports what the relaxation actually did — because
+*"reached required accuracy"* only says the forces are small, not that the
+structure is the one you meant to study:
+
+- **Cell** — a, b, c, the three angles and the volume, each with its absolute
+  and percent change, plus the Green–Lagrange strain tensor (rotation-free, so a
+  cell that was merely re-oriented shows zero strain instead of a false shear).
+- **Symmetry** — the space group before and after at four tolerances, including
+  the 1e-5 that VASP itself uses for `ISYM`. It says whether the symmetry rose
+  or fell, which is how you catch a relaxation that `ISYM` never let out of a
+  saddle point.
+- **Displacements** — max, mean and RMS overall and per species, how many atoms
+  moved at all, and the biggest movers named by index with their direction.
+  Measured as fractional differences with periodic images resolved, so a uniform
+  cell expansion does not masquerade as every atom having moved.
+- **Bonds** — the shortest and mean nearest-neighbour distance before and after,
+  with a warning if the shortest bond collapsed by more than 20 %.
+
+For a static run there is nothing to diff, so it just describes the geometry
+that was computed: formula, cell, density, space group at each tolerance and the
+shortest bond. The same report is available on its own:
+
+```bash
+wolfpack_structure.py POSCAR CONTCAR    # before -> after
+wolfpack_structure.py POSCAR            # one structure
+```
+
+---
+
 ## 3. Cleanup
 
 ### `vasp-clean` (preferred)
@@ -568,6 +600,26 @@ build-magnetic-configs --magnetic-species V   # only V is magnetic, ignore Cu
 build-magnetic-configs POSCAR_relaxed         # start from another file
 build-magnetic-configs --help
 ```
+
+**Launching the whole sweep.** Nine orderings means nine times dry-run →
+recommend → test, so the command also writes
+`magnetic_configs/run_pipelines.sh`, which submits all of them at once:
+
+```bash
+magnetic_configs/run_pipelines.sh --dry-run   # what it would submit
+magnetic_configs/run_pipelines.sh             # submit everything
+magnetic_configs/run_pipelines.sh --force     # redo folders already submitted
+```
+
+The stages are not independent — recommend reads what the dry run measured, and
+test reads what recommend chose — so per folder it submits the stage-1 job and
+then a small driver job holding `afterok:<stage-1>` that runs stages 2 and 3.
+SLURM does the waiting, so **you can log out**. It skips folders that have no
+POTCAR (species order did not match) or that it has already submitted, prints a
+table of job IDs, and says *why* when a stage refuses rather than just that it
+did. The driver carries the toolkit's own interpreter by absolute path and a
+copy of your cluster profile, because a compute node has neither conda activated
+nor, on many clusters, your `$HOME` mounted.
 
 ---
 

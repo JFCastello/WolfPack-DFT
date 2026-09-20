@@ -144,3 +144,9 @@ INCAR.chain.bak
 CONTCAR.rejected
 VASP-chain-*.out
 VASP-chain-*.err
+
+# build-magnetic-configs writes a tree of ready-to-run folders into the
+# calculation directory, plus the launcher and the profile copy it stages for
+# the compute nodes. All generated, none of it belongs to the toolkit.
+magnetic_configs/
+run_pipelines.sh

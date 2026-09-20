@@ -527,6 +527,37 @@ if [[ $CALC_BASE == *relax* || $CALC_BASE == "static SCF" || ((gw_family)) ]]; t
   fi
 fi
 
+#==================== 6b. WHAT THE RELAXATION DID ==========================
+# "reached required accuracy" says the forces are small. It does not say WHAT
+# the run did to the structure, and that is usually the thing worth knowing: a
+# relaxation can converge beautifully onto a cell that collapsed, an atom that
+# hopped site, or a symmetry that rose (ISYM freezing you into a saddle point)
+# or fell. None of that is visible in the force table above.
+#
+# For a relaxation this diffs POSCAR against CONTCAR; for a static run there is
+# nothing to diff, so it just describes the geometry that was computed. The work
+# is pymatgen's, in wolfpack_structure.py -- vasp-check runs on a login node, so
+# unlike the job-side tools it may import python freely. If it cannot, the
+# section says so and the rest of the report is unaffected.
+_wp_struct="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/wolfpack_structure.py"
+_wp_py="$(command -v python3 || command -v python || true)"
+if [[ -f "$_wp_struct" && -n "$_wp_py" && -s POSCAR ]]; then
+  if ((IS_RELAX)) && [[ -s CONTCAR ]]; then
+    hdr "What the relaxation changed (POSCAR -> CONTCAR)"
+    if ! "$_wp_py" "$_wp_struct" POSCAR CONTCAR 2>&1; then
+      note "structure report unavailable (pymatgen missing? 'conda activate wolfpack-dft')"
+    fi
+  elif ((IS_RELAX)); then
+    hdr "What the relaxation changed (POSCAR -> CONTCAR)"
+    note "CONTCAR is missing or empty -- nothing to compare against yet."
+  else
+    hdr "Structure of this calculation"
+    if ! "$_wp_py" "$_wp_struct" POSCAR 2>&1; then
+      note "structure report unavailable (pymatgen missing? 'conda activate wolfpack-dft')"
+    fi
+  fi
+fi
+
 #======================= 7. MAGNETIZATION ===================================
 if [[ ${ISPIN%.*} == 2 || $LSORBIT == T ]]; then
   hdr "Magnetization"
