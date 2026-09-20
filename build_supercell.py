@@ -116,11 +116,24 @@ MAGMOM changed. Points worth knowing:
   MAGMOM seed is what steers each calculation, and an ordering that
   collapses to another is telling you something real.
 
-* CELLS DIFFER. pymatgen reduces to the primitive cell first and
-  antiferromagnetic orderings often need a supercell, so folders
-  can have more or fewer atoms than your POSCAR. Compare energies
-  PER ATOM. KPOINTS is rescaled to keep the reciprocal-space
-  spacing roughly constant.
+* YOUR CELL IS KEPT WHEREVER THE ORDERING FITS IN IT. The
+  enumerator does not return the cell it was given -- it reduces
+  the basis, so the same lattice comes back with different vectors,
+  different fractional coordinates and a different site order.
+  Those orderings are mapped back onto your POSCAR, so the folder
+  holds YOUR cell, YOUR site order and YOUR KPOINTS untouched, with
+  only MAGMOM added.
+
+* SOME CELLS STILL DIFFER, and the index says which. An ordering
+  has its own magnetic periodicity and your cell need not admit it
+  (on conventional NiO, five of eight orderings have exactly your
+  atom count and still do not fit). Antiferromagnets often need a
+  supercell, and pymatgen may find a smaller primitive cell. Those
+  folders are marked SUPERCELL, primitive cell or CELL REBUILT --
+  compare energies PER ATOM, and note that selective dynamics is
+  dropped there, because the frozen atoms have no counterpart.
+  KPOINTS is rescaled from the RECIPROCAL lattice vectors, which is
+  what the mesh subdivides; an unchanged lattice is left alone.
 
 * THE POTCAR IS CHECKED, NOT ASSUMED. Enumeration can reorder the
   species blocks; a POTCAR whose order no longer matches is NOT
@@ -155,6 +168,7 @@ USAGE
 """
 
 import argparse
+import math
 import sys
 import re
 import shutil
@@ -222,7 +236,8 @@ def _incar_set_line(text, key, value, note=""):
     would make the result depend on the build. Anchoring after the tag also
     keeps MAGMOM from matching a commented line.
     """
-    line = f"{key} = {value}" + (f"   # {note}" if note else "")
+    cc = _incar_comment_char(text)
+    line = f"{key} = {value}" + (f"   {cc} {note}" if note else "")
     pat = re.compile(rf"^[ \t]*{key}[ \t]*=.*$", re.IGNORECASE | re.MULTILINE)
     if pat.search(text):
         return pat.sub(line, text, count=1)
@@ -230,9 +245,41 @@ def _incar_set_line(text, key, value, note=""):
 
 
 def _incar_comment_line(text, key, note):
-    """Comment KEY out, preserving it for the record."""
+    """Comment KEY out, preserving it for the record.
+
+    The line is disabled with '#' -- which VASP always honours -- while the
+    note that explains why uses whatever the file annotates with.
+    """
+    cc = _incar_comment_char(text)
     pat = re.compile(rf"^([ \t]*)({key}[ \t]*=.*)$", re.IGNORECASE | re.MULTILINE)
-    return pat.sub(rf"\1# \2   # {note}", text)
+    return pat.sub(rf"\1# \2   {cc} {note}", text)
+
+
+def _raw_title(poscar_path):
+    """Line 1 of a POSCAR, exactly as written.
+
+    pymatgen parses POSCARs through clean_lines, which cuts every line at the
+    first '#'. VASP does no such thing -- line 1 is free text -- so a title
+    carrying a space group or a Materials Project URL loses everything from the
+    '#' onwards if taken from Poscar.comment.
+    """
+    try:
+        first = Path(poscar_path).read_text(errors="replace").splitlines()[:1]
+    except (OSError, IndexError):
+        return ""
+    return first[0].strip() if first else ""
+
+
+def _incar_comment_char(text):
+    """The character this INCAR already uses for a TRAILING comment ('!' or '#').
+
+    VASP honours both, so this is only about handing back a file that still
+    reads like the one that came in. Only trailing comments are counted: a file
+    can annotate with '!' while commenting whole tags out with '#', and it is
+    the annotation style that the lines written here have to match.
+    """
+    trailing = re.findall(r"=[ \t]*\S+[ \t]+([!#])", text)
+    return "!" if trailing.count("!") > trailing.count("#") else "#"
 
 
 def _potcar_species(potcar_path):
@@ -253,27 +300,49 @@ def _potcar_species(potcar_path):
     return syms
 
 
-def _rescale_kpoints(kpts, ref_abc, new_abc):
-    """Scale an automatic mesh so k-point DENSITY stays roughly constant.
+def _rescale_kpoints(kpts, ref_lattice, new_lattice):
+    """Scale an automatic mesh so the k-point RESOLUTION stays what it was.
 
     A supercell samples reciprocal space more finely for the same mesh, so
     reusing the root KPOINTS would oversample it -- wasted time, and energies
-    that are not comparable at equal cost. Only a Gamma/Monkhorst mesh is
-    touched; a line-mode or explicit list is returned unchanged, because
-    rescaling that automatically would be guessing.
+    not comparable at equal cost.
+
+    The mesh subdivides the RECIPROCAL lattice vectors, so it has to be scaled
+    by those, never by |a|, |b|, |c|. The two agree only for an orthogonal cell,
+    and they part company exactly where it matters: the enumerator often returns
+    the SAME lattice in a reduced basis. LaMnO3's c -> c + a leaves |a| and |b|
+    untouched while shortening |c| from 9.57 to 7.78 A, so the real-space ratio
+    demanded MORE k-points along c in a cell of identical volume. In the
+    reciprocal basis that ratio is 1 and the mesh is correctly left alone.
+
+    ceil, not round: this is VASP's own KSPACING rule. It makes an unchanged
+    lattice reproduce the user's mesh exactly -- including an anisotropic one,
+    where a shared-spacing formula would quietly coarsen the dense axes -- and
+    never samples any axis more coarsely than the ratio asks.
+
+    Only a Gamma/Monkhorst mesh is touched; a line-mode or explicit list is
+    returned unchanged, because rescaling that automatically would be guessing.
+
+    Returns the KPOINTS text (not a Kpoints object) so the user's own header
+    line and explicit shift survive: Kpoints.gamma_automatic replaces the
+    comment with "Automatic kpoint scheme" and drops a zero shift line.
     """
-    from pymatgen.io.vasp.inputs import Kpoints
     style = str(kpts.style).lower()
     if "gamma" not in style and "monkhorst" not in style:
         return None
     mesh = list(kpts.kpts[0])
     if len(mesh) != 3:
         return None
-    new = [max(1, int(round(m * r / n))) for m, r, n in zip(mesh, ref_abc, new_abc)]
+    ref_b = ref_lattice.reciprocal_lattice.abc
+    new_b = new_lattice.reciprocal_lattice.abc
+    new = [max(1, math.ceil(m * n / r - 1e-9))
+           for m, r, n in zip(mesh, ref_b, new_b)]
     if new == mesh:
         return None
-    maker = Kpoints.gamma_automatic if "gamma" in style else Kpoints.monkhorst_automatic
-    return maker(tuple(new), kpts.kpts_shift or (0, 0, 0)), mesh, new
+    shift = tuple(kpts.kpts_shift or (0, 0, 0))
+    text = (f"{kpts.comment}\n0\n{'Gamma' if 'gamma' in style else 'Monkhorst'}\n"
+            f"{' '.join(map(str, new))}\n{' '.join(map(str, shift))}\n")
+    return text, mesh, new
 
 
 def _ordering_of(structure):
@@ -287,10 +356,12 @@ def _ordering_of(structure):
 def _spins(structure):
     """Moments in SITE ORDER, from the same object the POSCAR is written from.
 
-    Poscar silently DROPS spin when it writes: a Species(spin=...) structure is
-    serialised with bare element symbols. So MAGMOM and the POSCAR can only be
-    kept consistent by deriving both from one object in one order -- never by
-    re-reading the file, and never after a sort().
+    Poscar does not carry spin through: the species-count header of a
+    Species(spin=...) structure comes out with bare symbols ("La Mn O / 4 4 12"),
+    while the per-site label column leaks pymatgen's internal string
+    ("Mn,spin=np.int64(5)"). Neither is a moment VASP will read. So MAGMOM and
+    the POSCAR can only be kept consistent by deriving both from one object in
+    one order -- never by re-reading the file, and never after a sort().
     """
     out = []
     for site in structure:
@@ -298,6 +369,75 @@ def _spins(structure):
         if s is None:
             s = site.properties.get("magmom", 0.0)
         out.append(float(s or 0.0))
+    return out
+
+
+def _demagnetised(struct):
+    """Same structure with bare elements and the moment moved to a site property.
+
+    Both CifWriter and Poscar accept a Species(spin=...) structure, and both
+    then write pymatgen's internal string where an element symbol belongs --
+    "Ni0+,spin=4.0" in _atom_site_type_symbol, "Mn,spin=np.int64(5)" in the
+    POSCAR's label column. No viewer should be asked to parse that. Moving the
+    moment to site_properties keeps the symbols clean and changes nothing else.
+
+    Other site properties are carried across: selective dynamics rides in one,
+    and dropping it would silently free atoms the user had frozen.
+    """
+    from pymatgen.core import Structure
+    props = dict(struct.site_properties)
+    props["magmom"] = _spins(struct)
+    return Structure(
+        struct.lattice,
+        [getattr(s.specie, "element", s.specie) for s in struct],
+        [s.frac_coords for s in struct],
+        site_properties=props,
+    )
+
+
+def _in_reference_cell(ref, struct):
+    """The same ordering written in the cell of the POSCAR the user handed in.
+
+    The enumerator does not return the cell it was given. enumlib's adaptor
+    reduces the basis, so LaMnO3's Pnma cell comes back with c -> c + a: same
+    lattice, same volume, same structure -- but different lattice vectors,
+    different fractional coordinates and a different site order. Everything
+    downstream then disagrees with the user's own reference run, and the MAGMOM
+    they read refers to sites in an order that is not theirs.
+
+    When the ordering fits in their cell, this puts it back there: their
+    coordinates, their site order, their selective dynamics, their KPOINTS left
+    untouched because the lattice is then literally identical.
+
+    Returns None when it does not fit. That is a real physical outcome, not a
+    defensive branch -- a magnetic ordering has its own periodicity, and a given
+    cell need not admit it. On conventional NiO five of eight orderings have
+    exactly the reference's 8 sites and still cannot be expressed in it.
+    """
+    import numpy as np
+    from pymatgen.analysis.structure_matcher import StructureMatcher, ElementComparator
+
+    if len(struct) != len(ref):
+        return None
+    if abs(struct.lattice.volume - ref.lattice.volume) > 1e-3 * ref.lattice.volume:
+        return None
+    matcher = StructureMatcher(primitive_cell=False, attempt_supercell=True,
+                               comparator=ElementComparator())
+    like = matcher.get_s2_like_s1(ref, _demagnetised(struct))
+    if like is None or len(like) != len(ref):
+        return None
+    if [s.specie.symbol for s in like] != [s.specie.symbol for s in ref]:
+        return None
+    # The guard that carries the weight. get_s2_like_s1 returns its best
+    # alignment whether or not one exists, so demand that every site land ON a
+    # reference site rather than merely near one -- otherwise a plausible-looking
+    # near-match would write the ordering onto the wrong atoms.
+    if any(ref.lattice.get_all_distances(like[i].frac_coords,
+                                         ref[i].frac_coords)[0][0] > 1e-3
+           for i in range(len(ref))):
+        return None
+    out = ref.copy()
+    out.add_site_property("magmom", list(like.site_properties["magmom"]))
     return out
 
 
@@ -313,24 +453,6 @@ VESTA_ARROW_A = 1.5     # longest arrow, in Angstrom: visible without reaching
                         # into the neighbouring atoms
 VESTA_UP = "255 0 0"    # red
 VESTA_DOWN = "0 0 255"  # blue
-
-
-def _demagnetised(struct):
-    """Same structure with bare elements and the moment moved to a site property.
-
-    CifWriter accepts either form, but with Species(spin=...) it writes
-    _atom_site_type_symbol as pymatgen's internal string -- "Ni0+,spin=4.0"
-    rather than "Ni" -- which is not an element symbol any viewer should be
-    expected to parse. Moving the moment to site_properties keeps the symbols
-    clean and emits exactly the same magnetic loop.
-    """
-    from pymatgen.core import Structure
-    return Structure(
-        struct.lattice,
-        [getattr(s.specie, "element", s.specie) for s in struct],
-        [s.frac_coords for s in struct],
-        site_properties={"magmom": _spins(struct)},
-    )
 
 
 def _write_magnetic_cif(struct, path, title):
@@ -414,7 +536,11 @@ def enumerate_magnetic(args):
 
     poscar_in = Poscar.from_file(str(args.poscar), check_for_potcar=False)
     ref = poscar_in.structure
-    ref_abc = ref.lattice.abc
+    # poscar_in.comment is NOT the user's title: pymatgen reads the POSCAR
+    # through clean_lines, which truncates every line at '#'. A title like
+    # "LaMnO3 - #62 (Pnma) - https://..." arrives as "LaMnO3 -". VASP treats
+    # line 1 as free text, so take it raw.
+    ref_title = _raw_title(args.poscar) or poscar_in.comment
 
     # ---- which atoms carry a moment -------------------------------------
     if args.magnetic_species:
@@ -486,9 +612,13 @@ def enumerate_magnetic(args):
     entries = []
     nm = ref.copy()
     nm.add_site_property("magmom", [0.0] * len(nm))
-    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments"))
+    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments", True))
     for struct, origin in zip(enum.ordered_structures, enum.ordered_structure_origins):
-        entries.append((_ordering_of(struct), struct, origin))
+        # Put the ordering back in the user's own cell wherever it fits, so the
+        # folder holds THEIR POSCAR with only the moments added.
+        mapped = _in_reference_cell(ref, struct)
+        struct = mapped if mapped is not None else struct
+        entries.append((_ordering_of(struct), struct, origin, mapped is not None))
 
     order = {"NM": 0, "FM": 1, "AFM": 2, "FiM": 3}
     entries.sort(key=lambda e: order.get(e[0], 9))
@@ -512,7 +642,7 @@ def enumerate_magnetic(args):
         sys.exit(f"error: {MAG_DIR}/ already exists -- move or remove it first")
 
     summary, counts, made = [], {}, 0
-    for kind, struct, origin in entries:
+    for kind, struct, origin, own_cell in entries:
         counts[kind] = counts.get(kind, 0) + 1
         folder = out_root / f"{order.get(kind, 9):02d}_{kind}" / f"config_{counts[kind]:02d}"
         spins = _spins(struct)
@@ -524,15 +654,35 @@ def enumerate_magnetic(args):
             cellnote = f"SUPERCELL x{len(struct) / len(ref):g}"
         elif len(struct) < len(ref):
             cellnote = f"primitive cell ({len(ref)} -> {len(struct)} sites)"
+        elif not own_cell:
+            # Same site count, still not the user's cell: this ordering has a
+            # magnetic periodicity their cell cannot hold, so pymatgen built its
+            # own. Worth saying plainly -- it is the one case where the POSCAR
+            # differs from theirs without the atom count hinting at it.
+            cellnote = "CELL REBUILT (your cell cannot hold this ordering)"
         else:
             cellnote = ""
         expanded = len(struct) != len(ref)
         note = ""
 
+        # POSCAR and MAGMOM come from ONE object in ONE order; never re-read.
+        # De-spun, because Poscar leaks "Mn,spin=np.int64(5)" into the label
+        # column of a Species(spin=...) structure.
+        out_struct = _demagnetised(struct)
+        if not own_cell and "selective_dynamics" in out_struct.site_properties:
+            # When pymatgen rebuilds the cell it hands each site the properties
+            # of its whole symmetry orbit, so the flags arrive SMEARED: on
+            # conventional NiO one frozen O and one part-frozen Ni came back as
+            # four of each. In a cell whose atoms have no counterpart in the
+            # user's there is no right answer, and a wrong constraint is far
+            # worse than none -- it relaxes a structure nobody asked for and
+            # says nothing. Drop them, and put it in the index.
+            out_struct.remove_site_property("selective_dynamics")
+            note = "selective dynamics DROPPED (different cell, no site correspondence)"
+
         if not args.dry_run:
             folder.mkdir(parents=True, exist_ok=True)
-            # POSCAR and MAGMOM come from ONE object in ONE order; never re-read.
-            Poscar(struct, comment=f"{poscar_in.comment} | {kind} ({origin})"
+            Poscar(out_struct, comment=f"{ref_title} | {kind} ({origin})"
                    ).write_file(str(folder / "POSCAR"))
 
             txt = incar_text
@@ -548,13 +698,14 @@ def enumerate_magnetic(args):
             (folder / "INCAR").write_text(txt)
 
             if kpts_in is not None:
-                res = _rescale_kpoints(kpts_in, ref_abc, struct.lattice.abc)
+                res = _rescale_kpoints(kpts_in, ref.lattice, struct.lattice)
                 if res is None:
                     shutil.copy2(kpt_path, folder / "KPOINTS")
                 else:
-                    newk, oldm, newm = res
-                    newk.write_file(str(folder / "KPOINTS"))
-                    note = f"KPOINTS {'x'.join(map(str, oldm))} -> {'x'.join(map(str, newm))}"
+                    text, oldm, newm = res
+                    (folder / "KPOINTS").write_text(text)
+                    note = (note + "; " if note else "") + \
+                        f"KPOINTS {'x'.join(map(str, oldm))} -> {'x'.join(map(str, newm))}"
 
             # Visualisation only -- VASP reads neither. Named after the
             # configuration so several open at once stay distinguishable in
@@ -570,7 +721,7 @@ def enumerate_magnetic(args):
                 # ('Ni','Ni','O') -- which never matches a POTCAR and would
                 # refuse to copy a perfectly good one. site_symbols is the
                 # species-block order VASP will actually read.
-                want = Poscar(struct).site_symbols
+                want = Poscar(out_struct).site_symbols
                 if pot_syms == want:
                     shutil.copy2(pot_path, folder / "POTCAR")
                 else:
@@ -599,6 +750,10 @@ def enumerate_magnetic(args):
             "Each folder also carries <TYPE>_config_NN.cif and .vesta for viewing the\n"
             "ordering -- arrows on the magnetic atoms, red for up and blue for down.\n"
             "Neither is read by VASP.\n\n"
+            "Every folder not marked SUPERCELL, primitive cell or CELL REBUILT carries\n"
+            "YOUR cell, YOUR site order and YOUR KPOINTS, with only the moments added.\n"
+            "The marked ones could not: pymatgen returns the cell the ordering needs,\n"
+            "so their POSCAR is a different (equivalent or larger) cell.\n\n"
             "Cells of different size are NOT comparable directly -- compare energy PER ATOM.\n"
             "NUPDOWN is deliberately unset: the MAGMOM seed guides each ordering, and\n"
             "an ordering that collapses to another is telling you something real.\n")
@@ -704,7 +859,8 @@ def main():
         tag = "x".join(map(str, args.scaling)) if len(args.scaling) == 3 else "supercell"
         args.output = Path(f"POSCAR_{tag}")
 
-    comment = f"{poscar_in.comment} | supercell {args.scaling}"
+    # _raw_title, not poscar_in.comment: pymatgen truncates line 1 at '#'.
+    comment = f"{_raw_title(args.poscar) or poscar_in.comment} | supercell {args.scaling}"
     Poscar(structure, comment=comment).write_file(str(args.output), direct=not args.cartesian)
 
     a, b, c = structure.lattice.abc
