@@ -100,6 +100,16 @@ stop_tag(){ [[ $MODE == relax ]] && printf 'LSTOP' || printf 'LABORT'; }
 # Cluster profile.  Required, not optional: these describe THIS cluster and a
 # built-in guess would size a job for someone else's hardware.
 # --------------------------------------------------------------------------- #
+# The INCAR layout library sits next to this script; readlink follows the
+# ~/.local/bin symlink back to the toolkit. Pure awk, no python -- see the note
+# on contcar_ok() for why that matters inside a compute job.
+_wp_lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/wolfpack_incar.sh"
+# shellcheck source=/dev/null
+if [[ -r "$_wp_lib" ]]; then source "$_wp_lib"; else
+    echo "ERROR: wolfpack_incar.sh not found next to $(readlink -f "${BASH_SOURCE[0]}")" >&2
+    exit 1
+fi
+
 _wp_conf="${WOLFPACK_CLUSTER_CONF:-$HOME/.config/wolfpack-dft/cluster.conf}"
 # shellcheck source=/dev/null
 [[ -f "$_wp_conf" ]] && source "$_wp_conf"
@@ -197,20 +207,13 @@ log_line(){    # append-only; this is what the user reads after waking up
 # EDIFF from eating EDIFFG: after the tag only whitespace may precede the '=',
 # and a leading '#' is not whitespace, so commented lines are left alone.
 # --------------------------------------------------------------------------- #
+# Thin wrappers over wolfpack_incar.sh, which also puts a tag the INCAR did not
+# already carry under the right section header instead of at the bottom.
 incar_set(){
-    local k="$1" v="$2" c="${3:-}" line
-    line="$k = $v"; [[ -n $c ]] && line="$line   # $c"
     [[ -f INCAR.chain.bak ]] || cp -f INCAR INCAR.chain.bak 2>/dev/null
-    if grep -qiE "^[[:space:]]*${k}[[:space:]]*=" INCAR; then
-        sed -i -E "s|^([[:space:]]*)${k}[[:space:]]*=.*|\\1${line}|I" INCAR
-    else
-        printf '%s\n' "$line" >> INCAR
-    fi
+    wp_incar_set INCAR "$1" "$2" "${3:-}"
 }
-incar_get(){
-    grep -m1 -oiE "^[[:space:]]*$1[[:space:]]*=[[:space:]]*[^ #!]+" INCAR 2>/dev/null \
-      | sed -E 's/.*=[[:space:]]*//'
-}
+incar_get(){ wp_incar_get INCAR "$1"; }
 # What VASP ACTUALLY used, from its own echo. Closes the loop on a failed sed or
 # a value VASP silently overrode.
 outcar_tag(){ grep -m1 -aoE "$1[[:space:]]*=[[:space:]]*-?[0-9]+" "${2:-OUTCAR}" 2>/dev/null \

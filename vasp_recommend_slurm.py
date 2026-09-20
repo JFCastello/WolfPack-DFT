@@ -3171,20 +3171,24 @@ def _embed_recommendation(script_text: str, candidate: "Candidate",
     return "\n".join([*block, *lines])
 
 
-def _set_incar_flag(text: str, key: str, value) -> str:
-    """Set `key = value` in INCAR text: replace the value in place (keeping any
-    trailing comment) if the tag exists, else append a fresh line."""
-    pat = re.compile(rf"^(\s*{key}\s*=\s*)[-+0-9.]+", re.IGNORECASE | re.MULTILINE)
-    if pat.search(text):
-        return pat.sub(rf"\g<1>{value}", text, count=1)
-    sep = "" if (not text or text.endswith("\n")) else "\n"
-    return text + f"{sep}{key} = {value}   # set by vasp-recommend-slurm (FIXED parallel config)\n"
+# INCAR editing lives in wolfpack_incar, so KPAR and NCORE land under the
+# file's own "Parallelization" header instead of at the bottom of whatever
+# section happened to be last.
+_WP_DIR = os.path.dirname(os.path.realpath(__file__))
+if _WP_DIR not in sys.path:
+    sys.path.insert(0, _WP_DIR)
+from wolfpack_incar import set_tag as _set_incar_flag_impl      # noqa: E402
+from wolfpack_incar import comment_tag as _comment_out_incar_flag_impl  # noqa: E402
+
+
+def _set_incar_flag(text: str, key: str, value, note: str = "") -> str:
+    """Set `key = value` in its section, keeping any trailing comment."""
+    return _set_incar_flag_impl(text, key, value, note)
 
 
 def _comment_out_incar_flag(text: str, key: str, why: str) -> str:
     """Comment out an ACTIVE `key = ...` line, preserving it for the record."""
-    pat = re.compile(rf"^([ \t]*)({key}[ \t]*=[^\r\n]*)$", re.IGNORECASE | re.MULTILINE)
-    return pat.sub(rf"\g<1># \g<2>   # {why}", text)
+    return _comment_out_incar_flag_impl(text, key, why)
 
 
 def apply_parallel_to_incar(path: Path, kpar: int, ncore: int, npar: int,

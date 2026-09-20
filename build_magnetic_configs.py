@@ -81,12 +81,21 @@ USAGE
 
 import argparse
 import math
+import os
 import sys
 import re
 import shutil
 from pathlib import Path
 
-from pymatgen.io.vasp import Poscar
+# Make the sibling wolfpack_incar module importable regardless of how this file
+# is reached -- in particular through a symlink in ~/.local/bin, whose directory
+# does not contain it. realpath follows the symlink back to the toolkit.
+_PKG_DIR = os.path.dirname(os.path.realpath(__file__))
+if _PKG_DIR not in sys.path:
+    sys.path.insert(0, _PKG_DIR)
+
+from pymatgen.io.vasp import Poscar            # noqa: E402
+from wolfpack_incar import set_tag, comment_tag  # noqa: E402
 
 
 # =============================================================================
@@ -140,33 +149,6 @@ def _magmom_magnitudes_from_incar(incar, structure):
     return {k: v for k, v in out.items() if v > 0} or None
 
 
-def _incar_set_line(text, key, value, note=""):
-    """Replace KEY's whole line in INCAR text, or append it.
-
-    Whole-line replacement, because whether VASP honours the first or the last
-    occurrence of a repeated tag is version-dependent -- appending a duplicate
-    would make the result depend on the build. Anchoring after the tag also
-    keeps MAGMOM from matching a commented line.
-    """
-    cc = _incar_comment_char(text)
-    line = f"{key} = {value}" + (f"   {cc} {note}" if note else "")
-    pat = re.compile(rf"^[ \t]*{key}[ \t]*=.*$", re.IGNORECASE | re.MULTILINE)
-    if pat.search(text):
-        return pat.sub(line, text, count=1)
-    return text.rstrip("\n") + "\n" + line + "\n"
-
-
-def _incar_comment_line(text, key, note):
-    """Comment KEY out, preserving it for the record.
-
-    The line is disabled with '#' -- which VASP always honours -- while the
-    note that explains why uses whatever the file annotates with.
-    """
-    cc = _incar_comment_char(text)
-    pat = re.compile(rf"^([ \t]*)({key}[ \t]*=.*)$", re.IGNORECASE | re.MULTILINE)
-    return pat.sub(rf"\1# \2   {cc} {note}", text)
-
-
 def _raw_title(poscar_path):
     """Line 1 of a POSCAR, exactly as written.
 
@@ -180,18 +162,6 @@ def _raw_title(poscar_path):
     except (OSError, IndexError):
         return ""
     return first[0].strip() if first else ""
-
-
-def _incar_comment_char(text):
-    """The character this INCAR already uses for a TRAILING comment ('!' or '#').
-
-    VASP honours both, so this is only about handing back a file that still
-    reads like the one that came in. Only trailing comments are counted: a file
-    can annotate with '!' while commenting whole tags out with '#', and it is
-    the annotation style that the lines written here have to match.
-    """
-    trailing = re.findall(r"=[ \t]*\S+[ \t]+([!#])", text)
-    return "!" if trailing.count("!") > trailing.count("#") else "#"
 
 
 def _potcar_species(potcar_path):
@@ -606,14 +576,14 @@ def enumerate_magnetic(args):
                    ).write_file(str(folder / "POSCAR"))
 
             txt = incar_text
-            txt = _incar_set_line(txt, "ISPIN", "2", "spin-polarised")
-            txt = _incar_set_line(txt, "MAGMOM",
+            txt = set_tag(txt, "ISPIN", "2", "spin-polarised")
+            txt = set_tag(txt, "MAGMOM",
                                   Incar({"MAGMOM": spins}).get_str().split("=", 1)[1].strip(),
                                   f"{kind} ordering ({origin})")
             if re.search(r"^[ \t]*NUPDOWN[ \t]*=", txt, re.IGNORECASE | re.MULTILINE):
                 # An inherited NUPDOWN would force every ordering to the same
                 # total moment -- the opposite of what is being compared.
-                txt = _incar_comment_line(txt, "NUPDOWN",
+                txt = comment_tag(txt, "NUPDOWN",
                                           "removed: it would force all orderings to one moment")
             (folder / "INCAR").write_text(txt)
 

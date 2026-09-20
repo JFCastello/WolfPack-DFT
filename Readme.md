@@ -139,6 +139,31 @@ pass `--purge-repo`.
 
 ---
 
+### How the toolkit edits your INCAR
+
+Several commands write tags into your INCAR — `vasp-recommend-slurm` sets
+`KPAR`/`NCORE`, `vasp-test` pins the benchmark layout, the chunked runs rewrite
+`NELM`/`NSW` once per chunk, `build-magnetic-configs` sets `ISPIN`/`MAGMOM`.
+All of them go through one library (`wolfpack_incar.py`, and `wolfpack_incar.sh`
+for the tools that run inside a compute job), which follows your file rather
+than imposing a format:
+
+- A tag that is **already there** has its value replaced **where it sits**. Its
+  indentation, its column alignment and its own trailing comment are kept.
+- A tag that is **new** goes to the **end of its section** — `MAGMOM` under
+  *Startup job description*, `KPAR` under *Parallelization* — aligned the way
+  that block already aligns.
+- If the section does not exist it is created, in the canonical order, with a
+  `!-----` header. If your INCAR has **no** section headers at all, it stays
+  that way and the tag is simply appended.
+- A tag that has to go is **commented out in place**, never deleted: the value
+  it held is evidence.
+
+So an INCAR laid out in sections comes back laid out in sections, and a flat one
+comes back flat.
+
+---
+
 ## 1. The parallelization pipeline (dry-run → recommend → test)
 
 Three commands, run **in order, with no arguments and nothing to edit by hand**.

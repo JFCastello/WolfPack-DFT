@@ -80,6 +80,15 @@ fi
 set -uo pipefail
 
 # --- Load the cluster profile (vasp-configure) ----------------------------- #
+# The INCAR layout library sits next to this script; readlink follows the
+# ~/.local/bin symlink back to the toolkit.
+_wp_lib="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/wolfpack_incar.sh"
+# shellcheck source=/dev/null
+if [[ -r "$_wp_lib" ]]; then source "$_wp_lib"; else
+    echo "ERROR: wolfpack_incar.sh not found next to $(readlink -f "${BASH_SOURCE[0]}")" >&2
+    exit 1
+fi
+
 _wp_conf="${WOLFPACK_CLUSTER_CONF:-$HOME/.config/wolfpack-dft/cluster.conf}"
 # shellcheck source=/dev/null
 [[ -f "$_wp_conf" ]] && source "$_wp_conf"
@@ -384,15 +393,14 @@ cd "$RUNDIR" || { echo "Cannot enter run dir $RUNDIR" >&2; exit 1; }
 # THROWAWAY copy; the real INCAR's physics is never touched here (on success the
 # FIXED KPAR/NCORE/NSIM are applied to it -- see the end of this script).
 TEST_NPAR=$(( NTASKS / (FIX_KPAR * FIX_NCORE) )); (( TEST_NPAR < 1 )) && TEST_NPAR=1
-{
-    echo ""
-    echo "# ---- appended by vasp-test (benchmark only; harmless duplicates) ----"
-    echo "KPAR   = ${FIX_KPAR}"
-    echo "NCORE  = ${FIX_NCORE}"
-    echo "NSIM   = ${FIX_NSIM}"
-    echo "LWAVE  = .FALSE."
-    echo "LCHARG = .FALSE."
-} >> INCAR
+# Set in place, each tag under its own section header. This used to append a
+# banner and a block of duplicates, leaning on VASP honouring the LAST
+# occurrence of a repeated tag -- which works, but leaves a file nobody can read
+# and which no longer resembles the INCAR it came from.
+for _kv in "KPAR=${FIX_KPAR}" "NCORE=${FIX_NCORE}" "NSIM=${FIX_NSIM}" \
+           "LWAVE=.FALSE." "LCHARG=.FALSE."; do
+    wp_incar_set INCAR "${_kv%%=*}" "${_kv#*=}" "benchmark (vasp-test)"
+done
 
 hdr "VASP RESOURCE BENCHMARK  (${PARTITION}, ${NTASKS} ranks, ${RUN_MINUTES} min)"
 echo "  job id        : $SLURM_JOB_ID"
