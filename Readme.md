@@ -539,9 +539,22 @@ slip gives a calculation that converges to something else without complaining.
 This enumerates the inequivalent collinear orderings of `./POSCAR` and writes
 one folder per ordering, grouped by type, each with a POSCAR, an INCAR derived
 from `./INCAR` with `ISPIN` and `MAGMOM` set, a rescaled KPOINTS and — when its
-species order still matches — the POTCAR. Orderings that fit in your cell keep
-**your** cell, **your** site order and **your** KPOINTS untouched; `SUMMARY.txt`
-names the ones that could not. Every folder also carries a `.cif` and a `.vesta`
+species order still matches — the POTCAR.
+
+**Your structure is never symmetrised.** The enumerator is asked one question —
+which magnetic site points up and which points down — and nothing else of its
+answer is used. It does not return the structure it was given: it reduces the
+basis, reorders the sites, and *idealises*, reading the cell at a 0.1 Å symmetry
+tolerance and averaging sites onto orbits they are only approximately related
+by. On LaMnO₃ that moved the oxygens 0.0043 Å and turned a P2₁/c cell into an
+exact Pnma one — 4 symmetry operations becoming 8, which `ISYM=2` then imposes
+on the whole relaxation. Whether your structure is Pnma or P2₁/c is your call
+and lives in your POSCAR, so every coordinate written out comes from the file
+you handed in, and `SUMMARY.txt` reports how much idealisation was undone.
+
+Orderings that fit in your cell also keep **your** cell, **your** site order and
+**your** KPOINTS untouched; the rest get the cell the ordering needs, refilled
+with your atoms. Every folder also carries a `.cif` and a `.vesta`
 drawing an arrow on each magnetic atom, red up and blue down, so you can check a
 folder at a glance before spending compute on it.
 

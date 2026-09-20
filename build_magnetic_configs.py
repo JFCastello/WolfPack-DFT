@@ -33,24 +33,33 @@ MAGMOM changed. Points worth knowing:
   MAGMOM seed is what steers each calculation, and an ordering that
   collapses to another is telling you something real.
 
-* YOUR CELL IS KEPT WHEREVER THE ORDERING FITS IN IT. The
-  enumerator does not return the cell it was given -- it reduces
-  the basis, so the same lattice comes back with different vectors,
-  different fractional coordinates and a different site order.
-  Those orderings are mapped back onto your POSCAR, so the folder
-  holds YOUR cell, YOUR site order and YOUR KPOINTS untouched, with
-  only MAGMOM added.
+* THE POSITIONS ARE ALWAYS YOURS. The enumerator is asked one
+  question -- which magnetic site points up and which points down --
+  and nothing else of its answer is used. It does not return the
+  structure it was given: it reduces the basis, reorders the sites,
+  and IDEALISES. Reading the cell at a 0.1 A symmetry tolerance it
+  averages sites onto orbits they are only approximately related by,
+  which on LaMnO3 moved the oxygens 0.0043 A and turned a P2_1/c
+  cell into an exact Pnma one. Whether your structure is Pnma or
+  P2_1/c is your call and lives in your POSCAR -- silently raising
+  its symmetry changes what VASP is then told to impose with ISYM.
+  So every coordinate written here comes from the file you handed
+  in, and the index reports how much idealisation was undone.
 
-* SOME CELLS STILL DIFFER, and the index says which. An ordering
-  has its own magnetic periodicity and your cell need not admit it
-  (on conventional NiO, five of eight orderings have exactly your
-  atom count and still do not fit). Antiferromagnets often need a
+* YOUR CELL IS KEPT WHEREVER THE ORDERING FITS IN IT, along with
+  your site order, your selective dynamics and your KPOINTS.
+
+* SOME CELLS STILL DIFFER, and the index says which. An ordering has
+  its own magnetic periodicity and your cell need not admit it (on
+  conventional NiO, five of eight orderings have exactly your atom
+  count and still do not fit). Antiferromagnets often need a
   supercell, and pymatgen may find a smaller primitive cell. Those
-  folders are marked SUPERCELL, primitive cell or CELL REBUILT --
-  compare energies PER ATOM, and note that selective dynamics is
-  dropped there, because the frozen atoms have no counterpart.
-  KPOINTS is rescaled from the RECIPROCAL lattice vectors, which is
-  what the mesh subdivides; an unchanged lattice is left alone.
+  folders carry the cell the ordering needs, REFILLED with your
+  atoms -- compare energies PER ATOM, and note that selective
+  dynamics is dropped there, because the frozen atoms have no
+  counterpart. KPOINTS is rescaled from the RECIPROCAL lattice
+  vectors, which is what the mesh subdivides; an unchanged lattice
+  is left alone.
 
 * THE POTCAR IS CHECKED, NOT ASSUMED. Enumeration can reorder the
   species blocks; a POTCAR whose order no longer matches is NOT
@@ -277,50 +286,109 @@ def _demagnetised(struct):
     )
 
 
-def _in_reference_cell(ref, struct):
-    """The same ordering written in the cell of the POSCAR the user handed in.
+# How far an atom may have been moved and still be recognised as the same atom.
+# enumlib idealises: it analyses the structure at symm_prec=0.1 A, so on a cell
+# that is only ALMOST at a higher symmetry it averages sites onto orbits they do
+# not really share. On LaMnO3 that moved the oxygens by 0.0043 A and turned a
+# P2_1/c cell into an exact Pnma one. 0.1 A is far above that and far below any
+# bond length, so it separates "enumlib tidied this up" from "this is a
+# different structure" without ever mistaking one for the other.
+MAX_IDEALISATION_A = 0.1
 
-    The enumerator does not return the cell it was given. enumlib's adaptor
-    reduces the basis, so LaMnO3's Pnma cell comes back with c -> c + a: same
-    lattice, same volume, same structure -- but different lattice vectors,
-    different fractional coordinates and a different site order. Everything
-    downstream then disagrees with the user's own reference run, and the MAGMOM
-    they read refers to sites in an order that is not theirs.
 
-    When the ordering fits in their cell, this puts it back there: their
-    coordinates, their site order, their selective dynamics, their KPOINTS left
-    untouched because the lattice is then literally identical.
+def _user_positions(ref, struct):
+    """The ordering's SPINS on the user's own atomic positions.
 
-    Returns None when it does not fit. That is a real physical outcome, not a
-    defensive branch -- a magnetic ordering has its own periodicity, and a given
-    cell need not admit it. On conventional NiO five of eight orderings have
-    exactly the reference's 8 sites and still cannot be expressed in it.
+    The enumerator is asked one question -- which magnetic site points up and
+    which points down -- and that is the only thing taken from its answer. Every
+    coordinate comes from the POSCAR that was handed in.
+
+    This matters because enumlib does not return the structure it was given. It
+    reduces the basis (LaMnO3's Pnma cell comes back with c -> c + a), it
+    reorders the sites, and, worse, it IDEALISES: reading the cell at a 0.1 A
+    symmetry tolerance, it averages sites onto orbits they are only approximately
+    related by. Whether a structure is Pnma or P2_1/c is the user's call and
+    belongs to their POSCAR; a tool that silently raises the symmetry of the
+    input changes the physics that VASP will then be told to impose with ISYM.
+
+    Two outcomes, both keeping the user's coordinates:
+
+      * the ordering fits in the user's own cell -> their cell, their site
+        order, their selective dynamics, their KPOINTS untouched.
+      * it does not -> the cell the ordering needs, but REFILLED with the user's
+        positions rather than enumlib's idealised ones.
+
+    Returns (structure, kind, moved_A) where `kind` is "own" or "refilled" and
+    `moved_A` is how far enumlib had shifted things, or None when no
+    correspondence exists at all.
     """
     import numpy as np
     from pymatgen.analysis.structure_matcher import StructureMatcher, ElementComparator
 
-    if len(struct) != len(ref):
-        return None
-    if abs(struct.lattice.volume - ref.lattice.volume) > 1e-3 * ref.lattice.volume:
-        return None
-    matcher = StructureMatcher(primitive_cell=False, attempt_supercell=True,
-                               comparator=ElementComparator())
-    like = matcher.get_s2_like_s1(ref, _demagnetised(struct))
-    if like is None or len(like) != len(ref):
-        return None
-    if [s.specie.symbol for s in like] != [s.specie.symbol for s in ref]:
-        return None
-    # The guard that carries the weight. get_s2_like_s1 returns its best
-    # alignment whether or not one exists, so demand that every site land ON a
-    # reference site rather than merely near one -- otherwise a plausible-looking
-    # near-match would write the ordering onto the wrong atoms.
-    if any(ref.lattice.get_all_distances(like[i].frac_coords,
-                                         ref[i].frac_coords)[0][0] > 1e-3
-           for i in range(len(ref))):
-        return None
-    out = ref.copy()
-    out.add_site_property("magmom", list(like.site_properties["magmom"]))
-    return out
+    dem = _demagnetised(struct)
+
+    # ---- does it fit in the user's own cell? --------------------------------
+    if len(struct) == len(ref) and \
+            abs(struct.lattice.volume - ref.lattice.volume) <= 1e-3 * ref.lattice.volume:
+        matcher = StructureMatcher(primitive_cell=False, attempt_supercell=True,
+                                   comparator=ElementComparator())
+        like = matcher.get_s2_like_s1(ref, dem)
+        if like is not None and len(like) == len(ref) \
+                and [s.specie.symbol for s in like] == [s.specie.symbol for s in ref]:
+            moved = max(ref.lattice.get_all_distances(like[i].frac_coords,
+                                                      ref[i].frac_coords)[0][0]
+                        for i in range(len(ref)))
+            # get_s2_like_s1 returns its best alignment whether or not one
+            # exists, so the distance is what decides: a real correspondence
+            # puts every atom on top of one of the user's, give or take
+            # enumlib's idealisation.
+            if moved <= MAX_IDEALISATION_A:
+                out = ref.copy()
+                out.add_site_property("magmom", list(like.site_properties["magmom"]))
+                return out, "own", moved
+
+    # ---- otherwise: enumlib's cell, the user's atoms ------------------------
+    return _refill_from_user(ref, struct)
+
+
+def _refill_from_user(ref, struct):
+    """`struct`'s cell and spins, with every atom put back where the user had it.
+
+    Each site of the enumerated cell is an image of some site of the reference
+    under a lattice translation -- that is what a derivative superstructure is.
+    So the site is looked up in the reference and the reference's own coordinate
+    is used, carried into this cell by that translation. Nothing is averaged and
+    nothing is idealised; the only thing kept from the enumerated structure is
+    its lattice and its spins.
+    """
+    import numpy as np
+    from pymatgen.core import Structure
+
+    species, coords, moved = [], [], 0.0
+    inv = np.linalg.inv(ref.lattice.matrix)
+    for site in struct:
+        el = getattr(site.specie, "element", site.specie)
+        frac = site.coords @ inv                 # this atom in the user's basis
+        best = None
+        for rsite in ref:
+            if rsite.specie.symbol != el.symbol:
+                continue
+            shift = np.round(frac - rsite.frac_coords)
+            delta = frac - rsite.frac_coords - shift
+            dist = float(np.linalg.norm(delta @ ref.lattice.matrix))
+            if best is None or dist < best[0]:
+                best = (dist, rsite, shift)
+        if best is None or best[0] > MAX_IDEALISATION_A:
+            return None                          # genuinely not the same crystal
+        dist, rsite, shift = best
+        moved = max(moved, dist)
+        cart = (rsite.frac_coords + shift) @ ref.lattice.matrix
+        species.append(el)
+        coords.append(struct.lattice.get_fractional_coords(cart))
+
+    out = Structure(struct.lattice, species, coords,
+                    site_properties={"magmom": _spins(struct)})
+    return out, "refilled", moved
 
 
 # --- visualisation: one .cif and one .vesta per configuration ---------------
@@ -494,13 +562,16 @@ def enumerate_magnetic(args):
     entries = []
     nm = ref.copy()
     nm.add_site_property("magmom", [0.0] * len(nm))
-    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments", True))
+    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments", ("own", 0.0)))
     for struct, origin in zip(enum.ordered_structures, enum.ordered_structure_origins):
-        # Put the ordering back in the user's own cell wherever it fits, so the
-        # folder holds THEIR POSCAR with only the moments added.
-        mapped = _in_reference_cell(ref, struct)
-        struct = mapped if mapped is not None else struct
-        entries.append((_ordering_of(struct), struct, origin, mapped is not None))
+        # Only the SPINS are taken from the enumerator. The coordinates come
+        # from the user's POSCAR, whether or not the ordering fits in their cell.
+        got = _user_positions(ref, struct)
+        if got is None:
+            entries.append((_ordering_of(struct), struct, origin, ("enumlib", None)))
+        else:
+            out, kind, moved = got
+            entries.append((_ordering_of(out), out, origin, (kind, moved)))
 
     order = {"NM": 0, "FM": 1, "AFM": 2, "FiM": 3}
     # Sorted by TYPE, then by strategy, then by the moments themselves. Sorting
@@ -532,26 +603,30 @@ def enumerate_magnetic(args):
         sys.exit(f"error: {MAG_DIR}/ already exists -- move or remove it first")
 
     summary, counts, made = [], {}, 0
-    for kind, struct, origin, own_cell in entries:
+    for kind, struct, origin, (source, moved) in entries:
         counts[kind] = counts.get(kind, 0) + 1
         folder = out_root / f"{order.get(kind, 9):02d}_{kind}" / f"config_{counts[kind]:02d}"
         spins = _spins(struct)
         net = sum(spins)
-        # pymatgen reduces the input to its PRIMITIVE cell before enumerating,
-        # so a configuration can have FEWER sites than the POSCAR it came from.
-        # Calling that a supercell would be backwards.
+        # Two facts, kept apart because they are independent and were once
+        # reported as one: WHICH CELL this ordering needed, and WHOSE
+        # coordinates are in it. Conflating them produced the message "your cell
+        # cannot hold this ordering" for a cell that held it perfectly well --
+        # the mapping had only failed because enumlib idealised the positions.
         if len(struct) > len(ref):
             cellnote = f"SUPERCELL x{len(struct) / len(ref):g}"
         elif len(struct) < len(ref):
             cellnote = f"primitive cell ({len(ref)} -> {len(struct)} sites)"
-        elif not own_cell:
-            # Same site count, still not the user's cell: this ordering has a
-            # magnetic periodicity their cell cannot hold, so pymatgen built its
-            # own. Worth saying plainly -- it is the one case where the POSCAR
-            # differs from theirs without the atom count hinting at it.
-            cellnote = "CELL REBUILT (your cell cannot hold this ordering)"
+        elif source != "own":
+            cellnote = "cell re-based by enumlib"
         else:
             cellnote = ""
+        if source == "enumlib":
+            cellnote = ((cellnote + "; ") if cellnote else "") + \
+                "POSITIONS ARE ENUMLIB'S, NOT YOURS (no correspondence found)"
+        elif moved and moved > 1e-6:
+            cellnote = ((cellnote + "; ") if cellnote else "") + \
+                f"your positions kept (enumlib had moved them {moved * 1000:.1f} mA)"
         expanded = len(struct) != len(ref)
         note = ""
 
@@ -559,14 +634,13 @@ def enumerate_magnetic(args):
         # De-spun, because Poscar leaks "Mn,spin=np.int64(5)" into the label
         # column of a Species(spin=...) structure.
         out_struct = _demagnetised(struct)
-        if not own_cell and "selective_dynamics" in out_struct.site_properties:
-            # When pymatgen rebuilds the cell it hands each site the properties
-            # of its whole symmetry orbit, so the flags arrive SMEARED: on
-            # conventional NiO one frozen O and one part-frozen Ni came back as
-            # four of each. In a cell whose atoms have no counterpart in the
-            # user's there is no right answer, and a wrong constraint is far
-            # worse than none -- it relaxes a structure nobody asked for and
-            # says nothing. Drop them, and put it in the index.
+        if source != "own" and "selective_dynamics" in out_struct.site_properties:
+            # Only the user's own cell keeps them. Elsewhere the atoms have no
+            # one-to-one counterpart, and a wrong constraint is far worse than
+            # none: it relaxes a structure nobody asked for and says nothing.
+            # (When pymatgen rebuilt the cell it also used to hand each site the
+            # properties of its whole symmetry orbit, so on conventional NiO one
+            # frozen O and one part-frozen Ni came back as four of each.)
             out_struct.remove_site_property("selective_dynamics")
             note = "selective dynamics DROPPED (different cell, no site correspondence)"
 
@@ -640,10 +714,16 @@ def enumerate_magnetic(args):
             "Each folder also carries <TYPE>_config_NN.cif and .vesta for viewing the\n"
             "ordering -- arrows on the magnetic atoms, red for up and blue for down.\n"
             "Neither is read by VASP.\n\n"
-            "Every folder not marked SUPERCELL, primitive cell or CELL REBUILT carries\n"
-            "YOUR cell, YOUR site order and YOUR KPOINTS, with only the moments added.\n"
-            "The marked ones could not: pymatgen returns the cell the ordering needs,\n"
-            "so their POSCAR is a different (equivalent or larger) cell.\n\n"
+            "EVERY POSCAR here carries YOUR atomic positions. The enumerator is asked\n"
+            "only which magnetic site points up and which points down; it is never\n"
+            "allowed to decide where an atom sits. It idealises -- it reads the cell at\n"
+            "a 0.1 A symmetry tolerance and averages sites onto orbits they are only\n"
+            "approximately related by -- and whether your structure is Pnma or P2_1/c is\n"
+            "your call, not its. Where a note says how far it had moved them, that much\n"
+            "idealisation was undone.\n\n"
+            "Unmarked folders also carry YOUR cell, YOUR site order and YOUR KPOINTS.\n"
+            "A marked one needed a different cell for the ordering to fit at all, so its\n"
+            "lattice differs -- but it was refilled with your atoms.\n\n"
             "Cells of different size are NOT comparable directly -- compare energy PER ATOM.\n"
             "NUPDOWN is deliberately unset: the MAGMOM seed guides each ordering, and\n"
             "an ordering that collapses to another is telling you something real.\n")
