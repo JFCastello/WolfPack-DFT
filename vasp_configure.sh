@@ -99,28 +99,37 @@ WP_GW_NODE_FRAC=""         # GW SWEET: grow the GW request to this node fraction
 # --------------------------------------------------------------------------- #
 # Argument parsing
 # --------------------------------------------------------------------------- #
+# Every KEY-setting flag records WHICH key it set. With a profile already on
+# disk that turns the flag into what its name promises -- set this one value,
+# keep the rest -- instead of dropping the user into the full questionnaire.
+# The wizard does not preload the existing profile, so without this, honouring
+# `vasp-configure --debug-max-cores N` (which vasp-test itself tells people to
+# run) meant re-detecting and overwriting every hand-tuned value in the file.
+CLI_KEYS=()
+_cli(){ printf -v "$1" '%s' "$2"; CLI_KEYS+=("$1"); }
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --email)            WP_EMAIL="${2:?}"; shift 2 ;;
-        --module-cmd)       WP_MODULE_CMD="${2:?}"; shift 2 ;;
-        --vasp-modules)     WP_VASP_MODULES="${2:?}"; shift 2 ;;
-        --vasp-std)         WP_VASP_STD="${2:?}"; shift 2 ;;
-        --vasp-ld-path)     WP_VASP_LD_LIBRARY_PATH="${2:?}"; shift 2 ;;
-        --main-partition)   WP_MAIN_PARTITION="${2:?}"; shift 2 ;;
-        --debug-partition)  WP_DEBUG_PARTITION="${2:?}"; shift 2 ;;
-        --main-cpus)        WP_MAIN_CPUS_PER_NODE="${2:?}"; shift 2 ;;
-        --debug-cpus)       WP_DEBUG_CPUS_PER_NODE="${2:?}"; shift 2 ;;
-        --main-mem)         WP_MAIN_MEM_PER_NODE_MB="${2:?}"; shift 2 ;;
-        --debug-mem)        WP_DEBUG_MEM_PER_NODE_MB="${2:?}"; shift 2 ;;
-        --max-cores)        WP_MAX_CORES="${2:?}"; shift 2 ;;
-        --test-walltime)    WP_TEST_WALLTIME_MIN="${2:?}"; shift 2 ;;
-        --mem-util-min)     WP_MEM_UTIL_MIN="${2:?}"; shift 2 ;;
-        --main-mem-margin)  WP_MAIN_MEM_MARGIN="${2:?}"; shift 2 ;;
-        --debug-mem-margin) WP_DEBUG_MEM_MARGIN="${2:?}"; shift 2 ;;
-        --debug-max-cores)  WP_DEBUG_MAX_CORES="${2:?}"; shift 2 ;;
+        --email)            _cli WP_EMAIL "${2:?}"; shift 2 ;;
+        --module-cmd)       _cli WP_MODULE_CMD "${2:?}"; shift 2 ;;
+        --vasp-modules)     _cli WP_VASP_MODULES "${2:?}"; shift 2 ;;
+        --vasp-std)         _cli WP_VASP_STD "${2:?}"; shift 2 ;;
+        --vasp-ld-path)     _cli WP_VASP_LD_LIBRARY_PATH "${2:?}"; shift 2 ;;
+        --main-partition)   _cli WP_MAIN_PARTITION "${2:?}"; shift 2 ;;
+        --debug-partition)  _cli WP_DEBUG_PARTITION "${2:?}"; shift 2 ;;
+        --main-cpus)        _cli WP_MAIN_CPUS_PER_NODE "${2:?}"; shift 2 ;;
+        --debug-cpus)       _cli WP_DEBUG_CPUS_PER_NODE "${2:?}"; shift 2 ;;
+        --main-mem)         _cli WP_MAIN_MEM_PER_NODE_MB "${2:?}"; shift 2 ;;
+        --debug-mem)        _cli WP_DEBUG_MEM_PER_NODE_MB "${2:?}"; shift 2 ;;
+        --max-cores)        _cli WP_MAX_CORES "${2:?}"; shift 2 ;;
+        --test-walltime)    _cli WP_TEST_WALLTIME_MIN "${2:?}"; shift 2 ;;
+        --mem-util-min)     _cli WP_MEM_UTIL_MIN "${2:?}"; shift 2 ;;
+        --main-mem-margin)  _cli WP_MAIN_MEM_MARGIN "${2:?}"; shift 2 ;;
+        --debug-mem-margin) _cli WP_DEBUG_MEM_MARGIN "${2:?}"; shift 2 ;;
+        --debug-max-cores)  _cli WP_DEBUG_MAX_CORES "${2:?}"; shift 2 ;;
         # legacy: absolute GB of debug head-room -> converted to a fraction below
-        --debug-reserve)    WP_DEBUG_RESERVE_GB="${2:?}"; shift 2 ;;
-        --gw-node-frac)     WP_GW_NODE_FRAC="${2:?}"; shift 2 ;;
+        --debug-reserve)    _cli WP_DEBUG_RESERVE_GB "${2:?}"; shift 2 ;;
+        --gw-node-frac)     _cli WP_GW_NODE_FRAC "${2:?}"; shift 2 ;;
         --conf)             CONF="${2:?}"; shift 2 ;;
         -y|--non-interactive) INTERACTIVE=0; shift ;;
         --show)             SHOW_ONLY=1; shift ;;
@@ -130,6 +139,39 @@ while [[ $# -gt 0 ]]; do
         *) warn "Unknown option: $1"; echo "Try: vasp-configure --help" >&2; exit 2 ;;
     esac
 done
+
+# --------------------------------------------------------------------------- #
+# One-shot setters: `--debug-max-cores 240` changes that value and nothing else
+# --------------------------------------------------------------------------- #
+# Only when a profile already exists. With no profile there is nothing to keep,
+# so the flags seed the wizard as before. --show/--edit/--verify keep their own
+# meaning. Rewriting in place (rather than re-emitting the file) preserves the
+# header, the comments and every key this version does not know about.
+_conf_set_key(){   # _conf_set_key FILE KEY VALUE
+    local f="$1" k="$2" v="$3" line found=0 tmp
+    tmp="$(mktemp)" || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ ^[[:space:]]*${k}= ]]; then
+            printf '%s="%s"\n' "$k" "$v" >> "$tmp"; found=1
+        else
+            printf '%s\n' "$line" >> "$tmp"
+        fi
+    done < "$f"
+    (( found )) || printf '%s="%s"\n' "$k" "$v" >> "$tmp"
+    cat "$tmp" > "$f"; rm -f "$tmp"
+}
+
+if (( ${#CLI_KEYS[@]} > 0 )) && [[ -f "$CONF" ]] \
+   && (( SHOW_ONLY == 0 && EDIT_ONLY == 0 && VERIFY_ONLY == 0 )); then
+    info "Updating $CONF"
+    for _k in "${CLI_KEYS[@]}"; do
+        _conf_set_key "$CONF" "$_k" "${!_k}" \
+            && echo "    ${_k}=\"${!_k}\"" \
+            || { warn "could not update ${_k}"; exit 1; }
+    done
+    info "Done. Everything else in the profile is unchanged."
+    exit 0
+fi
 
 # --------------------------------------------------------------------------- #
 # Helpers

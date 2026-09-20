@@ -324,8 +324,20 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo ""
         echo "export VASP_TEST_WALLTIME_MIN='${WALLTIME_MIN}'"
         echo "export WP_MODULES_PRELOADED=1"
+        # The job re-execs this script on a COMPUTE node, where it re-reads the
+        # cluster profile -- so the profile has to be reachable from there. It
+        # need not be: on Santos Dumont $HOME is /prj, which compute nodes do
+        # not mount, so the re-exec'd script found no profile and exited 2 after
+        # ten seconds. Point it at the copy staged beside the job instead, on
+        # the same filesystem as the calculation and therefore visible by
+        # construction. Copying rather than exporting each value keeps the
+        # quoting honest (WP_EXTRA_ENV carries semicolons and quotes) and pins
+        # the job to the profile it was submitted with.
+        echo '_wp_staged="$SLURM_SUBMIT_DIR/.wolfpack/cluster.conf"'
+        echo '[[ -f "$_wp_staged" ]] && export WOLFPACK_CLUSTER_CONF="$_wp_staged"'
         echo "exec '${self}'"
     } > "$job"
+    [[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" .wolfpack/cluster.conf
     chmod +x "$job"
     echo "STAGE 3: benchmarking the FIXED config (KPAR=${FIX_KPAR} NCORE=${FIX_NCORE} NSIM=${FIX_NSIM})" >&2
     echo "         at ${tr} ranks on '${part}' (${tnodes} node(s) x ${tntpn}, ${mempc} MB/cpu," >&2

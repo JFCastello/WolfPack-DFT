@@ -1067,11 +1067,21 @@ tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
     echo "export MKL_NUM_THREADS=1"
     [[ -n "${WP_EXTRA_ENV:-}" ]] && echo "${WP_EXTRA_ENV}"
     echo ""
+    # Every chunk re-execs this script on a COMPUTE node, where it re-reads the
+    # cluster profile. That profile need not be reachable from there: on Santos
+    # Dumont $HOME is /prj, which compute nodes do not mount, so each chunk
+    # would exit 2 on arrival and the chain would die one chunk at a time. Point
+    # it at the copy staged in the chain directory, which sits on the same
+    # filesystem as the calculation and is therefore visible by construction.
+    echo "_wp_staged=\"\$SLURM_SUBMIT_DIR/${CHDIR}/cluster.conf\""
+    echo '[[ -f "$_wp_staged" ]] && export WOLFPACK_CLUSTER_CONF="$_wp_staged"'
+    echo ""
     # --mode explicitly: the job invokes the real file path, where the symlink
     # name the user typed -- and with it the mode -- is no longer visible.
     echo "exec '${SELF}' --mode ${MODE} --chunk-body"
 } > "$CH_JOB"
 chmod +x "$CH_JOB"
+[[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" "$CHDIR/cluster.conf"
 
 # ---- state ----------------------------------------------------------------
 if [[ $ACTION == resume ]] && [[ -f "$CH_ENV" ]]; then
