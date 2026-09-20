@@ -32,7 +32,7 @@ cd WolfPack-DFT
    can undo everything precisely.
 
 Activate the environment before using the Python tools (`vasp-calculate-u`,
-`build-supercell`, `vasp-plot-fatbandsdos`):
+`build-supercell`, `build-magnetic-configs`, `vasp-plot-fatbandsdos`):
 
 ```bash
 conda activate wolfpack-dft
@@ -89,6 +89,7 @@ scripts they emit target **your** partitions and load **your** modules.
 
 **No cluster? Install anyway.** The plotting and analysis tools
 (`vasp-plot-fatbandsdos`, `vasp-quick-plots`, `vasp-check`, `build-supercell`,
+`build-magnetic-configs`,
 `vasp-calculate-u`) need **no** cluster profile and no VASP install — only the
 conda env. `install.sh` detects the absence of SLURM/modules and skips the
 wizard, so you can install on a laptop and plot from copied calculation folders.
@@ -129,7 +130,8 @@ pass `--purge-repo`.
 | `vasp-calculate-u` | `vasp_calculate_u.py` | Hubbard U workflow Step 4: linear fit → print U |
 | `vasp-plot-fatbandsdos` | `vasp_plot_fatbandsdos.py` | Fat-band + projected DOS figure (pymatgen; `wolfpack_plot/` package) |
 | `vasp-quick-plots` | `vasp_quick_plots.sh` | One figure per method (plain/one_orbital/duo/rgb/cmyk/stacked) into numbered `Plots/` sub-folders, projections auto-picked over an energy window |
-| `build-supercell` | `build_supercell.py` | Build a plain VASP supercell from a POSCAR, or **enumerate the inequivalent magnetic orderings** of a structure into ready-to-run folders (`--magnetic-configs`) |
+| `build-supercell` | `build_supercell.py` | Build a plain VASP supercell from a POSCAR |
+| `build-magnetic-configs` | `build_magnetic_configs.py` | **Enumerate the inequivalent collinear spin orderings** of a structure into one ready-to-run folder each (NM / FM / AFM / FiM), with a `.cif` and `.vesta` to look at them |
 | `wolfpack` | `wolfpack.sh` | Print this README (`--help`), the plotting guide (`--plots`) or the command list (`--list`) |
 
 > Setup commands (run from this folder, not on `$PATH`): `./install.sh` and
@@ -485,7 +487,7 @@ reproducible measure of which orbitals dominate the chosen energy range.
 
 ---
 
-## 6. Supercell builder
+## 6. Structure builders
 
 ### `build-supercell`
 
@@ -500,6 +502,33 @@ build-supercell POSCAR -s 2 2 2 --sort        # also sort by electronegativity
 build-supercell POSCAR -s -1 1 1  1 -1 1  1 1 -1 -o POSCAR_conv
                                               # primitive FCC → conventional
 build-supercell --help
+```
+
+### `build-magnetic-configs`
+
+Finding a magnetic ground state means computing several spin orderings and
+comparing them. Doing that by hand is error-prone in a way that does not
+announce itself: `MAGMOM` has to line up site-for-site with the POSCAR, and a
+slip gives a calculation that converges to something else without complaining.
+
+This enumerates the inequivalent collinear orderings of `./POSCAR` and writes
+one folder per ordering, grouped by type, each with a POSCAR, an INCAR derived
+from `./INCAR` with `ISPIN` and `MAGMOM` set, a rescaled KPOINTS and — when its
+species order still matches — the POTCAR. Orderings that fit in your cell keep
+**your** cell, **your** site order and **your** KPOINTS untouched; `SUMMARY.txt`
+names the ones that could not. Every folder also carries a `.cif` and a `.vesta`
+drawing an arrow on each magnetic atom, red up and blue down, so you can check a
+folder at a glance before spending compute on it.
+
+Needs the enumlib binaries (`enum.x`, `makestr.x`), which `install.sh` pulls
+into the conda environment.
+
+```bash
+build-magnetic-configs --dry-run              # look before writing
+build-magnetic-configs                        # write the folders
+build-magnetic-configs --magnetic-species V   # only V is magnetic, ignore Cu
+build-magnetic-configs POSCAR_relaxed         # start from another file
+build-magnetic-configs --help
 ```
 
 ---

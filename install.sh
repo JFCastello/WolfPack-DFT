@@ -59,6 +59,7 @@ COMMAND_MAP=(
     "vasp-plot-fatbandsdos|vasp_plot_fatbandsdos.py"
     "vasp-quick-plots|vasp_quick_plots.sh"
     "build-supercell|build_supercell.py"
+    "build-magnetic-configs|build_magnetic_configs.py"
     "wolfpack|wolfpack.sh"
 )
 
@@ -73,7 +74,7 @@ RETIRED_COMMANDS=(
 #
 # enumlib is a BINARY package, not a python module: it provides enum.x and
 # makestr.x, which pymatgen shells out to when enumerating magnetic orderings
-# (build-supercell --magnetic-configs). Without them every antiferromagnetic and
+# (build-magnetic-configs). Without them every antiferromagnetic and
 # ferrimagnetic strategy raises RuntimeError at construction and only the
 # ferromagnetic case survives.
 CONDA_PKGS=(python numpy scipy matplotlib pymatgen enumlib)
