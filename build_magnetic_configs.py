@@ -114,7 +114,7 @@ if _PKG_DIR not in sys.path:
     sys.path.insert(0, _PKG_DIR)
 
 from pymatgen.io.vasp import Poscar            # noqa: E402
-from wolfpack_incar import set_tag, comment_tag  # noqa: E402
+from wolfpack_incar import set_tag, comment_tag, get_tag  # noqa: E402
 
 
 # =============================================================================
@@ -817,7 +817,13 @@ def enumerate_magnetic(args):
                    ).write_file(str(folder / "POSCAR"))
 
             txt = incar_text
-            txt = set_tag(txt, "ISPIN", "2", "spin-polarised")
+            # A note only when the value actually changes. ISPIN was very often
+            # already 2, and overwriting the user's own trailing comment with
+            # ours would be exactly the gratuitous churn this library exists to
+            # avoid -- set_tag keeps their comment when no note is given.
+            txt = set_tag(txt, "ISPIN", "2",
+                          "" if (get_tag(txt, "ISPIN") or "").strip() == "2"
+                          else "spin-polarised")
             txt = set_tag(txt, "MAGMOM",
                                   Incar({"MAGMOM": spins}).get_str().split("=", 1)[1].strip(),
                                   f"{kind} ordering ({origin})")
@@ -869,7 +875,7 @@ def enumerate_magnetic(args):
     lines = [hdr, "-" * len(hdr)]
     for f, k, o, n, net, exp, cn, note in summary:
         lines.append(f"{f:<38} {k:<4} {o:<12} {n:>5} {net:>+6.1f}  "
-                     f"{cn + '; ' if cn else ''}{note}")
+                     f"{'; '.join(x for x in (cn, note) if x)}")
     body = "\n".join(lines)
     print("\n" + body)
 
