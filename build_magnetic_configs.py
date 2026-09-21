@@ -6,9 +6,9 @@ Enumerate the inequivalent collinear spin orderings of a POSCAR.
 ==================================================================
 WHAT THIS SCRIPT DOES
 ==================================================================
-Reads ./POSCAR, enumerates the inequivalent collinear spin
-orderings of it, and writes one ready-to-run folder per ordering,
-grouped by type:
+Reads ./POSCAR, asks pymatgen to enumerate the inequivalent
+collinear spin orderings of it, and writes one ready-to-run folder
+per ordering, grouped by type:
 
   magnetic_configs/
     00_NM/config_01/    POSCAR INCAR KPOINTS POTCAR
@@ -17,84 +17,60 @@ grouped by type:
     01_FM/config_01/
     02_AFM/config_01/ config_02/ ...
     03_FiM/config_01/
-    SUMMARY.txt         <- the index: type, net moment, cell, notes
-    run_pipelines.sh    <- launches the whole sweep in one go
+    SUMMARY.txt         <- the index
+    run_pipelines.sh    <- submits the whole sweep
+
+pymatgen does the physics: the enumeration is
+MagneticStructureEnumerator, the site matching is StructureMatcher,
+the space groups are get_space_group_info, and the .cif is whatever
+CifWriter produces. This script is the plumbing around that.
 
 Each folder gets an INCAR derived from ./INCAR with only ISPIN and
 MAGMOM changed. Points worth knowing:
 
+* MAGMOM LINES UP WITH THE POSCAR site for site. Both are derived
+  from one object in one order, never by re-reading a file: Poscar
+  does not carry spin through, so a slip here would give a
+  calculation that converges to something else without complaining.
+  --sort is refused in this mode for the same reason.
+
 * MAGMOM MAGNITUDES come from your own INCAR's MAGMOM when it has
   one (per element, largest |value|); the SIGNS come from each
   ordering. Without a MAGMOM it falls back to pymatgen's defaults,
-  which are high-spin (V 5, Fe 5, Ni 5, Cu 1.73) and usually differ
-  from what you would have chosen. The output says which was used.
+  which are high-spin and usually differ from what you would have
+  chosen. The output says which was used.
 
-* NUPDOWN IS DELIBERATELY NOT SET, and an inherited one is
-  commented out: it would force every ordering to the same total
-  moment, which is the opposite of what you are comparing. The
-  MAGMOM seed is what steers each calculation, and an ordering that
-  collapses to another is telling you something real.
+* NUPDOWN IS NOT WRITTEN, and an inherited one is commented out:
+  it would force every ordering to the same total moment.
 
-* THE POSITIONS ARE ALWAYS YOURS. The enumerator is asked one
-  question -- which magnetic site points up and which points down --
-  and nothing else of its answer is used. It does not return the
-  structure it was given: it reduces the basis, reorders the sites,
-  and IDEALISES. Reading the cell at a 0.1 A symmetry tolerance it
-  averages sites onto orbits they are only approximately related by,
-  which on LaMnO3 moved the oxygens 0.0043 A and turned a P2_1/c
-  cell into an exact Pnma one. Whether your structure is Pnma or
-  P2_1/c is your call and lives in your POSCAR -- silently raising
-  its symmetry changes what VASP is then told to impose with ISYM.
-  So every coordinate written here comes from the file you handed
-  in, and the index reports how much idealisation was undone.
+* THE INPUT POSCAR IS USED AS WRITTEN. The enumerator does not
+  return the cell it was given -- it can reduce the basis, reorder
+  the sites, and return different coordinates -- so each ordering is
+  matched back onto the input with StructureMatcher and the folder
+  carries the input's own coordinates. If an ordering needs a
+  supercell, it is built from the input. Nothing is symmetrised
+  unless --symmetrize is given, which is the only path on which
+  SpacegroupAnalyzer touches the structure.
 
-* YOUR CELL IS KEPT WHEREVER THE ORDERING FITS IN IT, along with
-  your site order, your selective dynamics and your KPOINTS.
-
-* SOME CELLS STILL DIFFER, and the index says which. An ordering has
-  its own magnetic periodicity and your cell need not admit it (on
-  conventional NiO, five of eight orderings have exactly your atom
-  count and still do not fit). Antiferromagnets often need a
-  supercell, and pymatgen may find a smaller primitive cell. Those
-  folders carry the cell the ordering needs, REFILLED with your
-  atoms -- compare energies PER ATOM, and note that selective
-  dynamics is dropped there, because the frozen atoms have no
-  counterpart. KPOINTS is rescaled from the RECIPROCAL lattice
-  vectors, which is what the mesh subdivides; an unchanged lattice
-  is left alone.
+* WHEN PYMATGEN RETURNS A SMALLER CELL than the input, or a
+  structure StructureMatcher cannot match, that structure is
+  written as it comes and the index says so.
 
 * THE POTCAR IS CHECKED, NOT ASSUMED. Enumeration can reorder the
   species blocks; a POTCAR whose order no longer matches is NOT
-  copied, and the folder says so. Copying it blindly would give a
-  run that completes and is silently meaningless.
+  copied, and the folder says so.
 
-* ONE COMMAND LAUNCHES THE WHOLE SWEEP. run_pipelines.sh
-  submits dry-run -> recommend -> test in every folder at once,
-  chained with a SLURM dependency so you can log out while it
-  works. It skips folders it has already submitted, and --dry-run
-  shows what it would do without submitting anything.
+* KPOINTS is rescaled from the reciprocal lattice vectors when the
+  cell differs; an unchanged lattice is left alone.
 
-* THE .cif CARRIES THE SYMMETRY WHEN THERE IS ONE. If the POSCAR
-  has a space group that does not depend on the tolerance, the .cif
-  is written in the MAGNETIC space group and lists only the
-  asymmetric unit, so VESTA shows the symmetry instead of twenty
-  unrelated atoms at 1a. That needs the magnetic group, not the
-  nuclear one: an A-type ordering breaks half of P2_1/c's
-  operations as ordinary operations and recovers them once they may
-  carry time reversal. Each reduced file is read back and compared
-  to this POSCAR BEFORE it is written -- a reduced CIF tells a
-  reader to GENERATE atoms, so a mistake would not look wrong, it
-  would open quietly as a different crystal. Anything that does not
-  reproduce exactly falls back to P 1. SYMMETRY.txt in each folder
-  says which happened and why.
+* SYMMETRY IS REPORTED, NOT USED. SUMMARY.txt carries a space group
+  column and each folder a SYMMETRY.txt, both holding exactly what
+  get_space_group_info returned for that folder's POSCAR.
 
-* EVERY FOLDER CARRIES ITS OWN PICTURE. Alongside the inputs go a
-  .cif and a .vesta named after the configuration, both drawing an
-  arrow on each magnetic atom -- red for up, blue for down, length
-  proportional to the moment, so a ferrimagnet reads as such at a
-  glance. Open either in VESTA to check the folder really holds the
-  ordering you think it does before spending compute on it. VASP
-  reads neither.
+* .cif AND .vesta ARE FOR LOOKING AT. The .cif carrying the moments
+  comes out in P 1 because pymatgen disables symmetry detection
+  when asked for magmoms; a second, symmetrised .cif without
+  moments is written when pymatgen finds a space group.
 
 Needs the enumlib binaries (enum.x, makestr.x), which install.sh
 pulls into the conda environment. Without them pymatgen can only
@@ -107,6 +83,8 @@ USAGE
   build-magnetic-configs                    # write the folders
   build-magnetic-configs --magnetic-species V
         # treat only V as magnetic, ignoring Cu
+  build-magnetic-configs --symmetrize --symprec 0.1
+        # enumerate from pymatgen's symmetrised structure instead
   build-magnetic-configs POSCAR_relaxed     # start from another file
 
   magnetic_configs/run_pipelines.sh --dry-run   # then, to launch the sweep
@@ -311,117 +289,71 @@ def _demagnetised(struct):
     )
 
 
-# How far an atom may have been moved and still be recognised as the same atom.
-# enumlib idealises: it analyses the structure at symm_prec=0.1 A, so on a cell
-# that is only ALMOST at a higher symmetry it averages sites onto orbits they do
-# not really share. On LaMnO3 that moved the oxygens by 0.0043 A and turned a
-# P2_1/c cell into an exact Pnma one. 0.1 A is far above that and far below any
-# bond length, so it separates "enumlib tidied this up" from "this is a
-# different structure" without ever mistaking one for the other.
-MAX_IDEALISATION_A = 0.1
+# --- putting the ordering back on the user's own atoms -----------------------
+# The enumerator is asked ONE question -- which magnetic site points up and
+# which points down -- and that is the only thing taken from its answer. Every
+# coordinate comes from the POSCAR that was handed in.
+#
+# The matching is StructureMatcher's, with StructureMatcher's tolerances. There
+# is deliberately none of our own: the enumerator can return the same structure
+# in a different basis, in a different site order, and (through enumlib) with
+# the positions idealised, and pymatgen is the thing that knows how much of that
+# still counts as the same crystal.
 
 
-def _user_positions(ref, struct):
-    """The ordering's SPINS on the user's own atomic positions.
+def _on_user_positions(ref, struct, matcher):
+    """`struct`'s spins on `ref`'s atomic positions, or None if they do not fit.
 
-    The enumerator is asked one question -- which magnetic site points up and
-    which points down -- and that is the only thing taken from its answer. Every
-    coordinate comes from the POSCAR that was handed in.
+    Three cases, and only the first two can keep the user's coordinates:
 
-    This matters because enumlib does not return the structure it was given. It
-    reduces the basis (LaMnO3's Pnma cell comes back with c -> c + a), it
-    reorders the sites, and, worse, it IDEALISES: reading the cell at a 0.1 A
-    symmetry tolerance, it averages sites onto orbits they are only approximately
-    related by. Whether a structure is Pnma or P2_1/c is the user's call and
-    belongs to their POSCAR; a tool that silently raises the symmetry of the
-    input changes the physics that VASP will then be told to impose with ISYM.
-
-    Two outcomes, both keeping the user's coordinates:
-
-      * the ordering fits in the user's own cell -> their cell, their site
-        order, their selective dynamics, their KPOINTS untouched.
-      * it does not -> the cell the ordering needs, but REFILLED with the user's
-        positions rather than enumlib's idealised ones.
-
-    Returns (structure, kind, moved_A) where `kind` is "own" or "refilled" and
-    `moved_A` is how far enumlib had shifted things, or None when no
-    correspondence exists at all.
+      same size   -> map straight onto `ref`
+      bigger      -> ask for the supercell matrix and build it FROM `ref`, so
+                     even an expanded cell is made of the user's own atoms
+      smaller     -> None. pymatgen found a cell with fewer atoms than the
+                     input; that cell is cheaper to run and is kept as it comes.
     """
     import numpy as np
-    from pymatgen.analysis.structure_matcher import StructureMatcher, ElementComparator
 
     dem = _demagnetised(struct)
+    base = None
+    if len(struct) == len(ref):
+        base = ref
+    elif len(struct) > len(ref):
+        trans = matcher.get_transformation(dem, ref)
+        if trans is None:
+            return None
+        base = ref.copy()
+        base.make_supercell(np.round(trans[0]).astype(int))
+        if len(base) != len(struct):
+            return None
+    else:
+        return None
 
-    # ---- does it fit in the user's own cell? --------------------------------
-    if len(struct) == len(ref) and \
-            abs(struct.lattice.volume - ref.lattice.volume) <= 1e-3 * ref.lattice.volume:
-        matcher = StructureMatcher(primitive_cell=False, attempt_supercell=True,
-                                   comparator=ElementComparator())
-        like = matcher.get_s2_like_s1(ref, dem)
-        if like is not None and len(like) == len(ref) \
-                and [s.specie.symbol for s in like] == [s.specie.symbol for s in ref]:
-            moved = max(ref.lattice.get_all_distances(like[i].frac_coords,
-                                                      ref[i].frac_coords)[0][0]
-                        for i in range(len(ref)))
-            # get_s2_like_s1 returns its best alignment whether or not one
-            # exists, so the distance is what decides: a real correspondence
-            # puts every atom on top of one of the user's, give or take
-            # enumlib's idealisation.
-            if moved <= MAX_IDEALISATION_A:
-                out = ref.copy()
-                out.add_site_property("magmom", list(like.site_properties["magmom"]))
-                return out, "own", moved
-
-    # ---- otherwise: enumlib's cell, the user's atoms ------------------------
-    return _refill_from_user(ref, struct)
+    like = matcher.get_s2_like_s1(base, dem)
+    if like is None or len(like) != len(base):
+        return None
+    if [s.specie.symbol for s in like] != [s.specie.symbol for s in base]:
+        return None
+    out = base.copy()
+    out.add_site_property("magmom", list(like.site_properties["magmom"]))
+    return out
 
 
-def _refill_from_user(ref, struct):
-    """`struct`'s cell and spins, with every atom put back where the user had it.
+def _space_group(struct, symprec=None):
+    """What pymatgen says the space group is: (symbol, number), or None.
 
-    Each site of the enumerated cell is an image of some site of the reference
-    under a lattice translation -- that is what a derivative superstructure is.
-    So the site is looked up in the reference and the reference's own coordinate
-    is used, carried into this cell by that translation. Nothing is averaged and
-    nothing is idealised; the only thing kept from the enumerated structure is
-    its lattice and its spins.
+    Reported, never acted on. The default symprec is pymatgen's own.
     """
-    import numpy as np
-    from pymatgen.core import Structure
-
-    species, coords, moved = [], [], 0.0
-    inv = np.linalg.inv(ref.lattice.matrix)
-    for site in struct:
-        el = getattr(site.specie, "element", site.specie)
-        frac = site.coords @ inv                 # this atom in the user's basis
-        best = None
-        for rsite in ref:
-            if rsite.specie.symbol != el.symbol:
-                continue
-            shift = np.round(frac - rsite.frac_coords)
-            delta = frac - rsite.frac_coords - shift
-            dist = float(np.linalg.norm(delta @ ref.lattice.matrix))
-            if best is None or dist < best[0]:
-                best = (dist, rsite, shift)
-        if best is None or best[0] > MAX_IDEALISATION_A:
-            return None                          # genuinely not the same crystal
-        dist, rsite, shift = best
-        moved = max(moved, dist)
-        cart = (rsite.frac_coords + shift) @ ref.lattice.matrix
-        species.append(el)
-        coords.append(struct.lattice.get_fractional_coords(cart))
-
-    out = Structure(struct.lattice, species, coords,
-                    site_properties={"magmom": _spins(struct)})
-    return out, "refilled", moved
+    try:
+        if symprec is None:
+            return struct.get_space_group_info()
+        return struct.get_space_group_info(symprec=symprec)
+    except Exception:
+        return None
 
 
-# --- visualisation: one .cif and one .vesta per configuration ---------------
-# Reading a MAGMOM and reconstructing the ordering in your head is slow and
-# error-prone. Seeing arrows on the magnetic atoms is the fastest way to notice
-# that a folder does not hold the ordering you thought it did -- before spending
-# hours of compute on it.
-#
+
+# --- visualisation: .cif and .vesta per configuration ------------------------
 # Both files are for LOOKING at. VASP never reads either one.
 
 VESTA_ARROW_A = 1.5     # longest arrow, in Angstrom: visible without reaching
@@ -430,406 +362,47 @@ VESTA_UP = "255 0 0"    # red
 VESTA_DOWN = "0 0 255"  # blue
 
 
-# --- symmetry ---------------------------------------------------------------
-# A space group is only worth writing into a file if it is unambiguous, so it is
-# probed across a range of tolerances and accepted only when they agree. 1e-5 is
-# the one that matters: it is what VASP itself uses to decide ISYM.
-SYMPREC_PROBE = (1e-5, 1e-3, 1e-2)
-SYMPREC_USE = 1e-5
+def _write_cifs(struct, folder, stem, sg, symprec=None):
+    """Whatever CifWriter can produce, written verbatim. Up to two files.
 
+    `<stem>.cif` carries the moments. It comes out in P 1 because pymatgen
+    disables symmetry detection when asked for magmoms -- CifWriter says so
+    itself: "Magnetic symmetry cannot currently be detected by pymatgen". That
+    is pymatgen's limit, and it is left alone rather than worked around.
 
-def _symmetry_of(struct):
-    """The space group of `struct`, and whether its moments respect it.
-
-    The second half is the part that is easy to get wrong. A magnetic ordering
-    is NOT obliged to keep the symmetry of the atoms it sits on: on LaMnO3 the
-    A-type arrangement breaks two of P2_1/c's four operations, while G-type and
-    the ferromagnet keep all four. Writing "P2_1/c" into the A-type file would
-    therefore be a false statement about the structure -- a reader (or VESTA)
-    would generate the missing atoms with the WRONG spin.
-
-    The test is exact and cheap: an operation maps a site onto another site of
-    the same orbit, so the arrangement survives every operation if and only if
-    the moment is CONSTANT within every orbit. Nothing needs to be enumerated.
-    """
-    from pymatgen.core import Structure
-    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-
-    spins = _spins(struct)
-    bare = Structure(struct.lattice,
-                     [getattr(s.specie, "element", s.specie) for s in struct],
-                     [s.frac_coords for s in struct])
-    out = {"spins": spins, "probe": {}, "orbits": [], "magnetic": None}
-    for p in SYMPREC_PROBE:
-        try:
-            out["probe"][p] = bare.get_space_group_info(symprec=p)
-        except Exception:
-            out["probe"][p] = ("?", 0)
-    numbers = {v[1] for v in out["probe"].values()}
-    out["symbol"], out["number"] = out["probe"][SYMPREC_USE]
-    out["unambiguous"] = len(numbers) == 1 and out["number"] > 1
-
-    try:
-        sga = SpacegroupAnalyzer(bare, symprec=SYMPREC_USE)
-        sym = sga.get_symmetrized_structure()
-        out["n_ops"] = len(sga.get_symmetry_operations())
-        for idx, wyck in zip(sym.equivalent_indices, sym.wyckoff_symbols):
-            vals = sorted({round(spins[i], 6) for i in idx})
-            out["orbits"].append((wyck, bare[idx[0]].specie.symbol, list(idx), vals))
-    except Exception:
-        out["n_ops"] = 0
-    out["spin_preserves"] = bool(out["orbits"]) and all(len(o[3]) == 1 for o in out["orbits"])
-    out["reducible"] = bool(out["unambiguous"] and out["spin_preserves"])
-
-    # The magnetic space group, which pymatgen cannot determine but spglib can.
-    # Reported, never written into the CIF: pymatgen's writer has no way to emit
-    # magnetic symmetry operations, and inventing that format here would be a
-    # much bigger promise than this tool should make.
-    try:
-        import spglib
-        # SCALARS here, deliberately -- the opposite of what _magcif_text needs.
-        # The two conventions answer different physical questions and give
-        # different groups for the same ordering:
-        #
-        #   scalar  : the moment is a label, up or down, and an operation that
-        #             swaps them is a symmetry only with time reversal. This is
-        #             a collinear magnet with NO spin-orbit coupling -- which is
-        #             exactly what ISPIN=2 without LSORBIT is, and what VASP
-        #             itself uses to decide ISYM. It gives the textbook answers:
-        #             paramagnet -> grey, ferromagnet -> type I, collinear
-        #             antiferromagnet -> black-white.
-        #   vector  : the moments are pinned to a crystal direction, which needs
-        #             spin-orbit coupling to mean anything. It inverts those
-        #             answers, calling the ferromagnet black-white and the
-        #             antiferromagnet colourless.
-        #
-        # The .cif has to use the vector form because that is what the magCIF
-        # format stores. The REPORT has to use this one, because it is the
-        # calculation the user is about to run.
-        cell = (bare.lattice.matrix, bare.frac_coords,
-                [s.specie.Z for s in bare], [float(m) for m in spins])
-        ds = spglib.get_magnetic_symmetry_dataset(cell, symprec=SYMPREC_USE)
-        bns = ""
-        try:
-            bns = spglib.get_magnetic_spacegroup_type(ds.uni_number).bns_number
-        except Exception:
-            pass
-        out["magnetic"] = {"uni": ds.uni_number, "bns": bns,
-                           "type": ds.msg_type, "n_ops": ds.n_operations,
-                           "n_tr": int(sum(int(x) for x in ds.time_reversals))}
-    except Exception:
-        pass
-    return out
-
-
-def _symop_xyz(rot, trans, time_reversal):
-    """One magnetic symmetry operation as magCIF writes it: "-x,y+1/2,-z+1/2,-1".
-
-    The trailing +1/-1 is what makes this a MAGNETIC operation: -1 means the
-    operation is only a symmetry when combined with time reversal, i.e. it maps
-    an up spin onto a down one. That flag is the whole reason a magnetic
-    ordering can be reduced at all -- the A-type arrangement on LaMnO3 breaks
-    two of P2_1/c's four operations as ordinary operations, and recovers both
-    once they are allowed to carry time reversal.
-    """
-    from fractions import Fraction
-    parts = []
-    for i in range(3):
-        terms = []
-        for j, var in enumerate("xyz"):
-            c = int(round(rot[i][j]))
-            if c:
-                terms.append(("+" if c > 0 else "-")
-                             + (var if abs(c) == 1 else f"{abs(c)}{var}"))
-        frac = Fraction(float(trans[i])).limit_denominator(12)
-        if frac:
-            terms.append(("+" if frac > 0 else "-")
-                         + (f"{abs(frac.numerator)}/{frac.denominator}"
-                            if frac.denominator != 1 else f"{abs(frac.numerator)}"))
-        parts.append("".join(terms).lstrip("+") or "0")
-    return ",".join(parts) + ("," + ("-1" if time_reversal else "+1"))
-
-
-def _magcif_text(struct, spins, title):
-    """A magCIF reduced to the asymmetric unit of the MAGNETIC space group.
-
-    Written by hand rather than with CifWriter, which refuses symprec together
-    with moments because pymatgen cannot determine magnetic symmetry. spglib
-    can, and that is the whole difference: with the magnetic operations in the
-    file a reader can regenerate every atom AND know which regenerated spins to
-    flip. Without them a reduced file is not merely less informative, it is
-    wrong -- pymatgen reads it back as six atoms instead of twenty.
-
-    Returns None when spglib cannot give a magnetic group.
-    """
-    import numpy as np
-    from pymatgen.electronic_structure.core import Magmom
-    try:
-        import spglib
-        # The moments go in as VECTORS, not scalars. Given scalars spglib uses
-        # the collinear convention, where a spatial operation leaves the moment
-        # alone and only time reversal flips it. A magCIF stores the moment as
-        # an AXIAL VECTOR, which spatial operations do rotate. The two
-        # conventions disagree, and the disagreement is not academic: with
-        # scalars the ferromagnet came back out of its own file as [+,+,-,-] --
-        # a ferromagnet read as an antiferromagnet. Vectors make spglib set the
-        # time-reversal flags that match how the file will be read.
-        cell = (struct.lattice.matrix, struct.frac_coords,
-                [s.specie.Z for s in struct], [[0.0, 0.0, float(m)] for m in spins])
-        ds = spglib.get_magnetic_symmetry_dataset(cell, symprec=SYMPREC_USE)
-        if ds is None or ds.n_operations < 1:
-            return None
-    except Exception:
-        return None
-
-    lat, comp = struct.lattice, struct.composition
-    out = [f"# {title} -- generated by build-magnetic-configs",
-           f"# magnetic space group UNI {ds.uni_number}, {ds.n_operations} operations;"
-           f" asymmetric unit only",
-           f"data_{comp.reduced_formula}",
-           f"_cell_length_a   {lat.a:.8f}",
-           f"_cell_length_b   {lat.b:.8f}",
-           f"_cell_length_c   {lat.c:.8f}",
-           f"_cell_angle_alpha   {lat.alpha:.8f}",
-           f"_cell_angle_beta   {lat.beta:.8f}",
-           f"_cell_angle_gamma   {lat.gamma:.8f}",
-           f"_cell_volume   {lat.volume:.8f}",
-           f"_chemical_formula_sum   '{comp.formula}'",
-           "loop_",
-           " _space_group_symop_magn_operation.id",
-           " _space_group_symop_magn_operation.xyz"]
-    for k in range(ds.n_operations):
-        out.append(f"  {k + 1}  "
-                   f"{_symop_xyz(ds.rotations[k], ds.translations[k], ds.time_reversals[k])}")
-    out += ["loop_", " _atom_site_type_symbol", " _atom_site_label",
-            " _atom_site_symmetry_multiplicity", " _atom_site_fract_x",
-            " _atom_site_fract_y", " _atom_site_fract_z", " _atom_site_occupancy"]
-    eq = list(ds.equivalent_atoms)
-    moments, n = [], 0
-    for rep in sorted(set(eq)):
-        mult = eq.count(rep)
-        site = struct[rep]
-        el = getattr(site.specie, "element", site.specie).symbol
-        label = f"{el}{n}"; n += 1
-        f = site.frac_coords
-        out.append(f"  {el}  {label}  {mult}  {f[0]:.8f}  {f[1]:.8f}  {f[2]:.8f}  1")
-        if abs(spins[rep]) > 1e-6:
-            v = Magmom(spins[rep]).get_moment_relative_to_crystal_axes(lat)
-            moments.append(f"  {label}  {v[0]:.8f}  {v[1]:.8f}  {v[2]:.8f}")
-    if moments:
-        out += ["loop_", " _atom_site_moment_label",
-                " _atom_site_moment_crystalaxis_x",
-                " _atom_site_moment_crystalaxis_y",
-                " _atom_site_moment_crystalaxis_z"] + moments
-    return "\n".join(out) + "\n"
-
-
-def _magcif_roundtrips(text, struct, spins):
-    """Does this reduced file regenerate the structure AND the ordering?
-
-    Checked before the file is written, never assumed. A reduced CIF is an
-    instruction to a reader to GENERATE atoms, so a mistake in the operations or
-    in the asymmetric unit does not produce a file that looks wrong -- it
-    produces one that opens quietly as a different crystal. That already
-    happened once here: a reduced file with moments but no magnetic operations
-    read back as 6 atoms of 20, with the stoichiometry silently wrong.
-
-    Moments are compared by MAGNITUDE and by relative sign. The parser rebuilds
-    the cell in the CIF's standard orientation, so the moment vectors come back
-    rotated with it; their lengths and their pattern are the physics, the
-    components are bookkeeping. A global flip is the same magnetic state.
-    """
-    import tempfile
-    import numpy as np
-    from pymatgen.io.cif import CifParser
-
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".mcif", delete=False) as fh:
-            fh.write(text); tmp = fh.name
-        back = CifParser(tmp).parse_structures(primitive=False)[0]
-        Path(tmp).unlink(missing_ok=True)
-    except Exception:
-        return False
-    if len(back) != len(struct):
-        return False
-
-    mags = back.site_properties.get("magmom")
-    ref_vec, ref_sign = None, 0
-    for i, site in enumerate(struct):
-        d = struct.lattice.get_all_distances(site.frac_coords, back.frac_coords)[0]
-        j = int(np.argmin(d))
-        if d[j] > 1e-3 or back[j].specie.symbol != site.specie.symbol:
-            return False
-        want = float(spins[i])
-        got = float(np.linalg.norm(np.asarray(mags[j].moment))) if mags else 0.0
-        if abs(got - abs(want)) > 1e-3:
-            return False
-        if mags and abs(want) > 1e-6:
-            v = np.asarray(mags[j].moment)
-            if ref_vec is None:
-                ref_vec, ref_sign = v, np.sign(want)
-                continue
-            # Parallel or antiparallel to the first moment: a dot product, not a
-            # component. The parser rebuilds the cell in the CIF's standard
-            # orientation, so the vectors come back rotated as a set, and any
-            # single component can change sign without the ORDERING changing.
-            if np.sign(float(np.dot(v, ref_vec))) != np.sign(want) * ref_sign:
-                return False
-    return True
-
-
-def _write_magnetic_cif(struct, path, title, sym=None):
-    """Write a magCIF carrying the structure and its initial moments.
-
-    With a space group the ordering genuinely respects, the file carries it and
-    lists only the asymmetric unit -- which is what you want to open in VESTA,
-    and what the P 1 listing could not tell you. Otherwise every site is listed
-    explicitly in P 1, which is always true if less informative.
+    `<stem>_symmetrized.cif` is written only when pymatgen finds a space group,
+    and carries no moments. refine_struct=False is the one non-default argument:
+    the default would hand back get_refined_structure, whose cell need not be the
+    one in this folder's POSCAR.
     """
     from pymatgen.core import Structure
     from pymatgen.io.cif import CifWriter
 
     spins = _spins(struct)
-    # Only ask for the magnetic loop when there is something to put in it: with
-    # every moment zero, CifWriter emits the four _atom_site_moment_* headers
-    # followed by no data rows. An empty loop_ is malformed CIF and pymatgen's
-    # own parser raises on it.
     has_moment = any(abs(m) > 1e-6 for m in spins)
+    Path(folder / f"{stem}.cif").write_text(
+        str(CifWriter(_demagnetised(struct), write_magmoms=has_moment)))
 
-    # A reduced file is only written once it has been proved to regenerate this
-    # exact structure and ordering. Everything else falls back to P 1, which
-    # lists every site and so cannot be got wrong.
-    if sym and sym.get("unambiguous"):
-        if has_moment:
-            text = _magcif_text(struct, spins, title)
-            if text is not None and _magcif_roundtrips(text, struct, spins):
-                if sym is not None:
-                    sym["cif_reduced"] = True
-                Path(path).write_text(text)
-                return
-        else:
-            # No moments, so the nuclear group describes the file completely and
-            # pymatgen's own writer can be used. refine_struct=False always:
-            # get_refined_structure idealises the coordinates and can replace
-            # the cell, which is the one thing this tool promises never to do.
-            plain = Structure(struct.lattice,
-                              [getattr(s.specie, "element", s.specie) for s in struct],
-                              [s.frac_coords for s in struct])
-            text = str(CifWriter(plain, symprec=SYMPREC_USE, refine_struct=False))
-            if _magcif_roundtrips(text, struct, spins):
-                if sym is not None:
-                    sym["cif_reduced"] = True
-                Path(path).write_text(text.replace(
-                    "# generated using pymatgen",
-                    f"# {title} -- generated by build-magnetic-configs\n"
-                    f"# space group {sym['symbol']} ({sym['number']}), asymmetric unit only",
-                    1))
-                return
-
-    if sym is not None:
-        sym["cif_reduced"] = False
-    text = str(CifWriter(_demagnetised(struct), write_magmoms=has_moment))
-    why = ("no unambiguous space group" if not (sym and sym.get("unambiguous"))
-           else "the reduced file did not reproduce this structure exactly")
-    Path(path).write_text(text.replace(
-        "# generated using pymatgen",
-        f"# {title} -- generated by build-magnetic-configs\n"
-        f"# P 1, every site listed: {why}", 1))
+    if sg is None or sg[1] <= 1:
+        return
+    plain = Structure(struct.lattice,
+                      [getattr(s.specie, "element", s.specie) for s in struct],
+                      [s.frac_coords for s in struct])
+    try:
+        text = str(CifWriter(plain, symprec=symprec or 0.01, refine_struct=False))
+    except Exception:
+        return
+    Path(folder / f"{stem}_symmetrized.cif").write_text(text)
 
 
-def _write_symmetry_txt(path, stem, sym, n_sites):
-    """The small report that says whether a symmetry was found, and what it means.
-
-    Worth a file of its own because the answer changes per folder: the same
-    POSCAR gives a magnetic structure that keeps the full space group under one
-    ordering and breaks it under the next, and nothing in the POSCAR or the
-    INCAR shows that.
-    """
-    MSG_TYPE = {1: "type I, colourless (no time reversal)",
-                2: "type II, grey (paramagnetic: time reversal alone is a symmetry)",
-                3: "type III, black-white (half the operations need time reversal)",
-                4: "type IV, black-white with an anti-translation"}
-    L = [f"Symmetry of {stem}", "=" * (12 + len(stem)), "",
-         "STRUCTURE  (atomic positions only; the spins are ignored here)"]
-    for p in SYMPREC_PROBE:
-        name, num = sym["probe"][p]
-        L.append(f"  symprec {p:<7g}  {name} ({num})")
-    if sym["unambiguous"]:
-        L.append(f"  -> UNAMBIGUOUS: {sym['symbol']} ({sym['number']}), "
-                 f"{sym.get('n_ops', 0)} operations.")
-        L.append(f"     1e-5 is the tolerance VASP uses to decide ISYM, so this is the")
-        L.append(f"     symmetry it will see in this POSCAR.")
-    elif sym["number"] <= 1:
-        L.append("  -> no symmetry beyond P 1.")
-    else:
-        L.append("  -> AMBIGUOUS: the space group depends on the tolerance, so this cell")
-        L.append("     is only APPROXIMATELY at the higher symmetry. Nothing is written")
-        L.append("     into the .cif on the strength of a guess.")
-    if sym["orbits"]:
-        L += ["", "  Wyckoff orbits (site indices are 1-based, as in the POSCAR):"]
-        for wyck, el, idx, vals in sym["orbits"]:
-            moms = "/".join(f"{v:+g}" for v in vals)
-            L.append(f"    {el:<3s} {wyck:<5s} {len(idx):2d} sites {str(idx_1(idx)):<22s} moment {moms}")
-
-    L += ["", "MAGNETIC ORDERING"]
-    if not sym["orbits"]:
-        L.append("  symmetry analysis unavailable.")
-    elif sym["spin_preserves"]:
-        L.append("  Every orbit carries ONE moment, so every symmetry operation maps an")
-        L.append("  up spin onto an up spin and a down onto a down: the ordering keeps the")
-        L.append("  full space group above.")
-    else:
-        L.append("  The moment is NOT constant within every orbit, so the ordering BREAKS")
-        L.append("  the space group above as an ORDINARY symmetry. The orbits it splits:")
-        for wyck, el, idx, vals in sym["orbits"]:
-            if len(vals) > 1:
-                L.append(f"    {el} {wyck}: sites {idx_1(idx)} carry "
-                         + " and ".join(f"{v:+g}" for v in vals))
-        n_tr = (sym.get("magnetic") or {}).get("n_tr", 0)
-        L.append("  That is not the end of it: an operation that maps an up spin onto a down")
-        L.append("  one can still be a symmetry when combined with TIME REVERSAL, and that is")
-        if n_tr:
-            L.append(f"  what the magnetic space group below counts -- {n_tr} of its operations do,")
-            L.append("  which is what makes it black-white.")
-        else:
-            L.append("  what the magnetic space group below counts. Here none of them do: the")
-            L.append("  ordering simply leaves a smaller group, with no operation recovered.")
-    mg = sym.get("magnetic")
-    if mg:
-        L += ["", f"  magnetic space group : BNS {mg['bns'] or '?'}  "
-                  f"(UNI {mg['uni']}), {mg['n_ops']} operations,"
-                  f" {mg.get('n_tr', 0)} needing time reversal",
-              f"                         {MSG_TYPE.get(mg['type'], '?')}",
-              "                         Collinear convention, no spin-orbit coupling: the moment",
-              "                         is up or down, not a direction in the crystal. That is",
-              "                         what ISPIN=2 without LSORBIT is, and what VASP uses for",
-              "                         ISYM. (The .cif stores moments as vectors because the",
-              "                         magCIF format requires it; same state, other bookkeeping.)"]
-
-    L += ["", "FILES IN THIS FOLDER"]
-    if sym.get("cif_reduced"):
-        L.append(f"  {stem}.cif     reduced: it carries magnetic symmetry operations and lists")
-        L.append(f"                          only the asymmetric unit. A reader expands it back to")
-        L.append(f"                          {n_sites} atoms, flipping the spins on the operations")
-        L.append( "                          marked -1. The group named in its header is the VECTOR")
-        L.append( "                          one the magCIF format needs, not the collinear one")
-        L.append( "                          above -- the same state, counted the other way.")
-        L.append( "                          Verified by reading the file back and comparing it to")
-        L.append( "                          this POSCAR before it was written.")
-    else:
-        L.append(f"  {stem}.cif     P 1, all {n_sites} sites listed explicitly -- see above for why.")
-    L.append(f"  {stem}.vesta   all {n_sites} atoms explicit, ALWAYS. VESTA's own format states")
-    L.append( "                          each arrow by atom index, so the file cannot also ask")
-    L.append( "                          VESTA to generate atoms by symmetry: it would draw the")
-    L.append( "                          arrows on the wrong ones.")
-    L.append("")
-    L.append("  Neither file is read by VASP. The POSCAR is untouched either way.")
-    Path(path).write_text("\n".join(L) + "\n")
-
-
-def idx_1(idx):
-    """1-based site indices, the way a POSCAR is read by a human."""
-    return [i + 1 for i in idx]
+def _write_symmetry_txt(path, sg, symprec):
+    """What pymatgen returned for this folder's POSCAR. Nothing else."""
+    call = f"get_space_group_info(symprec={symprec})" if symprec is not None \
+        else "get_space_group_info()"
+    found = f"{sg[0]} ({sg[1]})" if sg else "nothing returned"
+    Path(path).write_text(
+        "POSCAR in this folder\n"
+        f"  pymatgen {call}: {found}\n")
 
 
 def _write_vesta(struct, path, title):
@@ -1059,6 +632,17 @@ def enumerate_magnetic(args):
     # line 1 as free text, so take it raw.
     ref_title = _raw_title(args.poscar) or poscar_in.comment
 
+    if args.symmetrize:
+        # The only path on which SpacegroupAnalyzer touches the structure that
+        # ends up in the folders. Off by default, because the POSCAR the user
+        # wrote is the one they meant.
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+        sga = (SpacegroupAnalyzer(ref, symprec=args.symprec) if args.symprec
+               else SpacegroupAnalyzer(ref))
+        ref = sga.get_refined_structure()
+        print(f"--symmetrize: input replaced by get_refined_structure() "
+              f"-> {len(ref)} sites, {_space_group(ref, args.symprec)}")
+
     # ---- which atoms carry a moment -------------------------------------
     if args.magnetic_species:
         mag_els = [s.strip() for s in args.magnetic_species.split(",") if s.strip()]
@@ -1129,16 +713,16 @@ def enumerate_magnetic(args):
     entries = []
     nm = ref.copy()
     nm.add_site_property("magmom", [0.0] * len(nm))
-    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments", ("own", 0.0)))
+    entries.append(("NM", nm, "reference, ISPIN=2 with zero moments", True))
+    from pymatgen.analysis.structure_matcher import StructureMatcher, ElementComparator
+    matcher = StructureMatcher(primitive_cell=False, attempt_supercell=True,
+                               comparator=ElementComparator())
     for struct, origin in zip(enum.ordered_structures, enum.ordered_structure_origins):
-        # Only the SPINS are taken from the enumerator. The coordinates come
-        # from the user's POSCAR, whether or not the ordering fits in their cell.
-        got = _user_positions(ref, struct)
-        if got is None:
-            entries.append((_ordering_of(struct), struct, origin, ("enumlib", None)))
-        else:
-            out, kind, moved = got
-            entries.append((_ordering_of(out), out, origin, (kind, moved)))
+        # Only the SPINS are taken from the enumerator; the coordinates come
+        # from the POSCAR that was handed in, whenever pymatgen can match them.
+        mapped = _on_user_positions(ref, struct, matcher)
+        struct = mapped if mapped is not None else struct
+        entries.append((_ordering_of(struct), struct, origin, mapped is not None))
 
     order = {"NM": 0, "FM": 1, "AFM": 2, "FiM": 3}
     # Sorted by TYPE, then by strategy, then by the moments themselves. Sorting
@@ -1170,38 +754,29 @@ def enumerate_magnetic(args):
         sys.exit(f"error: {MAG_DIR}/ already exists -- move or remove it first")
 
     summary, counts, made = [], {}, 0
-    for kind, struct, origin, (source, moved) in entries:
+    for kind, struct, origin, on_ref in entries:
         counts[kind] = counts.get(kind, 0) + 1
         folder = out_root / f"{order.get(kind, 9):02d}_{kind}" / f"config_{counts[kind]:02d}"
         spins = _spins(struct)
         net = sum(spins)
-        # Two facts, kept apart because they are independent and were once
-        # reported as one: WHICH CELL this ordering needed, and WHOSE
-        # coordinates are in it. Conflating them produced the message "your cell
-        # cannot hold this ordering" for a cell that held it perfectly well --
-        # the mapping had only failed because enumlib idealised the positions.
         if len(struct) > len(ref):
-            cellnote = f"SUPERCELL x{len(struct) / len(ref):g}"
+            cellnote = f"supercell x{len(struct) / len(ref):g}"
         elif len(struct) < len(ref):
-            cellnote = f"primitive cell ({len(ref)} -> {len(struct)} sites)"
-        elif source != "own":
-            cellnote = "cell re-based by enumlib"
+            cellnote = f"{len(struct)} sites"
         else:
             cellnote = ""
-        if source == "enumlib":
-            cellnote = ((cellnote + "; ") if cellnote else "") + \
-                "POSITIONS ARE ENUMLIB'S, NOT YOURS (no correspondence found)"
-        elif moved and moved > 1e-6:
-            cellnote = ((cellnote + "; ") if cellnote else "") + \
-                f"your positions kept (enumlib had moved them {moved * 1000:.1f} mA)"
+        if not on_ref:
+            cellnote = ((cellnote + "; ") if cellnote else "") + "structure from pymatgen"
         expanded = len(struct) != len(ref)
         note = ""
+        sg = _space_group(struct, args.symprec)
+        sgtxt = f"{sg[0]} ({sg[1]})" if sg else "none"
 
         # POSCAR and MAGMOM come from ONE object in ONE order; never re-read.
         # De-spun, because Poscar leaks "Mn,spin=np.int64(5)" into the label
         # column of a Species(spin=...) structure.
         out_struct = _demagnetised(struct)
-        if source != "own" and "selective_dynamics" in out_struct.site_properties:
+        if not on_ref and "selective_dynamics" in out_struct.site_properties:
             # Only the user's own cell keeps them. Elsewhere the atoms have no
             # one-to-one counterpart, and a wrong constraint is far worse than
             # none: it relaxes a structure nobody asked for and says nothing.
@@ -1248,9 +823,8 @@ def enumerate_magnetic(args):
             # configuration so several open at once stay distinguishable in
             # VESTA's tabs instead of all reading "structure".
             stem = f"{kind}_config_{counts[kind]:02d}"
-            sym = _symmetry_of(struct)
-            _write_magnetic_cif(struct, folder / f"{stem}.cif", stem, sym)
-            _write_symmetry_txt(folder / "SYMMETRY.txt", stem, sym, len(struct))
+            _write_cifs(struct, folder, stem, sg, args.symprec)
+            _write_symmetry_txt(folder / "SYMMETRY.txt", sg, args.symprec)
             _write_vesta(struct, folder / f"{stem}.vesta", stem)
 
             if pot_syms:
@@ -1270,38 +844,32 @@ def enumerate_magnetic(args):
             made += 1
 
         summary.append((str(folder.relative_to(root)), kind, origin, len(struct),
-                        net, expanded, cellnote, note))
+                        net, expanded, sgtxt, "; ".join(x for x in (cellnote, note) if x)))
 
     # ---- report ------------------------------------------------------------
-    hdr = (f"{'folder':<38} {'type':<4} {'origin':<12} {'sites':>5} {'net':>6}  notes")
+    hdr = (f"{'folder':<38} {'type':<4} {'origin':<12} {'sites':>5} {'net':>6} "
+           f"{'space group':<14} notes")
     lines = [hdr, "-" * len(hdr)]
-    for f, k, o, n, net, exp, cn, note in summary:
-        lines.append(f"{f:<38} {k:<4} {o:<12} {n:>5} {net:>+6.1f}  "
-                     f"{'; '.join(x for x in (cn, note) if x)}")
+    for f, k, o, n, net, exp, sg, note in summary:
+        lines.append(f"{f:<38} {k:<4} {o:<12} {n:>5} {net:>+6.1f} {sg:<14} {note}")
     body = "\n".join(lines)
     print("\n" + body)
 
     if not args.dry_run:
+        sp = args.symprec if args.symprec is not None else "pymatgen default"
         (out_root / "SUMMARY.txt").write_text(
             f"Magnetic configurations from {args.poscar}\n"
             f"Magnetic elements : {', '.join(mag_els)}\n"
-            f"Moment magnitudes : {mag_src}\n\n{body}\n\n"
-            "Each folder also carries <TYPE>_config_NN.cif and .vesta for viewing the\n"
-            "ordering -- arrows on the magnetic atoms, red for up and blue for down.\n"
-            "Neither is read by VASP.\n\n"
-            "EVERY POSCAR here carries YOUR atomic positions. The enumerator is asked\n"
-            "only which magnetic site points up and which points down; it is never\n"
-            "allowed to decide where an atom sits. It idealises -- it reads the cell at\n"
-            "a 0.1 A symmetry tolerance and averages sites onto orbits they are only\n"
-            "approximately related by -- and whether your structure is Pnma or P2_1/c is\n"
-            "your call, not its. Where a note says how far it had moved them, that much\n"
-            "idealisation was undone.\n\n"
-            "Unmarked folders also carry YOUR cell, YOUR site order and YOUR KPOINTS.\n"
-            "A marked one needed a different cell for the ordering to fit at all, so its\n"
-            "lattice differs -- but it was refilled with your atoms.\n\n"
-            "Cells of different size are NOT comparable directly -- compare energy PER ATOM.\n"
-            "NUPDOWN is deliberately unset: the MAGMOM seed guides each ordering, and\n"
-            "an ordering that collapses to another is telling you something real.\n")
+            f"Moment magnitudes : {mag_src}\n"
+            f"Space group from  : pymatgen get_space_group_info, symprec {sp}\n"
+            + (f"Input structure   : replaced by SpacegroupAnalyzer"
+               f".get_refined_structure(symprec={args.symprec})\n"
+               if args.symmetrize else "")
+            + f"\n{body}\n\n"
+            "Each folder holds POSCAR, INCAR, KPOINTS, POTCAR, a .cif and a .vesta for\n"
+            "viewing, and SYMMETRY.txt. VASP reads none of the last three.\n\n"
+            "Cells of different size are not comparable directly -- compare energy per atom.\n"
+            "NUPDOWN is not written.\n")
         runner = _write_master_pipeline(out_root, [s[0] for s in summary])
         print(f"\nWrote {made} configuration(s) under {MAG_DIR}/   (index: {MAG_DIR}/SUMMARY.txt)")
         if runner:
@@ -1334,6 +902,17 @@ def main():
                         "Default: ferromagnetic + antiferromagnetic, plus "
                         "whatever pymatgen adds automatically for this "
                         "structure.")
+    p.add_argument("--symmetrize", action="store_true",
+                   help="Replace the input structure with pymatgen's symmetrised "
+                        "one (SpacegroupAnalyzer.get_refined_structure) before "
+                        "enumerating. Off by default: without it the input "
+                        "POSCAR is used exactly as written and "
+                        "SpacegroupAnalyzer is never called on the way to a "
+                        "folder.")
+    p.add_argument("--symprec", type=float, default=None, metavar="A",
+                   help="Symmetry tolerance handed to pymatgen, for --symmetrize "
+                        "and for the space group reported in SUMMARY.txt and "
+                        "SYMMETRY.txt. Default: pymatgen's own.")
     p.add_argument("--dry-run", action="store_true",
                    help="List what would be written, without creating anything.")
     enumerate_magnetic(p.parse_args())

@@ -573,42 +573,38 @@ one folder per ordering, grouped by type, each with a POSCAR, an INCAR derived
 from `./INCAR` with `ISPIN` and `MAGMOM` set, a rescaled KPOINTS and — when its
 species order still matches — the POTCAR.
 
-**Your structure is never symmetrised.** The enumerator is asked one question —
-which magnetic site points up and which points down — and nothing else of its
-answer is used. It does not return the structure it was given: it reduces the
-basis, reorders the sites, and *idealises*, reading the cell at a 0.1 Å symmetry
-tolerance and averaging sites onto orbits they are only approximately related
-by. On LaMnO₃ that moved the oxygens 0.0043 Å and turned a P2₁/c cell into an
-exact Pnma one — 4 symmetry operations becoming 8, which `ISYM=2` then imposes
-on the whole relaxation. Whether your structure is Pnma or P2₁/c is your call
-and lives in your POSCAR, so every coordinate written out comes from the file
-you handed in, and `SUMMARY.txt` reports how much idealisation was undone.
+**pymatgen does the physics; this command is the plumbing.** The enumeration is
+`MagneticStructureEnumerator`, the site matching is `StructureMatcher`, the space
+groups are `get_space_group_info`, and the `.cif` is whatever `CifWriter`
+produces. Nothing is worked around.
 
-Orderings that fit in your cell also keep **your** cell, **your** site order and
-**your** KPOINTS untouched; the rest get the cell the ordering needs, refilled
-with your atoms.
+**Your POSCAR is used as written.** The enumerator does not return the cell it
+was given — it can reduce the basis, reorder the sites and return different
+coordinates — so each ordering is matched back onto your input and the folder
+carries your own coordinates. If an ordering needs a supercell, it is built from
+your input. `SpacegroupAnalyzer` is never called on the way to a folder unless
+you ask for it:
 
-**The `.cif` carries the symmetry when there is one.** If your POSCAR has a space
-group that does not depend on the tolerance, the `.cif` is written in the
-*magnetic* space group and lists only the asymmetric unit, so VESTA shows the
-symmetry instead of twenty unrelated atoms at `1a`. It has to be the magnetic
-group, not the nuclear one: on LaMnO₃ the A-type ordering breaks two of
-P2₁/c's four operations as ordinary operations and recovers both once they may
-carry time reversal. Each reduced file is read back and compared against the
-POSCAR **before** it is written — a reduced CIF is an instruction to *generate*
-atoms, so a mistake there does not produce a file that looks wrong, it produces
-one that opens quietly as a different crystal. Anything that does not reproduce
-exactly falls back to `P 1`.
+```bash
+build-magnetic-configs --symmetrize --symprec 0.1
+```
 
-Every folder also gets a **`SYMMETRY.txt`** saying what was found: the space
-group at four tolerances (including the 1e-5 VASP uses for `ISYM`) and whether
-they agree, the Wyckoff orbits with the moment on each, whether the ordering
-keeps or breaks the space group, the magnetic space group in BNS notation, and
-which form the `.cif` took. The `.vesta` always lists every atom explicitly —
-its format states each arrow by atom index, so it cannot also ask VESTA to
-generate atoms by symmetry without drawing the arrows on the wrong ones. Every folder also carries a `.cif` and a `.vesta`
-drawing an arrow on each magnetic atom, red up and blue down, so you can check a
-folder at a glance before spending compute on it.
+which replaces the input with `get_refined_structure()` before enumerating, and
+says so in the index.
+
+When pymatgen returns a cell smaller than your input, or a structure
+`StructureMatcher` cannot match, that structure is written as it comes and the
+index says so.
+
+**Symmetry is reported, not used.** `SUMMARY.txt` has a space group column and
+each folder a three-line `SYMMETRY.txt`, both holding exactly what
+`get_space_group_info` returned for that folder's POSCAR — or that it returned
+nothing.
+
+Each folder also carries a `.cif` with the moments (P 1, because pymatgen
+disables symmetry detection when asked for magmoms) and, when pymatgen finds a
+space group, a second symmetrised `.cif` without moments. The `.vesta` draws an
+arrow on each magnetic atom, red up and blue down.
 
 Needs the enumlib binaries (`enum.x`, `makestr.x`), which `install.sh` pulls
 into the conda environment.
