@@ -586,7 +586,27 @@ you handed in, and `SUMMARY.txt` reports how much idealisation was undone.
 
 Orderings that fit in your cell also keep **your** cell, **your** site order and
 **your** KPOINTS untouched; the rest get the cell the ordering needs, refilled
-with your atoms. Every folder also carries a `.cif` and a `.vesta`
+with your atoms.
+
+**The `.cif` carries the symmetry when there is one.** If your POSCAR has a space
+group that does not depend on the tolerance, the `.cif` is written in the
+*magnetic* space group and lists only the asymmetric unit, so VESTA shows the
+symmetry instead of twenty unrelated atoms at `1a`. It has to be the magnetic
+group, not the nuclear one: on LaMnO₃ the A-type ordering breaks two of
+P2₁/c's four operations as ordinary operations and recovers both once they may
+carry time reversal. Each reduced file is read back and compared against the
+POSCAR **before** it is written — a reduced CIF is an instruction to *generate*
+atoms, so a mistake there does not produce a file that looks wrong, it produces
+one that opens quietly as a different crystal. Anything that does not reproduce
+exactly falls back to `P 1`.
+
+Every folder also gets a **`SYMMETRY.txt`** saying what was found: the space
+group at four tolerances (including the 1e-5 VASP uses for `ISYM`) and whether
+they agree, the Wyckoff orbits with the moment on each, whether the ordering
+keeps or breaks the space group, the magnetic space group in BNS notation, and
+which form the `.cif` took. The `.vesta` always lists every atom explicitly —
+its format states each arrow by atom index, so it cannot also ask VESTA to
+generate atoms by symmetry without drawing the arrows on the wrong ones. Every folder also carries a `.cif` and a `.vesta`
 drawing an arrow on each magnetic atom, red up and blue down, so you can check a
 folder at a glance before spending compute on it.
 
