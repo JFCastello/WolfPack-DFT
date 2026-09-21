@@ -430,9 +430,18 @@ class Candidate:
             f"NSIM   = {self.nsim}\n"
             f"LPLANE = {format_bool(self.lplane)}\n"
             f"# Derived only: NPAR = {self.npar}  (do NOT set BOTH NCORE and NPAR)\n"
-            "# I/O hygiene:\n"
-            "LWAVE  = .FALSE.\n"
-            "LCHARG = .FALSE.\n"
+            "#\n"
+            "# I/O hygiene -- COMMENTED OUT ON PURPOSE. Uncomment only for a\n"
+            "# one-shot run you will never restart.\n"
+            "#\n"
+            "# vasp-chain restarts every chunk from the previous one: it sets\n"
+            "# ISTART = 1 (continue from the previous chunk's WAVECAR). Turning\n"
+            "# LWAVE off deletes exactly that file, so the chain silently starts\n"
+            "# each chunk from scratch and burns the walltime it was meant to save.\n"
+            "# LCHARG = .FALSE. does the same to a CHGCAR-based restart.\n"
+            "# LVTOT is safe to leave off unless you want the local potential.\n"
+            "# LWAVE  = .FALSE.\n"
+            "# LCHARG = .FALSE.\n"
             "LVTOT  = .FALSE."
         )
 
@@ -999,14 +1008,21 @@ def parse_outcar(outcar_path: Path,
     s.nions = _first_int([r"NIONS\s*=\s*(\d+)"], text)
     s.nelect = _first_float([r"NELECT\s*=\s*([0-9]+(?:\.[0-9]+)?)"], text)
     s.ispin = _first_int([r"ISPIN\s*=\s*(\d+)"], text) or 1
-    # NPLWV / NRPLWV: VASP sometimes prints overflowed '********' for large
-    # systems and sometimes omits the line entirely.  Try several spellings.
-    s.nplwv = _first_int(
+    # NRPLWV -- the number of plane-wave COEFFICIENTS per band, which is what
+    # the wavefunction memory is proportional to.
+    #
+    # VASP prints it per k-point, and the dry run prints it too:
+    #     k-point   1 :  0.0000 0.0000 0.0000  plane waves:    8553
+    # Take the maximum, because that is the array VASP dimensions.
+    #
+    # Do NOT read it from "total plane-waves  NPLWV = 57600".  Despite the
+    # label, NPLWV is NGX*NGY*NGZ -- the FFT box, not the sphere inside it.
+    # On the fixture above, 50*18*64 = 57600 against a true 8553: reading that
+    # line put a 6.7x error into the dominant term of the memory model.
+    _pw = [int(m) for m in re.findall(r"plane waves:\s*(\d+)", text)]
+    s.nplwv = max(_pw) if _pw else _first_int(
         [
-            r"\bNPLWV\s*=\s*(\d+)",
             r"\bNRPLWV\s*=\s*(\d+)",
-            r"total plane-waves\s+NPLWV\s*=\s*(\d+)",
-            r"total plane-waves\s*:\s*(\d+)",
             r"max plane-waves\s*=\s*(\d+)",
             r"maximum number of plane-waves\s*[:=]\s*(\d+)",
         ],
@@ -1076,10 +1092,11 @@ def _fallback_wavefun_mb(summary: DryRunSummary, ncore: int, npar: int,
 
     Per https://vasp.at/wiki/Memory_requirements:
         NKDIM * NBANDS * NRPLWV * 16  bytes
-    where NRPLWV is the max number of plane waves over k-points (NPLWV in
-    the dry-run).  Distributing fully over the rank lattice gives:
+    where NRPLWV is the max number of plane-wave COEFFICIENTS over k-points --
+    the "plane waves:" count the dry run prints per k-point, NOT the NPLWV
+    line, which is the FFT box.  Distributing over the rank lattice:
 
-        per_rank = (NBANDS * NKPTS * NPLWV * ISPIN * 16) / (NPAR*NCORE*KPAR)
+        per_rank = (NBANDS * NKPTS * NRPLWV * ISPIN * 16) / (NPAR*NCORE*KPAR)
     """
     if not (summary.nbands and summary.nplwv):
         return 0.0
@@ -1380,6 +1397,61 @@ def suggest_total_ranks(
 # ============================================================================
 
 
+def kpar_terms(kpar: int, irr_k: Optional[int],
+               coverage_weight: float) -> Dict[str, float]:
+    """The VASP-wiki KPAR rules, as scoring terms.
+
+    Two sentences from https://vasp.at/wiki/index.php/Optimizing_the_parallelization
+    carry the whole thing:
+
+        "increase KPAR up to the number of irreducible k points.  Keep in
+         mind that KPAR should factorize the number of k points."
+
+    The first is a DIRECTIVE, and it is the only part that earns points here.
+    The second is a CONSTRAINT on how to obey the first, so it is scored as
+    the cost of breaking it and nothing else.  Scoring it as a reward instead
+    -- which is what this function replaces -- handed the full bonus to
+    KPAR = 1, because every integer divides by 1: the one setting that obeys
+    the constraint precisely by refusing the directive.
+
+    The cost is arithmetic, not a judgement.  https://vasp.at/wiki/index.php/KPAR
+    says the k-points go out "in a round-robin fashion", so the busiest group
+    ends up with ceil(NKPTS / KPAR) of them and every other group waits for
+    it.  The fraction of the allocated core-time that buys nothing is then
+
+        1 - NKPTS / (ceil(NKPTS / KPAR) * KPAR)
+
+    which is zero exactly when KPAR factorizes NKPTS -- KPAR = 1 and
+    KPAR = NKPTS included -- and rises as the split gets more lopsided.  It
+    also scales the penalty with the damage: NKPTS = 190 over KPAR = 3 leaves
+    groups of 64/63/63 and wastes 1 % of the job, while KPAR = 128 leaves
+    groups of 2 and 1 and wastes 26 %.  The old pass/fail test could not tell
+    those apart.
+
+    `coverage_weight` is the peak value of the directive term, reached at
+    KPAR = NKPTS.  It is engineering, not documentation: the wiki gives no
+    numbers.  It is set to the weight the old divisibility bonus carried, so
+    the scale of the total score is unchanged.
+    """
+    if not irr_k or irr_k <= 0 or kpar <= 0:
+        return {}
+    parts: Dict[str, float] = {}
+
+    per_group = -(-irr_k // kpar)                 # ceil, in integers
+    idle = 1.0 - irr_k / float(per_group * kpar)
+    if idle > 1e-12:
+        parts["kpar_does_NOT_factorise_nkpts"] = -60.0 * idle
+
+    # "increase KPAR up to the number of irreducible k points" -- saturating,
+    # because the same page warns that "the parallel efficiency of each level
+    # drops near its limit" and that "the k-point parallelization ... requires
+    # additional memory" (the memory terms below price that separately).
+    parts["kpar_kpoint_coverage"] = coverage_weight * math.sqrt(
+        min(1.0, kpar / float(irr_k))
+    )
+    return parts
+
+
 def score_candidate(
     *,
     summary: DryRunSummary,
@@ -1394,8 +1466,9 @@ def score_candidate(
     Larger is better.  The weights are calibrated so that:
       * a HARD wiki violation (e.g. KPAR > NKPTS) -> very large negative
       * the recommended setting (NCORE ~ sqrt(rpk), NCORE | NUMA) -> ~+25
-      * memory not fitting in partition default -> -40 (eclipses most bonuses)
-      * throughput term: ~+10 for using the full account allowance
+      * KPAR at the wiki's ceiling of NKPTS -> +18 (see kpar_terms)
+      * a memory-light layout that fits the partition default -> +5
+      * throughput term: up to +5 for using the full account allowance
     """
     parts: Dict[str, float] = {}
 
@@ -1403,7 +1476,6 @@ def score_candidate(
     nbands = summary.nbands
     natoms = summary.nions
     ngz = (summary.coarse_fft or summary.fine_fft or (0, 0, 0))[2] or None
-    is_amd_zen4 = partition_info.get("arch") == "amd-zen4"
 
     rpk = candidate.ranks_per_kgroup       # = total_ranks / KPAR = NPAR*NCORE
 
@@ -1412,32 +1484,31 @@ def score_candidate(
     if candidate.total_ranks % candidate.kpar != 0:
         parts["KPAR_must_divide_total_ranks_(HARD_RULE)"] = -1000.0
 
-    # KPAR should be a divisor of NKPTS (VASP wiki rule).
-    if irr_k and irr_k > 0:
-        if irr_k % candidate.kpar == 0:
-            parts["kpar_factorises_nkpts"] = 18.0
-        else:
-            parts["kpar_does_NOT_factorise_nkpts"] = -25.0
-
-        # Reward k-point coverage; saturate as KPAR approaches NKPTS.
-        # Smaller weight than the divisibility bonus -- the wiki advice
-        # "increase KPAR up to NKPTS" is explicitly CONDITIONAL on memory
-        # permitting it (https://vasp.at/wiki/Optimizing_the_parallelization
-        # and https://vasp.at/wiki/Not_enough_memory).  The memory-cost
-        # penalties below will down-rank a high-KPAR config that doesn't
-        # actually fit.
-        parts["kpar_kpoint_coverage"] = 6.0 * math.sqrt(
-            min(1.0, candidate.kpar / max(1, irr_k))
-        )
+    # "increase KPAR up to the number of irreducible k points.  Keep in mind
+    # that KPAR should factorize the number of k points."  See kpar_terms().
+    parts.update(kpar_terms(candidate.kpar, irr_k, coverage_weight=18.0))
 
     # Gamma-only / NKPTS = 1: KPAR must be 1.
     if summary.is_gamma_only and candidate.kpar != 1:
         parts["gamma_only_requires_kpar_1_(HARD_RULE)"] = -200.0
 
-    # Wiki special case: bulk + small NBANDS + many k-points -> NCORE=1, KPAR=NKPTS.
-    if (irr_k and irr_k > 1 and nbands and nbands <= 64
-            and candidate.kpar == irr_k and candidate.ncore == 1):
-        parts["wiki_small_cell_many_kpts_recipe"] = 25.0
+    # The wiki's other sentence -- "For bulk systems with small unit cells,
+    # NCORE = 1 and KPAR = NKPTS is optimal" -- used to be a +25 term of its
+    # own, gated on NBANDS <= 64.  Both halves are gone deliberately.
+    #
+    # The gate was wrong: NBANDS counts electrons, not cell size, so it fired
+    # on a heavy metal in a tiny cell and missed a light one in a big cell.
+    # Cell VOLUME is not the fix either -- a 20-atom slab carrying 15 A of
+    # vacuum is enormous by volume and small by every parallelization measure.
+    # The honest proxy is the atom count, and the branch that uses it
+    # (small_system_ncore_1_recipe, NIONS < 50) already exists below.
+    #
+    # And the term itself is now double-counting: "KPAR = NKPTS" is exactly
+    # where kpar_terms() pays its ceiling, and "NCORE = 1" is what
+    # small_system_ncore_1_recipe pays.  Scoring the conjunction a third time
+    # said nothing new, it only shouted.  It existed as a counterweight to the
+    # bonus KPAR = 1 used to collect for nothing; that bonus is gone, so the
+    # counterweight goes with it.
 
     # ---- 2. NCORE rules --------------------------------------------------
     # NCORE should divide cores per node (FFTs stay intra-node).
@@ -1581,14 +1652,6 @@ def score_candidate(
     parts["throughput_scaling"] = 5.0 * math.sqrt(
         candidate.total_ranks / max(1, max_cores)
     )
-
-    # ---- 10. AMD-partition bonus: KPAR ~ 4 ----------------------------
-    # A common recipe for AMD (zen) partitions.
-    if is_amd_zen4 and irr_k and irr_k >= 4:
-        if candidate.kpar == 4:
-            parts["amd_kpar_4_default"] = 3.0
-        elif candidate.kpar in (2, 8) and irr_k % candidate.kpar == 0:
-            parts["amd_kpar_near_4"] = 1.5
 
     score = float(sum(parts.values()))
     return score, parts
@@ -1959,7 +2022,6 @@ def score_gw_candidate(
     """
     parts: Dict[str, float] = {}
     irr_k = summary.irr_kpoints or summary.nkpts
-    is_amd_zen4 = partition_info.get("arch") == "amd-zen4"
     low = candidate.calc_type in ("GW_LOWSCALING", "RPA_LOWSCALING")
 
     # ---- KPAR rules (shared) --------------------------------------------
@@ -1967,18 +2029,13 @@ def score_gw_candidate(
         parts["KPAR_must_divide_total_ranks_(HARD_RULE)"] = -1000.0
     if summary.is_gamma_only and candidate.kpar != 1:
         parts["gamma_only_requires_kpar_1_(HARD_RULE)"] = -200.0
-    if irr_k and irr_k > 0:
-        if irr_k % candidate.kpar == 0:
-            parts["kpar_factorises_nkpts"] = 20.0
-        else:
-            parts["kpar_does_NOT_factorise_nkpts_(HARD)"] = -60.0
-        # GW parallel efficiency lives almost entirely on KPAR (conventional)
-        # or shares the budget with the grid split (low-scaling).  Reward
-        # k-point coverage more strongly than in DFT, but still saturate.
-        coverage_weight = 10.0 if not low else 6.0
-        parts["kpar_kpoint_coverage"] = coverage_weight * math.sqrt(
-            min(1.0, candidate.kpar / max(1, irr_k))
-        )
+    # Same wiki rules as the DFT path (see kpar_terms()).  The directive is
+    # worth more here: with NCORE pinned to 1, conventional GW has no FFT
+    # level to fall back on, so KPAR is nearly the whole parallelization.
+    # Low-scaling GW/RPA shares the budget with NTAUPAR/NOMEGAPAR, scored
+    # below, so its KPAR directive is weighted lower.
+    parts.update(kpar_terms(candidate.kpar, irr_k,
+                            coverage_weight=20.0 if not low else 12.0))
 
     # ---- NCORE must be 1 for GW -----------------------------------------
     if candidate.ncore != 1:
@@ -2068,13 +2125,6 @@ def score_gw_candidate(
     parts["throughput_scaling"] = 5.0 * math.sqrt(
         candidate.total_ranks / max(1, max_cores)
     )
-
-    # ---- AMD bonus: KPAR ~ 4 -------------------------------------------
-    if is_amd_zen4 and irr_k and irr_k >= 4:
-        if candidate.kpar == 4:
-            parts["amd_kpar_4_default"] = 3.0
-        elif candidate.kpar in (2, 8) and irr_k % candidate.kpar == 0:
-            parts["amd_kpar_near_4"] = 1.5
 
     score = float(sum(parts.values()))
     return score, parts
@@ -2560,10 +2610,16 @@ def print_dryrun_summary(summary: DryRunSummary) -> None:
             print("         To get Tier 1, run the dry run on a recent VASP 6 build")
             print("         that prints the full breakdown rows.")
     else:
-        print("  No memory table found in the dry-run OUTCAR.")
+        print("  No memory table found in the dry-run OUTCAR -- and there never is one.")
+        print("  `vasp_std --dry-run` exits BEFORE it allocates, so it cannot print")
+        print("  a memory table. That is also why the dry run is free, which is the")
+        print("  point of it: it is there to measure DIMENSIONS, not memory.")
         print("  -> Falling back to https://vasp.at/wiki/Memory_requirements formulas")
-        print("     (TIER 3 -- least accurate).  Re-run the dry run with ALGO=None")
-        print("     on >= 1 rank with a recent VASP build to get an OUTCAR memory table.")
+        print("     (TIER 3). Against the 23 real memory tables in Test/, these")
+        print("     UNDER-estimate in 19 cases, by up to 10x -- they are good enough")
+        print("     to RANK layouts, not to size a job.")
+        print("  -> vasp-test measures the real per-rank RSS from sacct. That is the")
+        print("     number production is sized from.")
     print()
 
 
@@ -2753,6 +2809,16 @@ def print_best_candidate(
               f"(partition default: {m.partition_mem_per_cpu_mb} MB)")
         print("  node layout             : sized to the utilisation policy; if it "
               "exceeds one node it splits across more nodes (see SLURM script)")
+        if m.model == "fallback-formulas":
+            print()
+            print("  !! THIS IS A GUESS, NOT A MEASUREMENT.")
+            print("     The dry run brought no memory table, so every number above")
+            print("     comes from formulas. Checked against the 23 real VASP memory")
+            print("     tables in Test/, those formulas UNDER-estimate in 19 cases,")
+            print("     by up to 10x. The dominant term (nonl-proj) is the worst.")
+            print("     Do NOT size a production job from this. Run vasp-test: it")
+            print("     measures the real per-rank RSS and that value is the one")
+            print("     that goes into the definitive job script.")
         print()
 
     print("[WHY]  (top score contributions)")

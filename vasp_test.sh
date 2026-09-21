@@ -191,9 +191,26 @@ _wp_module_block() {
 }
 
 # --- Submit side: fit the FIXED config into the debug partition + submit --- #
-if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+#
+# WHICH SIDE ARE WE ON?  The test is "did I launch this job myself", and the
+# only honest answer is a mark this script writes into its own job script
+# (WP_VASPTEST_JOB, set just before the exec below).
+#
+# Asking "is SLURM_JOB_ID set" instead is a different question, and a dangerous
+# one: that variable is set inside ANY job, including one somebody wrapped
+# around this script.  A wrapper job is typically small and short -- one task,
+# twenty minutes -- so this script would conclude it was already inside its own
+# benchmark and run VASP with the WRAPPER's resources: one rank instead of the
+# hundreds it had sized, and a walltime that cuts the run off.  The benchmark it
+# chose would never be submitted, and nothing would say so.
+if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
     if ! command -v sbatch >/dev/null 2>&1; then
         echo "ERROR: sbatch not found. Run on a cluster login node." >&2; exit 1
+    fi
+    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+        echo "STAGE 3: running inside job ${SLURM_JOB_ID}, which is NOT a vasp-test" >&2
+        echo "         benchmark. Submitting the benchmark as its own job rather than" >&2
+        echo "         running VASP with this job's resources." >&2
     fi
     if [[ "${stage:-}" != "recommend" || ! -f slurm.sh ]]; then
         echo "ERROR: no recommendation found. Run the pipeline IN ORDER:" >&2
@@ -344,6 +361,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         # the job to the profile it was submitted with.
         echo '_wp_staged="$SLURM_SUBMIT_DIR/.wolfpack/cluster.conf"'
         echo '[[ -f "$_wp_staged" ]] && export WOLFPACK_CLUSTER_CONF="$_wp_staged"'
+        # The mark that tells the re-exec'd copy it is inside the benchmark THIS
+        # script submitted, and not inside somebody else's wrapper job.
+        echo "export WP_VASPTEST_JOB=1"
         echo "exec '${self}'"
     } > "$job"
     [[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" .wolfpack/cluster.conf
@@ -373,6 +393,24 @@ rule() { printf '%.0s-' {1..78}; echo; }
 hdr()  { echo; rule; echo " $*"; rule; }
 posq() { awk -v v="${1:-0}" 'BEGIN{exit !(v>0)}'; }   # true if $1 is a positive number
 
+# Record an INCOMPLETE analysis in report.out, not only on stdout.
+#
+# When a step of the write-up could not run, the section it would have written
+# simply did not appear -- and a missing section is indistinguishable from a
+# section that had nothing to report. report.out is what gets read days later,
+# often by someone who never saw the job's stdout, so the gap has to be IN it.
+_wp_report_gap() {
+    local title="$1"; shift
+    { echo ""
+      echo "################################################################################"
+      echo "#  INCOMPLETE -- ${title}"
+      echo "################################################################################"
+      echo ""
+      printf '  %s\n' "$@"
+      echo ""
+    } >> "$SUBMIT_DIR/report.out" 2>/dev/null || true
+}
+
 # --------------------------------------------------------------------------- #
 # 1. Validate inputs and build an isolated run directory
 # --------------------------------------------------------------------------- #
@@ -383,8 +421,32 @@ for f in "${need[@]}"; do
 done
 [[ $missing -eq 0 ]] || { echo "Aborting: provide INCAR/POSCAR/POTCAR/KPOINTS." >&2; exit 1; }
 
-RUNDIR="$SUBMIT_DIR/vasp_test_${SLURM_JOB_ID}"
+# The benchmark's scratch lives UNDER .wolfpack/, not beside your inputs. It
+# used to be "$SUBMIT_DIR/vasp_test_$JOBID", which left a directory in the
+# calculation folder for every benchmark that ever failed -- each one still
+# holding a CHGCAR and a WAVECAR.
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    echo "ERROR: WP_VASPTEST_JOB is set but SLURM_JOB_ID is not." >&2
+    echo "       That variable is written by vasp-test into its own job script;" >&2
+    echo "       do not set it by hand." >&2
+    exit 2
+fi
+mkdir -p "$SUBMIT_DIR/.wolfpack"
+RUNDIR="$SUBMIT_DIR/.wolfpack/vasp_test_${SLURM_JOB_ID}"
 mkdir -p "$RUNDIR"
+
+# On any exit other than the clean one below, the run dir SURVIVES -- it is the
+# evidence of what went wrong -- but its heavy files do not. A failed benchmark
+# needs OUTCAR, OSZICAR and stdout to be diagnosable; CHGCAR and WAVECAR only
+# pile up, one set per failure, in a folder the user has to keep. The trap also
+# covers the time-limit kill, which is exactly the case that used to leave them.
+_wp_strip_heavy() {
+    [[ -d "$RUNDIR" ]] || return 0
+    rm -f "$RUNDIR"/WAVECAR "$RUNDIR"/CHGCAR "$RUNDIR"/CHG \
+          "$RUNDIR"/vaspout.h5 "$RUNDIR"/WAVEDER "$RUNDIR"/PROCAR \
+          "$RUNDIR"/TMPCAR "$RUNDIR"/LOCPOT "$RUNDIR"/ELFCAR 2>/dev/null || true
+}
+trap _wp_strip_heavy EXIT TERM INT
 cp -f "$SUBMIT_DIR"/INCAR "$SUBMIT_DIR"/POSCAR "$SUBMIT_DIR"/POTCAR "$SUBMIT_DIR"/KPOINTS "$RUNDIR/"
 cd "$RUNDIR" || { echo "Cannot enter run dir $RUNDIR" >&2; exit 1; }
 
@@ -601,6 +663,13 @@ if posq "$maxrss_mb" && [[ -n "$RAW" ]]; then
 else
     echo "  SLURM MaxRSS    : (unavailable -- job accounting may be off)"
     echo "                    Falling back to VASP's own memory table for sizing."
+    _wp_report_gap "memory was NOT measured; sizing fell back to VASP's own table" \
+        "sacct returned no MaxRSS for job ${SLURM_JOB_ID}, so the real per-rank RSS" \
+        "is unknown. The fallback is VASP's table, which is RANK-0's memory --" \
+        "and rank 0 is the outlier on k-point-parallel layouts (it holds the" \
+        "gathered all-k-point arrays), so this over-reserves." \
+        "" \
+        "Check that job accounting is enabled on this cluster:  sacct -j ${SLURM_JOB_ID}"
 fi
 printf "  VASP memory table / rank : %s MB   (rank-0, from OUTCAR)\n" "$vasp_tbl_mb"
 if posq "$cpu_eff"; then
@@ -651,7 +720,19 @@ if [[ -z "$PY" || -z "$HELPER" ]]; then
     echo "  Size production by hand: at ${PROD_RANKS} ranks request about"
     echo "  (measured x ${NTASKS}/${PROD_RANKS}) / ${MEM_UTIL} MB per rank."
     echo "  Benchmark outputs kept in: $RUNDIR"
-    exit 0
+    _wp_report_gap "no PREDICTED vs MEASURED comparison, and no slurm_vasptest.sh" \
+        "The benchmark RAN and the measurement is good:" \
+        "  peak RAM / rank : ${maxrss_mb} MB at ${NTASKS} ranks" \
+        "  mean RAM / rank : ${averss_mb} MB" \
+        "" \
+        "What is missing is the write-up: python3 and/or vasp_test_recommend.py" \
+        "could not be found, so nothing scaled the measurement to production and" \
+        "no definitive job script was written." \
+        "" \
+        "Size production by hand: at ${PROD_RANKS} ranks request about" \
+        "(measured x ${NTASKS}/${PROD_RANKS}) / ${MEM_UTIL} MB per rank." \
+        "Benchmark outputs kept in: $RUNDIR"
+    exit 4
 fi
 
 # vasp-test OUTPUTS a NEW production job (slurm_vasptest.sh) that REFINES recommend's

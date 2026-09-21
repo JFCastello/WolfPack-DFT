@@ -190,16 +190,31 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo '  echo "#  STAGE 1/3 -- DRY RUN  (vasp-dry-run, job $SLURM_JOB_ID)"'
         echo '  echo "################################################################################"'
         echo '  echo ""'
-        echo '  if [[ -s "$_oc" ]]; then'
-        echo '    echo "  status            : OK (memory table captured)"'
-        echo '    echo "  NKPTS / NBANDS    : ${_nk:-?} / ${_nb:-?}"'
-        echo '    echo "  VASP table / rank : ${_mb} MB  (rank-0; real RSS is larger)"'
-        echo '    echo "  captured to       : .wolfpack/dryrun_OUTCAR"'
-        echo '    echo ""'
-        echo '    echo "  Next: run  vasp-recommend-slurm  (no arguments)."'
-        echo '  else'
+        # Say what was actually captured. This used to print
+        # "OK (memory table captured)" whenever the OUTCAR was non-empty, and
+        # then "VASP table / rank : ? MB" two lines below it -- claiming a
+        # measurement it did not have. `vasp_std --dry-run` exits BEFORE it
+        # allocates anything, so it never prints a memory table at all; the
+        # sizing that follows is formulas, and the report has to say so.
+        echo '  if [[ ! -s "$_oc" ]]; then'
         echo '    echo "  status            : FAILED -- no OUTCAR produced."'
         echo '    echo "  check modules/inputs; log at .wolfpack/dryrun.log"'
+        echo '  else'
+        echo '    echo "  NKPTS / NBANDS    : ${_nk:-?} / ${_nb:-?}"'
+        echo '    echo "  captured to       : .wolfpack/dryrun_OUTCAR"'
+        echo '    if [[ -n "$_mk" ]]; then'
+        echo '      echo "  status            : OK (memory table captured)"'
+        echo '      echo "  VASP table / rank : ${_mb} MB  (rank-0; real RSS is larger)"'
+        echo '    else'
+        echo '      echo "  status            : OK (dimensions captured; NO memory table)"'
+        echo '      echo "  memory            : not measured here. A dry run exits before"'
+        echo '      echo "                      VASP allocates, so there is nothing to read."'
+        echo '      echo "                      vasp-recommend-slurm will size from formulas,"'
+        echo '      echo "                      which is a GUESS -- vasp-test measures the"'
+        echo '      echo "                      real value and that one is authoritative."'
+        echo '    fi'
+        echo '    echo ""'
+        echo '    echo "  Next: run  vasp-recommend-slurm  (no arguments)."'
         echo '  fi'
         echo '} > report.out'
         echo ""

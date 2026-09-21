@@ -115,13 +115,14 @@ pass `--purge-repo`.
 | Command | Source script | What it does |
 |---------|--------------|--------------|
 | `vasp-configure` | `vasp_configure.sh` | Build your cluster profile (email, VASP modules, partitions, cores, memory, max-cores) |
-| `vasp-dry-run` | `vasp_dry_run.sh` | **Pipeline STAGE 1** — 1-rank dry run on debug → memory table + starts `report.out` |
+| `vasp-dry-run` | `vasp_dry_run.sh` | **Pipeline STAGE 1** — 1-rank dry run on debug → dimensions (NKPTS, NBANDS, FFT grids, plane waves) + starts `report.out`. It is free because `--dry-run` exits before VASP allocates — which also means it brings **no memory table**; memory is measured in STAGE 3 |
 | `vasp-recommend-slurm` | `vasp_recommend_slurm.py` | **Pipeline STAGE 2** — read that OUTCAR → KPAR/NCORE + `slurm.sh` (80%-mem, multi-node split) |
 | `vasp-test` | `vasp_test.sh` | **Pipeline STAGE 3** — benchmark of the *fixed* config (job `slurm_benchmark.sh`) → scale measured RAM to production → write the **definitive** `slurm_vasptest.sh` + (GW) `MAXMEM` into the INCAR; prints a **predicted-vs-measured** comparison + validation verdict of the chosen parallelization & node config |
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
 | `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
 | `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
+| `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — reads `sacct` for the job ids the pipeline recorded and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
 | `vasp-nuke` | `vasp_nuke.sh` | Fast no-questions-asked delete of all VASP output files |
 | `run-nscf-steps` | `run_nscf_steps.sh` | Hubbard U workflow Step 1: submit NSCF perturbation jobs |
@@ -185,7 +186,17 @@ slurm.sh                         # STAGE 2 recommend first-pass production job
 slurm_benchmark.sh               # STAGE 3 debug benchmark job
 slurm_vasptest.sh                # STAGE 3 DEFINITIVE production job (measured memory) <- sbatch this
 report.out                       # one tidy report from all 3 stages
+.wolfpack/                       # everything else: the captured OUTCARs, the job
+                                 # logs, the pipeline state, and the benchmark's
+                                 # scratch directory
 ```
+
+Nothing the pipeline creates lands beside your inputs except the job scripts you
+might submit and the report you read. The benchmark's scratch used to be a
+`vasp_test_<jobid>/` in this folder, one per failure, each still holding a
+`CHGCAR` and a `WAVECAR`; it now lives under `.wolfpack/`, and a failed one keeps
+only what makes it diagnosable (`OUTCAR`, `OSZICAR`, `stdout`) — the heavy files
+are dropped on every exit path, the walltime kill included.
 
 Intermediates (the dry-run OUTCAR, pipeline state, SLURM logs) live in a hidden
 `.wolfpack/` folder so your directory stays clean.
@@ -616,26 +627,6 @@ build-magnetic-configs --magnetic-species V   # only V is magnetic, ignore Cu
 build-magnetic-configs POSCAR_relaxed         # start from another file
 build-magnetic-configs --help
 ```
-
-**Launching the whole sweep.** Nine orderings means nine times dry-run →
-recommend → test, so the command also writes
-`magnetic_configs/run_pipelines.sh`, which submits all of them at once:
-
-```bash
-magnetic_configs/run_pipelines.sh --dry-run   # what it would submit
-magnetic_configs/run_pipelines.sh             # submit everything
-magnetic_configs/run_pipelines.sh --force     # redo folders already submitted
-```
-
-The stages are not independent — recommend reads what the dry run measured, and
-test reads what recommend chose — so per folder it submits the stage-1 job and
-then a small driver job holding `afterok:<stage-1>` that runs stages 2 and 3.
-SLURM does the waiting, so **you can log out**. It skips folders that have no
-POTCAR (species order did not match) or that it has already submitted, prints a
-table of job IDs, and says *why* when a stage refuses rather than just that it
-did. The driver carries the toolkit's own interpreter by absolute path and a
-copy of your cluster profile, because a compute node has neither conda activated
-nor, on many clusters, your `$HOME` mounted.
 
 ---
 
