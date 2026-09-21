@@ -487,12 +487,27 @@ def _symmetry_of(struct):
     # much bigger promise than this tool should make.
     try:
         import spglib
-        # Vectors, for the reason spelled out in _magcif_text: the collinear
-        # (scalar) convention answers a different question from the one the CIF
-        # asks, and reporting one while writing the other would be worse than
-        # reporting nothing.
+        # SCALARS here, deliberately -- the opposite of what _magcif_text needs.
+        # The two conventions answer different physical questions and give
+        # different groups for the same ordering:
+        #
+        #   scalar  : the moment is a label, up or down, and an operation that
+        #             swaps them is a symmetry only with time reversal. This is
+        #             a collinear magnet with NO spin-orbit coupling -- which is
+        #             exactly what ISPIN=2 without LSORBIT is, and what VASP
+        #             itself uses to decide ISYM. It gives the textbook answers:
+        #             paramagnet -> grey, ferromagnet -> type I, collinear
+        #             antiferromagnet -> black-white.
+        #   vector  : the moments are pinned to a crystal direction, which needs
+        #             spin-orbit coupling to mean anything. It inverts those
+        #             answers, calling the ferromagnet black-white and the
+        #             antiferromagnet colourless.
+        #
+        # The .cif has to use the vector form because that is what the magCIF
+        # format stores. The REPORT has to use this one, because it is the
+        # calculation the user is about to run.
         cell = (bare.lattice.matrix, bare.frac_coords,
-                [s.specie.Z for s in bare], [[0.0, 0.0, float(m)] for m in spins])
+                [s.specie.Z for s in bare], [float(m) for m in spins])
         ds = spglib.get_magnetic_symmetry_dataset(cell, symprec=SYMPREC_USE)
         bns = ""
         try:
@@ -770,29 +785,37 @@ def _write_symmetry_txt(path, stem, sym, n_sites):
             if len(vals) > 1:
                 L.append(f"    {el} {wyck}: sites {idx_1(idx)} carry "
                          + " and ".join(f"{v:+g}" for v in vals))
-        L.append("  That is not the end of it. The magnetic space group below counts the")
-        L.append("  operations that survive once the moments are treated as the AXIAL VECTORS")
-        L.append("  they are -- spatial operations rotate them, and time reversal can flip")
-        L.append("  them back -- which is the convention the .cif uses.")
+        n_tr = (sym.get("magnetic") or {}).get("n_tr", 0)
+        L.append("  That is not the end of it: an operation that maps an up spin onto a down")
+        L.append("  one can still be a symmetry when combined with TIME REVERSAL, and that is")
+        if n_tr:
+            L.append(f"  what the magnetic space group below counts -- {n_tr} of its operations do,")
+            L.append("  which is what makes it black-white.")
+        else:
+            L.append("  what the magnetic space group below counts. Here none of them do: the")
+            L.append("  ordering simply leaves a smaller group, with no operation recovered.")
     mg = sym.get("magnetic")
     if mg:
         L += ["", f"  magnetic space group : BNS {mg['bns'] or '?'}  "
                   f"(UNI {mg['uni']}), {mg['n_ops']} operations,"
                   f" {mg.get('n_tr', 0)} needing time reversal",
               f"                         {MSG_TYPE.get(mg['type'], '?')}",
-              "                         (moments taken as axial vectors along z, which is"
-              " what a",
-              "                          collinear MAGMOM means and what the .cif stores)"]
+              "                         Collinear convention, no spin-orbit coupling: the moment",
+              "                         is up or down, not a direction in the crystal. That is",
+              "                         what ISPIN=2 without LSORBIT is, and what VASP uses for",
+              "                         ISYM. (The .cif stores moments as vectors because the",
+              "                         magCIF format requires it; same state, other bookkeeping.)"]
 
     L += ["", "FILES IN THIS FOLDER"]
     if sym.get("cif_reduced"):
-        grp = (f"BNS {mg['bns']}" if mg and mg.get("bns") else
-               (f"UNI {mg['uni']}" if mg else f"{sym['symbol']} ({sym['number']})"))
-        L.append(f"  {stem}.cif     reduced: it carries the MAGNETIC group {grp} and")
-        L.append(f"                          lists only the asymmetric unit. A reader expands it")
-        L.append(f"                          back to {n_sites} atoms, flipping the spins on the")
-        L.append(f"                          operations marked -1. Verified by reading it back and")
-        L.append(f"                          comparing to this POSCAR before it was written.")
+        L.append(f"  {stem}.cif     reduced: it carries magnetic symmetry operations and lists")
+        L.append(f"                          only the asymmetric unit. A reader expands it back to")
+        L.append(f"                          {n_sites} atoms, flipping the spins on the operations")
+        L.append( "                          marked -1. The group named in its header is the VECTOR")
+        L.append( "                          one the magCIF format needs, not the collinear one")
+        L.append( "                          above -- the same state, counted the other way.")
+        L.append( "                          Verified by reading the file back and comparing it to")
+        L.append( "                          this POSCAR before it was written.")
     else:
         L.append(f"  {stem}.cif     P 1, all {n_sites} sites listed explicitly -- see above for why.")
     L.append(f"  {stem}.vesta   all {n_sites} atoms explicit, ALWAYS. VESTA's own format states")
