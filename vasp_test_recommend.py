@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import sys
 from pathlib import Path
 
 
@@ -316,7 +317,12 @@ def main():
     p.add_argument("--wall", type=int, default=0)
     p.add_argument("--update-slurm", type=Path, default=None)
     p.add_argument("--incar", type=Path, default=None,
-                   help="GW only: write MAXMEM (= request - max(200,18%)) into this INCAR "
+                   help="GW only: write MAXMEM (= request - max(200,18%%)) into this INCAR "
+                        # %% is escaped: argparse runs every help string through
+                        # %%-formatting, and a lone %% raises "badly formed help
+                        # string" at PARSE time -- which killed the whole scaling
+                        # step, so vasp-test measured the run and then wrote no
+                        # predicted-vs-measured section at all.
                         "(vasp-test owns the GW memory directive).")
     p.add_argument("--report", type=Path, default=None)
     args = p.parse_args()
@@ -372,6 +378,42 @@ def main():
             f"overhead, so it was REJECTED as an accounting artifact and the estimate "
             f"was kept. Check `sacct -j <benchmark> -o MaxRSS,AveRSS`.")
         flat_use = float(args.pred_peak_mb)
+
+    # THE OTHER HALF OF THE BACKSTOP: a measurement of zero, or absurdly below
+    # the model.
+    #
+    # sacct returns an empty MaxRSS more often than it should -- accounting off,
+    # a run finishing between samples, a cgroup the gatherer could not read --
+    # and an empty field parses as 0. Zero then sailed through as if it were a
+    # measurement: the report announced "recommend OVER-estimated the mean rank
+    # ~x195", the sizing "trimmed" production to the 200 MB floor, and the
+    # DEFINITIVE job script was written with a memory request nobody had
+    # measured. That script OOMs on the first real run, and everything above it
+    # reads like a successful benchmark.
+    #
+    # A real over-estimate is a factor of a few. Anything below a tenth of the
+    # model -- zero included -- is an accounting artifact, and production keeps
+    # the estimate.
+    measurement_rejected = False
+    if flat_use <= 0 or (args.pred_peak_mb
+                         and flat_use < args.pred_peak_mb / SANITY_MAX_MODEL_RATIO):
+        _why = ("sacct returned no memory for this job"
+                if flat_use <= 0 else
+                f"measured {flat_use:.0f} MB/rank is a {args.pred_peak_mb / max(flat_use, 1e-9):.0f}x "
+                f"drop from the a-priori estimate ({args.pred_peak_mb:.0f} MB)")
+        sanity_note = (
+            f"{_why} -- production memory was NOT sized from it. The estimate is "
+            f"kept, and it is only an estimate: re-run vasp-test once job "
+            f"accounting reports MaxRSS (`sacct -j <benchmark> -o MaxRSS,AveRSS`), "
+            f"or size the request by hand.")
+        flat_use = float(args.pred_peak_mb or 0.0)
+        measurement_rejected = True
+        if flat_use <= 0:
+            print("ERROR: no measured memory and no prediction to fall back on --",
+                  file=sys.stderr)
+            print("       refusing to write a production memory request.", file=sys.stderr)
+            return 5
+
     # GW: the short benchmark only reaches the FLAT (DFT-setup) phase -- it NEVER gets
     # to the GW response setup, so its MaxRSS is NOT the GW peak and we must NOT
     # extrapolate from it. The per-rank memory needed to RUN is a FLOOR that is
@@ -567,12 +609,28 @@ def main():
     # Show, sector by sector, where vasp-recommend's ESTIMATE was accurate and where
     # it was off, then a final validation of the chosen parallelization + node config.
     def _cmp(pred, meas):
-        if not pred or pred <= 0:
-            return "n/a"
+        """Compare a prediction with a measurement, or say why we cannot.
+
+        Both sides have to be present and positive. A MEASUREMENT of zero is
+        not a measurement of nothing -- it is sacct having returned no MaxRSS
+        at all (job accounting off, a run too short for the sampler, a cgroup
+        the sampler could not read). Dividing by it raised ZeroDivisionError
+        and took the whole predicted-vs-measured section down with it, so the
+        report simply had no comparison in it and nothing said why.
+        """
+        try:
+            pred = float(pred or 0.0)
+            meas = float(meas or 0.0)
+        except (TypeError, ValueError):
+            return "n/a (unreadable)"
+        if pred <= 0:
+            return "n/a (nothing predicted)"
+        if meas <= 0:
+            return "NOT MEASURED (sacct returned no value)"
         r = meas / pred
         if 0.83 <= r <= 1.20:
             return f"ACCURATE (x{r:.2f})"
-        return f"UNDER-predicted x{r:.2f}" if r > 1 else f"OVER-predicted /{1/r:.2f}"
+        return f"UNDER-predicted x{r:.2f}" if r > 1 else f"OVER-predicted /{1 / r:.2f}"
 
     if args.cpu_eff == 0:
         par_verdict = "VALIDATED (ran; no efficiency metric)"
@@ -598,8 +656,16 @@ def main():
     # measured flat value to compare with -- the row could only ever mislead.
     if args.pred_peak_mb:
         _peak_label = "per-rank FLOOR" if args.gw else "peak per rank "
-        L.append(f"  {_peak_label}        {args.pred_peak_mb:>9.0f} MB   {prod_use:>9.0f} MB   "
-                 f"{_cmp(args.pred_peak_mb, prod_use)}")
+        if measurement_rejected:
+            # prod_use IS the estimate here, because the measurement was thrown
+            # out. Printing _cmp(estimate, estimate) would score it "ACCURATE
+            # (x1.00)" -- the estimate validating itself, which is the most
+            # misleading thing this table could say.
+            L.append(f"  {_peak_label}        {args.pred_peak_mb:>9.0f} MB   "
+                     f"{'--':>9}      NOT MEASURED (estimate kept; see above)")
+        else:
+            L.append(f"  {_peak_label}        {args.pred_peak_mb:>9.0f} MB   {prod_use:>9.0f} MB   "
+                     f"{_cmp(args.pred_peak_mb, prod_use)}")
     if args.pred_mem_per_cpu:
         L.append(f"  mem-per-cpu (request) {args.pred_mem_per_cpu:>9.0f} MB   {mem_per_cpu:>9.0f} MB   "
                  f"{_cmp(args.pred_mem_per_cpu, mem_per_cpu)}")
@@ -613,7 +679,14 @@ def main():
              f"NPAR={args.prod_npar}  ->  {par_verdict}")
     L.append(f"  node config      : recommend {pred_layout} @ {args.pred_mem_per_cpu:.0f} MB/cpu "
              f"->  vasp-test {meas_layout} @ {mem_per_cpu} MB/cpu  ({layout_verdict})")
-    if args.pred_peak_mb and prod_use / max(args.pred_peak_mb, 1) > 1.2:
+    if measurement_rejected:
+        L.append("  memory accuracy  : NOT ASSESSED -- there was no usable measurement, so "
+                 "nothing here")
+        L.append("                     validates the estimate. slurm_vasptest.sh carries the "
+                 "ESTIMATE,")
+        L.append("                     not a measured value. Treat its memory request as "
+                 "provisional.")
+    elif args.pred_peak_mb and prod_use / max(args.pred_peak_mb, 1) > 1.2:
         L.append(f"  memory accuracy  : recommend UNDER-estimated the mean rank ~x"
                  f"{prod_use/args.pred_peak_mb:.1f} (its formula misses real-RSS overhead: "
                  f"MPI/scaLAPACK/FFT/allocator). vasp-test's MEASURED value is authoritative")

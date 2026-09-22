@@ -108,13 +108,37 @@ WP_GW_NODE_FRAC=""         # GW SWEET: grow the GW request to this node fraction
 CLI_KEYS=()
 _cli(){ printf -v "$1" '%s' "$2"; CLI_KEYS+=("$1"); }
 
+# A value that may legitimately be EMPTY.
+#
+# "${2:?}" rejects an empty string as well as a missing one, so there was no way
+# to say "this machine has no modules" -- `--vasp-modules ""` died with
+# "parameter null or not set". That is not a corner case: it is every machine
+# whose VASP is an absolute path rather than a module, including a laptop. And
+# the empty value matters, because an absent module list used to make the job
+# scripts fall back to the modules of the machine this toolkit was written on.
+#
+# Accept empty, but still refuse to swallow the NEXT FLAG as a value: with
+# "${2?}" alone, `--vasp-modules --vasp-std /x` would set the module list to
+# "--vasp-std".
+_cli_may_be_empty(){                      # $1=var $2=flag $3=raw next arg
+    local var="$1" flag="$2" val="${3-__WP_UNSET__}"
+    if [[ "$val" == "__WP_UNSET__" ]]; then
+        echo "ERROR: $flag needs a value (use '' for none)." >&2; exit 2
+    fi
+    if [[ "$val" == --* ]]; then
+        echo "ERROR: $flag got '$val', which looks like another flag." >&2
+        echo "       For 'none', write: $flag ''" >&2; exit 2
+    fi
+    _cli "$var" "$val"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --email)            _cli WP_EMAIL "${2:?}"; shift 2 ;;
         --module-cmd)       _cli WP_MODULE_CMD "${2:?}"; shift 2 ;;
-        --vasp-modules)     _cli WP_VASP_MODULES "${2:?}"; shift 2 ;;
+        --vasp-modules)     _cli_may_be_empty WP_VASP_MODULES "--vasp-modules" "${2-__WP_UNSET__}"; shift 2 ;;
         --vasp-std)         _cli WP_VASP_STD "${2:?}"; shift 2 ;;
-        --vasp-ld-path)     _cli WP_VASP_LD_LIBRARY_PATH "${2:?}"; shift 2 ;;
+        --vasp-ld-path)     _cli_may_be_empty WP_VASP_LD_LIBRARY_PATH "--vasp-ld-path" "${2-__WP_UNSET__}"; shift 2 ;;
         --main-partition)   _cli WP_MAIN_PARTITION "${2:?}"; shift 2 ;;
         --debug-partition)  _cli WP_DEBUG_PARTITION "${2:?}"; shift 2 ;;
         --main-cpus)        _cli WP_MAIN_CPUS_PER_NODE "${2:?}"; shift 2 ;;

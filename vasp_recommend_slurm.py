@@ -208,10 +208,9 @@ CLUSTER_PARTITIONS: Dict[str, Dict[str, object]] = {
         "mem_per_cpu_mb": 2839,
         "numa_cores": 16,
         "arch": "amd-zen4",
-        "modules": [
-            "ml gcc/14.2.0-zen4-y",
-            "ml vasp/6.4.3-mpi-openmp-h5-zen4-c",
-        ],
+        # Empty on purpose: a module list belongs to a site, and guessing one
+        # loads a VASP the user did not choose. vasp-configure fills it in.
+        "modules": [],
         "extra_env": [
             "export OMPI_MCA_mtl=ofi",
             "export OMP_NUM_THREADS=1",
@@ -223,10 +222,9 @@ CLUSTER_PARTITIONS: Dict[str, Dict[str, object]] = {
         "mem_per_cpu_mb": 7600,
         "numa_cores": 24,
         "arch": "amd-zen4",
-        "modules": [
-            "ml gcc/14.2.0-zen4-y",
-            "ml vasp/6.4.3-mpi-openmp-h5-zen4-c",
-        ],
+        # Empty on purpose: a module list belongs to a site, and guessing one
+        # loads a VASP the user did not choose. vasp-configure fills it in.
+        "modules": [],
         "extra_env": [
             "export OMPI_MCA_mtl=ofi",
             "export OMP_NUM_THREADS=1",
@@ -1640,6 +1638,27 @@ def score_candidate(
     elif mem.suggested_mem_per_cpu_mb < 0.7 * mem.partition_mem_per_cpu_mb:
         parts["memory_comfortably_below_partition_default"] = 3.0
 
+    # ---- 7b. The layout must be SUBMITTABLE ------------------------------
+    # SLURM allocates whole nodes and charges nodes x cpus_per_node, so a
+    # memory-hungry layout that needs few ranks per node can need more CORES
+    # than the account allows even while its RANK count looks fine. That is how
+    # a 48-rank GW job came out needing 6 nodes = 288 cores against a 48-core
+    # cap: submittable nowhere, and nothing said so.
+    #
+    # Mirror the node split that compute_request_geometry will do, and price
+    # the result. A candidate that cannot be submitted is worse than any
+    # candidate that can, whatever its parallel efficiency.
+    if max_cores and cpus_per_node > 0:
+        _usage = max(float(mem.per_rank_mb), 1.0) * DEFAULT_RSS_OVERHEAD
+        _node_mb = float(partition_info.get("mem_per_node_mb") or 0) or \
+            float(mem.partition_mem_per_cpu_mb or 0) * cpus_per_node
+        _by_use = max(1, int(_node_mb // max(_usage, 1.0)))
+        _rpn = max(1, min(cpus_per_node, _by_use))
+        _nodes = math.ceil(candidate.total_ranks / _rpn)
+        _alloc = _nodes * cpus_per_node
+        if _alloc > max_cores:
+            parts["layout_EXCEEDS_account_core_cap_(HARD_RULE)"] = -500.0
+
     # ---- 8. Compactness / SLURM accounting -------------------------------
     if candidate.total_ranks % cpus_per_node == 0:
         parts["full_nodes_only"] = 3.0
@@ -2126,6 +2145,19 @@ def score_gw_candidate(
         candidate.total_ranks / max(1, max_cores)
     )
 
+    # ---- the layout must be SUBMITTABLE (same rule as the DFT path) -------
+    # GW is where this bites hardest: the per-rank floor is large, so few ranks
+    # fit a node, so the job spreads over many -- and SLURM charges whole nodes.
+    # A 48-rank job on 6 nodes is 288 cores against a 48-core cap: it cannot be
+    # submitted anywhere, however good its k-point parallelism looks.
+    if max_cores and cpus_per_node > 0:
+        _usage = max(float(candidate.memory.per_rank_mb), 1.0)
+        _node_mb = float(partition_info.get("mem_per_node_mb") or 0) or \
+            float(candidate.memory.partition_mem_per_cpu_mb or 0) * cpus_per_node
+        _rpn = max(1, min(cpus_per_node, int(_node_mb // max(_usage, 1.0))))
+        if math.ceil(candidate.total_ranks / _rpn) * cpus_per_node > max_cores:
+            parts["layout_EXCEEDS_account_core_cap_(HARD_RULE)"] = -500.0
+
     score = float(sum(parts.values()))
     return score, parts
 
@@ -2374,7 +2406,8 @@ def compute_request_geometry(candidate: "Candidate",
                              mem_util: float = 0.80,
                              reserve_mb: int = 0,
                              rss_overhead: float = DEFAULT_RSS_OVERHEAD,
-                             gw_node_frac: float = 0.0):
+                             gw_node_frac: float = 0.0,
+                             max_cores: Optional[int] = None):
     """Size the memory request and node layout for the cluster policy.
 
     Returns (mem_per_cpu, nodes, ntasks_per_node, node_mem_mb).
@@ -2428,12 +2461,48 @@ def compute_request_geometry(candidate: "Candidate",
     rpk = total // kpar if (kpar and total % kpar == 0) else 0
     if total <= cap:                                        # whole job fits ONE node
         nodes, ntpn = 1, total
-    elif kpar > 1 and rpk and rpk <= cap:                  # split across KPAR nodes
-        nodes, ntpn = kpar, rpk
+    elif rpk and rpk <= cap:
+        # Keep whole k-groups on a node -- but PACK AS MANY AS FIT, rather than
+        # giving each its own node.
+        #
+        # This used to read `nodes, ntpn = kpar, rpk`, i.e. exactly one k-group
+        # per node. That is right when a k-group is large (conventional GW,
+        # where splitting one means cross-node chi/W traffic) and catastrophic
+        # when it is small: at KPAR = NKPTS a group is a SINGLE RANK, so the
+        # rule asked for one node per rank. On a 190-k-point DFT run that came
+        # out as `--nodes=190 --ntasks-per-node=1` -- 9120 cores allocated to
+        # run 190, 38x the account's cap, and the job sat in the queue on
+        # AssocMaxNodePerJobLimit. A group cannot straddle a boundary it never
+        # reaches, so the constraint is only that a node hold a WHOLE number of
+        # groups.
+        groups_per_node = max(1, cap // rpk)
+        nodes = math.ceil(kpar / groups_per_node)
+        ntpn = min(cap, math.ceil(total / nodes))
     else:                                                   # memory-only fallback
         ntpn = min(cpn, total, cap)
         nodes = math.ceil(total / ntpn)
         ntpn = min(cpn, math.ceil(total / nodes))           # even fill across nodes
+
+    # ---- ACCOUNT CAP, measured in ALLOCATED cores -------------------------
+    # The cap the user configured is on cores, and SLURM hands out WHOLE nodes:
+    # a job on N nodes is charged N * cpus_per_node whatever --ntasks says. The
+    # tool used to check the cap against the RANK count only, so a layout that
+    # spread 190 ranks over 190 nodes looked like "190 of 240" while actually
+    # asking for 9120 cores. Check the real thing, and pack densely if the
+    # group-aligned layout cannot pay for itself.
+    # The cap travels in partition_info so every caller gets it without having
+    # to remember to pass it; the explicit argument overrides.
+    if max_cores is None:
+        try:
+            max_cores = int(partition_info.get("max_cores") or 0) or None
+        except (TypeError, ValueError):
+            max_cores = None
+    if max_cores and nodes * cpn > max_cores:
+        dense_ntpn = max(1, min(cpn, cap))
+        dense_nodes = math.ceil(total / dense_ntpn)
+        if dense_nodes * cpn <= max_cores or dense_nodes < nodes:
+            nodes = dense_nodes
+            ntpn = min(cpn, math.ceil(total / nodes))
 
     # Size the request: the mem_util sizing, but trimmed so ntpn ranks fit the node
     # (keeps the whole-group layout rather than adding a node). Stays in
@@ -2479,7 +2548,24 @@ def slurm_script(
         f"#SBATCH --time={time_limit}",
         f"#SBATCH --nodes={nodes}",
         f"#SBATCH --ntasks={candidate.total_ranks}",
-        f"#SBATCH --ntasks-per-node={ntpn}",
+    ]
+    # --ntasks-per-node only when it is ARITHMETICALLY TRUE.
+    #
+    # SLURM reads --nodes, --ntasks and --ntasks-per-node as three claims about
+    # the same allocation, and if they disagree it keeps two and drops one with
+    # a warning: "can't honor --ntasks-per-node set to 48 which doesn't match
+    # the requested tasks 190 with the number of requested nodes 4". 190 ranks
+    # do not divide over 4 nodes of 48, so the flag was a lie the scheduler had
+    # to correct. Say it only when nodes x ntasks-per-node is exactly the rank
+    # count; otherwise let SLURM distribute and record why in a comment.
+    if nodes * ntpn == candidate.total_ranks:
+        lines.append(f"#SBATCH --ntasks-per-node={ntpn}")
+    else:
+        lines.append(
+            f"# no --ntasks-per-node: {candidate.total_ranks} ranks do not divide"
+            f" evenly over {nodes} node(s) ({nodes} x {ntpn} = {nodes * ntpn}),"
+            f" so SLURM distributes them")
+    lines += [
         "#SBATCH --cpus-per-task=1",                    # pure MPI
         f"#SBATCH --mem-per-cpu={mem_per_cpu}",
         "#SBATCH --output=%x-%j.out",
@@ -3151,8 +3237,10 @@ def apply_cluster_profile(prof: Dict[str, str]) -> None:
         numa = prof.get("WP_MAIN_NUMA_CORES", "")
         if numa.isdigit():
             info["numa_cores"] = int(numa)
-        if mods:
-            info["modules"] = list(mods)
+        # Assign unconditionally: an EMPTY module list in the profile is a
+        # statement ("this site has no modules"), not an absence, and `if mods:`
+        # let a built-in default survive it.
+        info["modules"] = list(mods)
         if env:
             info["extra_env"] = list(env)
         name = prof.get(name_k, "").strip()
@@ -3359,8 +3447,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         summary.nomega = args.nomega
 
     partition_info = CLUSTER_PARTITIONS[args.partition]
+    # The account's core cap travels with the partition so the geometry sizing
+    # can check ALLOCATED cores (nodes x cpus_per_node), which is what SLURM
+    # actually charges, rather than the rank count.
+    partition_info["max_cores"] = args.max_cores
     cpus_per_node = args.cores_per_node \
         or int(partition_info["cpus_per_node"])  # type: ignore[arg-type]
+    # Write the EFFECTIVE value back, so everything downstream sees the same
+    # node size. compute_request_geometry reads cpus_per_node from
+    # partition_info, so a --cores-per-node override used to reach the SCORING
+    # but not the GEOMETRY: the score table was computed for 48-core nodes while
+    # the node split was computed for the built-in table's 256, which put 240
+    # ranks on "one node" and then failed the core-cap check for a reason that
+    # had nothing to do with the job.
+    partition_info["cpus_per_node"] = cpus_per_node
     numa_cores = args.numa_cores
     if numa_cores is None and partition_info.get("numa_cores"):
         numa_cores = int(partition_info["numa_cores"])  # type: ignore[arg-type]
@@ -3431,6 +3531,52 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gam_default=(profile.get("WP_VASP_GAM", "") or "").strip() or None,
         ncl_default=(profile.get("WP_VASP_NCL", "") or "").strip() or None)
     best_each = best_per_total_ranks(candidates)
+
+    # ---- REFUSE rather than recommend something that cannot be submitted ----
+    # The scoring rule down-ranks a layout whose node split blows the account's
+    # core cap, but down-ranking only helps when a feasible layout exists. When
+    # none does -- a per-rank memory floor that forces more nodes than the cap
+    # allows, whatever the rank count -- picking the least-bad and writing a
+    # slurm.sh for it hands the user a script every scheduler will reject. Say
+    # so instead, and say what to change.
+    # Ask compute_request_geometry itself rather than re-deriving it: the
+    # scoring rule above uses an approximation of the node split (no reserve,
+    # no request trimming), so it can disagree with the geometry that will
+    # actually be written. The one that gets written is the one that matters.
+    _cap_ok = True
+    if candidates and args.max_cores and cpus_per_node > 0:
+        _r = _node_reserve_mb(partition_info, _main_margin)
+        _, _n_chk, _, _ = compute_request_geometry(
+            candidates[0], partition_info, args.mem_util, reserve_mb=_r,
+            rss_overhead=args.rss_overhead,
+            gw_node_frac=(args.gw_node_frac if is_gw else 0.0))
+        _cap_ok = _n_chk * cpus_per_node <= args.max_cores
+    if not _cap_ok:
+        _cpn = cpus_per_node
+        _need = _n_chk
+        print("\n" + "=" * 78, file=sys.stderr)
+        print(" CANNOT RECOMMEND -- no layout fits this account's core cap",
+              file=sys.stderr)
+        print("=" * 78, file=sys.stderr)
+        print(f"  The best layout needs {_need} node(s); SLURM hands out whole nodes",
+              file=sys.stderr)
+        print(f"  whole nodes and charges {_cpn} cores for each, so the cap of",
+              file=sys.stderr)
+        print(f"  {args.max_cores} cores is {max(1, args.max_cores // _cpn)} node(s) --"
+              f" and the memory per rank here needs more.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  What changes it, in order of least damage:", file=sys.stderr)
+        print("    * raise the cap        vasp-configure  (WP_MAX_CORES)", file=sys.stderr)
+        print("    * a higher-memory partition, if your cluster has one", file=sys.stderr)
+        if is_gw:
+            print("    * lower ENCUTGW / NOMEGA / NBANDS -- the GW floor is ~ENCUTGW^3",
+                  file=sys.stderr)
+        else:
+            print("    * a smaller cell, a coarser k-mesh, or lower ENCUT", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  Nothing was written: a slurm.sh for this would be refused at submit.",
+              file=sys.stderr)
+        return 3
 
     # GW SWEET: size the geometry NOW (before printing) so the displayed MAXMEM matches
     # the final request -- the request grows to the queue-friendly node share and the

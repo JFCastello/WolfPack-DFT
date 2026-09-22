@@ -183,10 +183,17 @@ _wp_module_block() {
         fi
         if [[ "$cmd" == "module" ]]; then echo "module load ${WP_VASP_MODULES}"
         else echo "ml ${WP_VASP_MODULES}"; fi
-    else                                   # built-in example default
-        echo "ml purge"
-        echo "ml gcc/14.2.0-zen4-y"
-        echo "ml vasp/6.4.3-mpi-openmp-h5-zen4-c"
+    else
+        # No modules configured. Emit none.
+        #
+        # This used to fall back to the modules of the machine this toolkit
+        # was first written on (gcc/14.2.0-zen4-y, vasp/6.4.3-...). On a
+        # cluster where WP_VASP_MODULES is empty ON PURPOSE -- because
+        # WP_VASP_STD is an absolute path, or because the site has no module
+        # system at all -- that loaded a STRANGER'S VASP over the one that
+        # was benchmarked, silently, and the run measured one binary while
+        # production used another.
+        echo "# (no modules configured in your cluster profile)"
     fi
 }
 
@@ -486,10 +493,8 @@ if [[ -z "${WP_MODULES_PRELOADED:-}" ]]; then
         # shellcheck disable=SC2086
         if [[ "$_wpcmd" == "module" ]]; then module load $WP_VASP_MODULES
         else ml $WP_VASP_MODULES; fi
-    else                                   # built-in example default
-        ml purge                              2>/dev/null || true
-        ml gcc/14.2.0-zen4-y                  2>/dev/null || true
-        ml vasp/6.4.3-mpi-openmp-h5-zen4-c    2>/dev/null || true
+    else
+        : # no modules configured -- load none (see the note in _wp_module_block)
     fi
 fi
 export OMP_NUM_THREADS=1

@@ -930,7 +930,19 @@ awk -v t="$t_e" 'BEGIN{exit !(t>0)}' || die "no measured per-step time in .wolfp
 
 RANKS=$(sb_num ntasks);        RANKS=$(int "${RANKS:-0}")
 NODES=$(sb_num nodes);         NODES=$(int "${NODES:-1}")
-NTPN=$(sb_num ntasks-per-node);NTPN=$(int "${NTPN:-$RANKS}")
+# --ntasks-per-node is ABSENT from the source script whenever the rank count
+# does not divide evenly over the nodes (vasp-recommend-slurm leaves it out
+# rather than write a claim SLURM has to correct). Defaulting to $RANKS there
+# would put every rank on one node -- 190 tasks on a 48-core node -- so derive
+# the even fill instead, and remember that it was derived.
+NTPN=$(sb_num ntasks-per-node)
+if [[ -z "${NTPN:-}" ]]; then
+    NTPN=$(( (RANKS + NODES - 1) / NODES ))
+    NTPN_EXACT=0
+else
+    NTPN=$(int "$NTPN"); NTPN_EXACT=1
+fi
+NTPN=$(int "${NTPN:-1}"); (( NTPN < 1 )) && NTPN=1
 MEMCPU=$(sb_num mem-per-cpu);  MEMCPU=$(int "${MEMCPU:-0}")
 PART=$(sb_str partition);      PART="${PART:-${WP_MAIN_PARTITION}}"
 EXE=$(grep -m1 -E '^/usr/bin/time -v srun ' "$SRC_SLURM" 2>/dev/null | awk '{print $NF}')
@@ -980,6 +992,8 @@ else
     # electronic steps per ionic step however good the restart is.
     SPI=$(fnum "${test_scf_per_ionic:-0}")
     _nelmin=$(int "$(incar_get NELMIN)"); (( _nelmin < 2 )) && _nelmin=2
+    SPI_SRC="measured by vasp-test"
+    awk -v s="$SPI" 'BEGIN{exit !(s>0)}' || SPI_SRC="ASSUMED -- vasp-test never finished an ionic step"
     SPI=$(awk -v s="$SPI" -v nm="$_nelmin" 'BEGIN{
               if(s<=0) s=12;                  # no measurement: a common mid-range
               if(s<nm) s=nm; if(s>25) s=25;   # clamp: the estimate is weak either way
@@ -1002,7 +1016,18 @@ kv "geometry"           "${NODES} node(s) x ${NTPN} ranks, ${MEMCPU} MB/cpu on '
 kv "measured rate"      "${t_e} s/step (benchmark) -> ${CAL} s/step (scaled estimate)"
 kv "chunk walltime"     "${WALL} min  (margin ${MARGIN} min, start-up ${STARTUP}s)"
 if [[ $MODE == relax ]]; then
-    kv "estimated ionic step" "~${T_ION} s  (${SPI} electronic steps each)"
+    kv "estimated ionic step" "~${T_ION} s  (${SPI} electronic steps each, ${SPI_SRC})"
+    if [[ $SPI_SRC == ASSUMED* ]]; then
+        # Do not let a default masquerade as a measurement. The line above sits
+        # next to "measured rate", and the per-step time IS measured -- but the
+        # steps-per-ionic-step factor that turns it into an ionic-step cost is
+        # not, whenever the benchmark was cut off mid-SCF (which is usual). Chunk
+        # 1 is a calibration chunk precisely so this number gets replaced by a
+        # real one; say so rather than let the arithmetic look finished.
+        note "the electronic-steps-per-ionic-step factor is a DEFAULT, not a measurement:"
+        note "the benchmark was cut off before it closed an ionic step. Chunk 1 is a"
+        note "calibration chunk and will replace it with VASP's own LOOP+ timings."
+    fi
     kv "first chunk cap"    "${CAP1} ionic steps  (calibration; later chunks measure)"
     kv "target NSW"         "$nsw"
     kv "NELM per ionic step" "${NELM_ORIG}  (never chunked: a truncated SCF gives wrong forces)"
@@ -1017,10 +1042,19 @@ fi
 if command -v sacct >/dev/null 2>&1; then
     medwait=$(sacct -X -a -r "$PART" -S "$(date -d '7 days ago' +%F)" \
                 -o Submit,Start -n -P 2>/dev/null \
-              | awk -F'|' '$1!="" && $2!="" && $2!="Unknown"{
-                    cmd="date -d \""$1"\" +%s"; cmd|getline s; close(cmd)
-                    cmd="date -d \""$2"\" +%s"; cmd|getline t; close(cmd)
-                    if(t>=s) print t-s }' | sort -n | awk '{a[NR]=$1} END{if(NR)print a[int(NR/2)+1]}')
+              | awk -F'|' '
+                    # sacct prints "None" for a job that never started (still
+                    # pending, or cancelled in the queue) and "Unknown" for one
+                    # it has no record of. Feeding either to `date -d` makes it
+                    # write "date: invalid date \u2018None\u2019" to the terminal --
+                    # once per row, which on a busy partition is a screenful of
+                    # noise in the middle of the setup report. Those rows carry
+                    # no wait time anyway: drop them here.
+                    function bad(x) { return x=="" || x=="None" || x=="Unknown" || x=="N/A" }
+                    !bad($1) && !bad($2) {
+                        cmd="date -d \""$1"\" +%s"; cmd|getline s; close(cmd)
+                        cmd="date -d \""$2"\" +%s"; cmd|getline t; close(cmd)
+                        if(t>=s) print t-s }' | sort -n | awk '{a[NR]=$1} END{if(NR)print a[int(NR/2)+1]}')
     if [[ -n ${medwait:-} ]] && (( medwait > 0 )); then
         est=$(awk -v n="$(( (NELM_ORIG + CAP1 - 1) / CAP1 ))" -v w="$medwait" -v j="$((WALL*60))" \
               'BEGIN{printf "%.1f", n*(w+j)/3600}')
@@ -1046,7 +1080,12 @@ tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
     echo "#SBATCH --partition=${PART}"
     echo "#SBATCH --nodes=${NODES}"
     echo "#SBATCH --ntasks=${RANKS}"
-    echo "#SBATCH --ntasks-per-node=${NTPN}"
+    # Only when it is arithmetically true -- see the note where NTPN is read.
+    if (( NTPN_EXACT == 1 && NODES * NTPN == RANKS )); then
+        echo "#SBATCH --ntasks-per-node=${NTPN}"
+    else
+        echo "# no --ntasks-per-node: ${RANKS} ranks do not divide evenly over ${NODES} node(s)"
+    fi
     echo "#SBATCH --cpus-per-task=1"
     echo "#SBATCH --mem-per-cpu=${MEMCPU}"
     echo "#SBATCH --time=${tt}"

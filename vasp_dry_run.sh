@@ -106,10 +106,17 @@ _wp_module_block() {
         fi
         if [[ "$cmd" == "module" ]]; then echo "module load ${WP_VASP_MODULES}"
         else echo "ml ${WP_VASP_MODULES}"; fi
-    else                                   # built-in example default
-        echo "ml purge"
-        echo "ml gcc/14.2.0-zen4-y"
-        echo "ml vasp/6.4.3-mpi-openmp-h5-zen4-c"
+    else
+        # No modules configured. Emit none.
+        #
+        # This used to fall back to the modules of the machine this toolkit
+        # was first written on (gcc/14.2.0-zen4-y, vasp/6.4.3-...). On a
+        # cluster where WP_VASP_MODULES is empty ON PURPOSE -- because
+        # WP_VASP_STD is an absolute path, or because the site has no module
+        # system at all -- that loaded a STRANGER'S VASP over the one that
+        # was benchmarked, silently, and the run measured one binary while
+        # production used another.
+        echo "# (no modules configured in your cluster profile)"
     fi
 }
 
@@ -138,8 +145,22 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     _dr_min="${_dr_min%%.*}"; _dr_min="${_dr_min//[!0-9]/}"; _dr_min="${_dr_min:-30}"
     (( _dr_min < 1 )) && _dr_min=1
     _dr_time=$(printf '%02d:%02d:00' $((_dr_min/60)) $((_dr_min%60)))
+    # The 1-rank probe asks for a flat 8 GB, which is generous for a job that
+    # exits before it allocates -- but it has to be something the partition can
+    # actually give. A node with less RAM than that refuses the job outright
+    # ("Memory specification can not be satisfied"), and the stage that is
+    # supposed to be the cheap, always-works one becomes the one that never
+    # starts. The profile already knows the node size: cap against it, keeping
+    # a little back for the OS.
     _dr_mem="${VASP_DRYRUN_MEM_MB:-${WP_DRYRUN_MEM_MB:-8000}}"
     _dr_mem="${_dr_mem//[!0-9]/}"; _dr_mem="${_dr_mem:-8000}"
+    _dr_node="${WP_DEBUG_MEM_PER_NODE_MB:-${WP_MAIN_MEM_PER_NODE_MB:-0}}"
+    _dr_node="${_dr_node//[!0-9]/}"; _dr_node="${_dr_node:-0}"
+    if (( _dr_node > 0 )); then
+        _dr_cap=$(( _dr_node - 512 )); (( _dr_cap < 256 )) && _dr_cap=$(( _dr_node ))
+        (( _dr_mem > _dr_cap )) && _dr_mem=$_dr_cap
+    fi
+    (( _dr_mem < 256 )) && _dr_mem=256
     mkdir -p .wolfpack                       # so SLURM can place its log there
     job="$PWD/slurm_dryrun.sh"
     {
