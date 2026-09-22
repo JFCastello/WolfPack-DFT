@@ -41,6 +41,16 @@
 #   cd <dir with INCAR / POSCAR / POTCAR / KPOINTS>      # after dry-run + recommend
 #   vasp-test                        # renders ./slurm_benchmark.sh, submits it,
 #                                    # then writes the DEFINITIVE ./slurm_vasptest.sh + report.out
+#   vasp-test -n 3                   # benchmark row 3 of vasp-recommend-slurm's
+#                                    #   [TOP CANDIDATES] table instead of the best
+#
+#   -n N, --candidate N, or just a bare number: which row of the
+#   [TOP CANDIDATES] table to benchmark. Default: whatever the pipeline is
+#   currently set to, which is row 1 (the best) unless you asked for another.
+#   Choosing N re-runs vasp-recommend-slurm with --pick N -- with the SAME
+#   arguments as the first time, recorded in state.env -- so it rewrites
+#   INCAR + slurm.sh + state.env for candidate N and then benchmarks THAT.
+#   The score ranks candidates; only a benchmark measures them.
 #
 #   Tunables (export before running; defaults come from the cluster profile):
 #     VASP_TEST_WALLTIME_MIN=30     # SLURM job walltime cap (profile WP_TEST_WALLTIME_MIN);
@@ -182,17 +192,64 @@ RUN_CLOCK=$(printf '%d:%02d' $(( RUN_SECONDS / 60 )) $(( RUN_SECONDS % 60 )))
 DEBUG_MEM_MARGIN="${VASP_TEST_DEBUG_MEM_MARGIN:-${WP_DEBUG_MEM_MARGIN:-}}"
 DEBUG_RESERVE_GB_LEGACY="${WP_DEBUG_RESERVE_GB:-}"
 
+WANT_PICK=""          # empty = use whatever the pipeline is already set to
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help) sed -n '2,55p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,66p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -n|--candidate)
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "vasp-test: $1 needs a row number, e.g. $1 3" >&2; exit 2; }
+            WANT_PICK="$2"; shift 2 ;;
+        -n*)  WANT_PICK="${1#-n}"
+              [[ "$WANT_PICK" =~ ^[0-9]+$ ]] || { echo "vasp-test: '$1' is not a row number" >&2; exit 2; }
+              shift ;;
+        --candidate=*) WANT_PICK="${1#*=}"
+              [[ "$WANT_PICK" =~ ^[0-9]+$ ]] || { echo "vasp-test: '$1' is not a row number" >&2; exit 2; }
+              shift ;;
+        [0-9]*) WANT_PICK="$1"; shift ;;
         *) echo "vasp-test: unknown option '$1' (try --help)" >&2; shift ;;
     esac
 done
+if [[ -n "$WANT_PICK" && "$WANT_PICK" -lt 1 ]]; then
+    echo "vasp-test: candidate numbers start at 1 (1 = the best)." >&2; exit 2
+fi
 
 # --- Read the FIXED config from vasp-recommend (STAGE 2 of the pipeline) ---- #
 _wp_state="${WOLFPACK_STATE:-.wolfpack/state.env}"
 # shellcheck source=/dev/null
 [[ -f "$_wp_state" ]] && source "$_wp_state"
+
+# --- -n N: benchmark row N of the recommendation table ---------------------- #
+# Re-run vasp-recommend-slurm with --pick N rather than reinterpreting its
+# table here. It owns the rules; duplicating the selection is how the two
+# would drift apart. The arguments it was first run with are in state.env
+# (rec_args), so row N is a row of the SAME table the user read.
+# Never inside the benchmark job: there state.env is already the truth.
+if [[ -n "$WANT_PICK" && -z "${WP_VASPTEST_JOB:-}" ]]; then
+    if [[ "$WANT_PICK" == "${pick:-1}" ]]; then
+        echo "vasp-test: already set to candidate ${WANT_PICK}${pick_of:+ of $pick_of}; nothing to re-pick." >&2
+    else
+        _rec=""
+        for _c in "${VASP_RECOMMEND:-}" "$(command -v vasp-recommend-slurm 2>/dev/null)" \
+                  "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vasp_recommend_slurm.py"; do
+            [[ -n "$_c" && -f "$_c" ]] && { _rec="$_c"; break; }
+        done
+        if [[ -z "$_rec" ]]; then
+            echo "vasp-test: -n needs vasp-recommend-slurm on PATH (or \$VASP_RECOMMEND)." >&2
+            exit 2
+        fi
+        echo "STAGE 3: re-selecting candidate ${WANT_PICK} (was ${pick:-1}) -- rewriting INCAR + slurm.sh" >&2
+        # rec_args is a shell-quoted argument list written by the recommender.
+        eval "set -- ${rec_args:-}"
+        _py="$(command -v python3 || command -v python || echo python3)"
+        if ! "$_py" "$_rec" "$@" --pick "$WANT_PICK"; then
+            echo "vasp-test: vasp-recommend-slurm --pick $WANT_PICK failed; nothing was benchmarked." >&2
+            exit 2
+        fi
+        # shellcheck source=/dev/null
+        [[ -f "$_wp_state" ]] && source "$_wp_state"
+    fi
+fi
+
 FIX_KPAR="${kpar:-1}"; FIX_NCORE="${ncore:-1}"; FIX_NPAR="${npar:-1}"
 FIX_NSIM="${nsim:-4}"; PROD_RANKS="${ranks:-0}"
 PROD_PARTITION="${prod_partition:-${WP_MAIN_PARTITION:-main}}"
@@ -420,6 +477,9 @@ if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
     [[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" .wolfpack/cluster.conf
     chmod +x "$job"
     echo "STAGE 3: benchmarking the FIXED config (KPAR=${FIX_KPAR} NCORE=${FIX_NCORE} NSIM=${FIX_NSIM})" >&2
+    if [[ "${pick:-1}" != "1" ]]; then
+        echo "         this is candidate ${pick}${pick_of:+ of $pick_of} of the table, not the best (you asked: -n ${pick})" >&2
+    fi
     echo "         at ${tr} ranks on '${part}' (${tnodes} node(s) x ${tntpn}, ${mempc} MB/cpu," >&2
     echo "         ${DEBUG_MARGIN_MB} MB/node held back = $(awk -v m=$memnode -v r=$DEBUG_MARGIN_MB 'BEGIN{printf "%.0f", 100.0*(1-r/m)}')% usable," >&2
     echo "         cap ${max_test} cores; ${RUN_CLOCK} VASP run in a ${JOB_MINUTES}-min job); production target ${PROD_RANKS} ranks." >&2
@@ -828,10 +888,19 @@ if (( _rc == 7 )); then
         [[ -n "$c" && -f "$c" ]] && { REC="$c"; break; }
     done
     hdr "RE-SELECTING -- measured memory makes KPAR=${_rk} infeasible on this cluster"
-    if [[ -n "$REC" ]] && ( cd "$SUBMIT_DIR" && "$PY" "$REC" \
+    # Replay the arguments the recommendation was first made with, or the
+    # re-pick silently uses the profile defaults and answers a different
+    # question than the one the user asked (a different --max-cores gives a
+    # different table). Same reason `-n N` replays them.
+    eval "set -- ${rec_args:-}"
+    if [[ -n "$REC" ]] && ( cd "$SUBMIT_DIR" && "$PY" "$REC" "$@" \
             --gw-mem-per-rank "$_mb" --gw-ref-ranks "$_rr" --gw-ref-kpar "$_rk" ); then
         { echo 'stage="recommend"'; } >> "$SUBMIT_DIR/.wolfpack/state.env" 2>/dev/null || true
         echo "  Re-picked a FEASIBLE config (INCAR + slurm.sh + state.env updated)."
+        if [[ "${pick:-1}" != "1" ]]; then
+            echo "  NOTE: you had asked for candidate ${pick}; it does not fit at the"
+            echo "        MEASURED memory, so this is the best one that does."
+        fi
         echo "  RE-RUN to benchmark the new config:   vasp-test"
     else
         hdr "CANNOT RECOVER -- no parallelization fits this cluster at the measured memory"

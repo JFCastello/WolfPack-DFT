@@ -187,6 +187,7 @@ import csv
 import math
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2940,9 +2941,18 @@ def print_partition_summary(
     print()
 
 
-def print_candidate_table(candidates: Sequence[Candidate], top: int) -> None:
-    """Print the ranked table of the best candidate per rank count."""
+def print_candidate_table(candidates: Sequence[Candidate], top: int,
+                          picked: int = 1) -> None:
+    """Print the ranked table of the best candidate per rank count.
+
+    `picked` is the row that will actually be written out (1 = the best). It is
+    marked with '<' so the table and the recommendation below it cannot be read
+    as disagreeing.
+    """
     print("[TOP CANDIDATES]  (best INCAR shown for each total_ranks; sorted by score)")
+    if picked != 1:
+        print(f"  --pick {picked}: row {picked} is the one being written out, "
+              f"not row 1.")
     calc_type = candidates[0].calc_type if candidates else "DFT"
     low = calc_type in ("GW_LOWSCALING", "RPA_LOWSCALING")
     if low:
@@ -2958,6 +2968,7 @@ def print_candidate_table(candidates: Sequence[Candidate], top: int) -> None:
                 f" {c.ntasks_per_node:>4} |{c.kpar:>4}| {c.ranks_per_kgroup:>3} |"
                 f" {str(c.ntaupar):>5} | {str(c.nomegapar):>7} |"
                 f" {c.memory.suggested_mem_per_cpu_mb:>10} | {c.memory.maxmem_mb:>6}"
+                + ("  <" if idx == picked else "")
             )
         print()
         return
@@ -2973,6 +2984,7 @@ def print_candidate_table(candidates: Sequence[Candidate], top: int) -> None:
                 f" {idx:>2} | {c.score:>6.1f} | {c.total_ranks:>5} | {c.nodes:>5} |"
                 f" {c.ntasks_per_node:>4} |{c.kpar:>4}| {c.ranks_per_kgroup:>18} |"
                 f" {c.memory.suggested_mem_per_cpu_mb:>10}"
+                + ("  <" if idx == picked else "")
             )
         print()
         return
@@ -2990,6 +3002,7 @@ def print_candidate_table(candidates: Sequence[Candidate], top: int) -> None:
             f" {c.ntasks_per_node:>4} |{c.kpar:>4}|{c.ncore:>5}|{c.npar:>4} |"
             f" {bpg:>5} | {c.nsim:>4} | {lpl:>3} |"
             f" {c.memory.suggested_mem_per_cpu_mb:>10}"
+            + ("  <" if idx == picked else "")
         )
     print()
 
@@ -3005,10 +3018,20 @@ def print_best_candidate(
     executable: str,
     time_limit: str,
     gw_node_frac: float = 0.0,
+    picked: int = 1,
+    picked_of: int = 0,
 ) -> None:
-    """Print the full recommendation for the top candidate (layout, memory, INCAR, SLURM)."""
+    """Print the full recommendation for the chosen candidate (layout, memory, INCAR, SLURM).
+
+    `picked` is its row in the [TOP CANDIDATES] table; 1 is the best one.
+    """
     print("=" * 78)
-    print(" BEST CANDIDATE ".center(78, "="))
+    if picked != 1:
+        _of = f" OF {picked_of}" if picked_of else ""
+        print(f" CANDIDATE {picked}{_of}  (--pick {picked}; the best is row 1) "
+              .center(78, "="))
+    else:
+        print(" BEST CANDIDATE ".center(78, "="))
     print("=" * 78)
     low = candidate.calc_type in ("GW_LOWSCALING", "RPA_LOWSCALING")
     conv = candidate.calc_type == "GW_CONVENTIONAL"
@@ -3314,6 +3337,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "else 0.67. 0 = pure need-based (SAFE) sizing.")
     parser.add_argument("--top", type=int, default=10,
                         help="Number of top candidates to print (default 10).")
+    parser.add_argument("--pick", "-p", type=int, default=1, metavar="N",
+                        help="Write out candidate N of the [TOP CANDIDATES] "
+                             "table instead of the best one (default 1 = the "
+                             "best). The table is shown before anything is "
+                             "written, so N is the 'rk' column. vasp-test -n N "
+                             "replays this.")
     parser.add_argument("--csv", type=Path, default=None,
                         help="Optional path: write the full ranked list as CSV.")
     parser.add_argument("--write-slurm", type=Path, default=Path("slurm.sh"),
@@ -3542,6 +3571,29 @@ def append_report(path: Path, title: str, body: str) -> None:
     except OSError as exc:
         print(f"[report] WARNING: could not append to {path}: {exc}",
               file=sys.stderr)
+
+
+def argv_without_pick(argv: Sequence[str]) -> str:
+    """This invocation's arguments, with --pick/-p removed, shell-quoted.
+
+    Stored in state.env so `vasp-test -n N` can re-run the recommender the way
+    it was run the first time and get the SAME table -- otherwise row N would
+    be a row of a different table (a different --max-cores, partition or
+    --calc-type gives a different list).
+    """
+    out: List[str] = []
+    skip = False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in ("--pick", "-p"):
+            skip = True
+            continue
+        if a.startswith("--pick=") or (a.startswith("-p") and a[2:].isdigit()):
+            continue
+        out.append(a)
+    return " ".join(shlex.quote(a) for a in out)
 
 
 def write_state(path: Path, kv: Dict[str, object]) -> None:
@@ -3789,6 +3841,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ncl_default=(profile.get("WP_VASP_NCL", "") or "").strip() or None)
     best_each = best_per_total_ranks(candidates)
 
+    # --pick N: the row of the [TOP CANDIDATES] table to write out. The table
+    # is "the best candidate per rank count", not candidates[0:N], so N is a
+    # row of THAT list -- which is what the user reads off the screen and what
+    # `vasp-test -n N` replays. Everything below uses `picked`; nothing else
+    # changes, so candidate N gets exactly the treatment candidate 1 would.
+    _npick = max(1, int(getattr(args, "pick", 1) or 1))
+    if _npick > len(best_each):
+        print(f"\n--pick {_npick}: the table has only {len(best_each)} row(s) "
+              f"for this system on this cluster.", file=sys.stderr)
+        return 2
+    # Show at least as many rows as were picked, so the choice is always visible.
+    _top_shown = max(1, max(int(args.top), _npick))
+    picked = best_each[_npick - 1]
+
     # ---- REFUSE rather than recommend something that cannot be submitted ----
     # The scoring rule down-ranks a layout whose node split blows the account's
     # core cap, but down-ranking only helps when a feasible layout exists. When
@@ -3804,7 +3870,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if candidates and args.max_cores and cpus_per_node > 0:
         _r = _node_reserve_mb(partition_info, _main_margin)
         _, _n_chk, _, _ = compute_request_geometry(
-            candidates[0], partition_info, args.mem_util, reserve_mb=_r,
+            picked, partition_info, args.mem_util, reserve_mb=_r,
             rss_overhead=args.rss_overhead,
             gw_node_frac=(args.gw_node_frac if is_gw else 0.0))
         _cap_ok = _n_chk * cpus_per_node <= args.max_cores
@@ -3840,10 +3906,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # frozen MAXMEM (= mem-per-cpu - 3 GB) grows with it, buying batching speed.
     if is_gw and args.gw_node_frac > 0:
         _mpc, _, _, _ = compute_request_geometry(
-            candidates[0], partition_info, args.mem_util,
+            picked, partition_info, args.mem_util,
             reserve_mb=_node_reserve_mb(partition_info, _main_margin),
             rss_overhead=args.rss_overhead, gw_node_frac=args.gw_node_frac)
-        candidates[0].memory.maxmem_mb = gw_maxmem_from_request(_mpc)
+        picked.memory.maxmem_mb = gw_maxmem_from_request(_mpc)
 
     # Capture the full human-readable report so it can both print to the console
     # and be appended to report.out (for the dry-run -> recommend -> test chain).
@@ -3860,9 +3926,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 and not summary.nomega:
             print("[GW NOTE] Low-scaling GW/RPA detected but NOMEGA could not be "
                   "read; using a MAXMEM-only recommendation. Pass --nomega N.\n")
-        print_candidate_table(best_each, top=max(1, args.top))
+        print_candidate_table(best_each, top=_top_shown, picked=_npick)
         print_best_candidate(
-            candidate=candidates[0], partition_name=args.partition,
+            candidate=picked, picked=_npick, picked_of=len(best_each),
+            partition_name=args.partition,
             partition_info=partition_info, summary=summary,
             email=args.email or None, job_name=args.job_name,
             executable=executable, time_limit=args.time,
@@ -3881,7 +3948,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     # Geometry + 80%-utilisation memory for the production job (GW: SWEET-raised).
-    best = candidates[0]
+    best = picked
     _frac = args.gw_node_frac if is_gw else 0.0
     _reserve = _node_reserve_mb(partition_info, _main_margin)
     mem_per_cpu, nodes, ntpn, node_mem = compute_request_geometry(
@@ -3910,6 +3977,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "pred_ntpn": ntpn,
         "mem_util": args.mem_util,
         "exe": executable,
+        # Which row of the [TOP CANDIDATES] table this is, and the arguments
+        # that produced that table -- so `vasp-test -n N` can reproduce it.
+        "pick": _npick,
+        "pick_of": len(best_each),
+        "rec_args": argv_without_pick(sys.argv[1:]),
     }
     script_text = _embed_recommendation(script_text, best, meta)
 

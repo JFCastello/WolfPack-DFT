@@ -277,6 +277,22 @@ vasp-recommend-slurm --help             # full flag list
 
 ### STAGE 3 — `vasp-test`
 
+> **Testing a candidate other than the best: `vasp-test -n N`.** STAGE 2 prints a
+> `[TOP CANDIDATES]` table; the score *ranks* them, only a benchmark *measures*
+> them. `vasp-test -n 3` benchmarks row 3 instead of row 1 — `-n N`,
+> `--candidate N` or just `vasp-test 3` all work, and with no flag you get
+> whatever the pipeline is currently set to (row 1 unless you asked otherwise).
+>
+> It does not reinterpret the table: it re-runs `vasp-recommend-slurm --pick N`
+> with the **same arguments as the first time** (recorded in `state.env`), so
+> row N is a row of the same table you read. That rewrites `INCAR`, `slurm.sh`
+> and `state.env` for candidate N and then benchmarks it, exactly as if the
+> recommender had chosen it — the definitive `slurm_vasptest.sh` follows too.
+> Asking for a row that does not exist refuses and says how many there are.
+>
+> `vasp-recommend-slurm --pick N` does the selection on its own if you just want
+> the files, without benchmarking.
+
 Reads the **fixed** config from STAGE 2 and benchmarks **that exact config** (job
 `slurm_benchmark.sh`) — not your raw INCAR. VASP runs for `WP_TEST_WALLTIME_MIN`
 minus a short analysis margin, inside a job capped at that walltime. The recommended
