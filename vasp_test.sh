@@ -45,7 +45,12 @@
 #   Tunables (export before running; defaults come from the cluster profile):
 #     VASP_TEST_WALLTIME_MIN=30     # SLURM job walltime cap (profile WP_TEST_WALLTIME_MIN);
 #                                   #   VASP itself runs ANALYSIS_MARGIN_MIN minutes less
-#     VASP_TEST_ANALYSIS_MARGIN_MIN=4  # minutes kept inside the job for analysis
+#     VASP_TEST_ANALYSIS_MARGIN_MIN    # whole-minute override of the margin below
+#     VASP_TEST_KILL_GRACE_SEC=30      # SIGTERM -> SIGKILL window for VASP
+#     VASP_TEST_SACCT_BUDGET_SEC=45    # how long to wait for accounting to appear
+#     VASP_TEST_ANALYSIS_SLACK_SEC=15  # the scaling helper + writing report.out
+#                                      #   VASP gets the walltime minus their sum
+#                                      #   (90s by default: 18:30 of a 20-min slot)
 #     VASP_TEST_MAX_CORES=96        # cap on debug ranks (default: 2 x cores/node)
 #     VASP_EXE=vasp_std             # vasp_std | vasp_gam | vasp_ncl
 #     VASP_TEST_MEM_UTIL=0.81       # request memory so usage >= this (profile WP_MEM_UTIL)
@@ -138,9 +143,38 @@ _wp_require WP_MAIN_PARTITION WP_MAIN_CPUS_PER_NODE WP_MAIN_MEM_PER_NODE_MB WP_D
 # WALLTIME minus the analysis margin so the in-job sacct + scaling step finishes
 # inside the same allocation (debug partitions cap walltime hard).
 WALLTIME_MIN="${VASP_TEST_WALLTIME_MIN:-${WP_TEST_WALLTIME_MIN:-30}}"
-ANALYSIS_MARGIN_MIN="${VASP_TEST_ANALYSIS_MARGIN_MIN:-4}"
+# How much of the allocation VASP gets.
+#
+# The margin used to be a flat 4 minutes, which on a 20-minute debug slot threw
+# away a fifth of it: the benchmark ran 16 minutes and the analysis that the
+# margin exists for took THREE SECONDS. So derive it from what it actually has
+# to absorb, worst case:
+#
+#   KILL_GRACE   VASP is stopped with SIGTERM at the limit and gets this long
+#                to exit at a safe point before SIGKILL. A real cost: it is the
+#                one part of the margin that can always be spent.
+#   SACCT_BUDGET job accounting can lag a finished step, so MaxRSS is polled.
+#                This is the poll's whole budget, not its usual cost.
+#   ANALYSIS     the scaling helper and writing report.out.
+#
+# On a 20-minute slot that is 18:30 of VASP instead of 16:00. Going further is
+# a bad trade: at 19:30 the remaining 30s is exactly the SIGKILL window, so a
+# VASP that does not exit promptly takes the whole job down with it and the
+# benchmark -- the entire 20 minutes of queue -- produces nothing.
+KILL_GRACE_SEC="${VASP_TEST_KILL_GRACE_SEC:-30}"
+SACCT_BUDGET_SEC="${VASP_TEST_SACCT_BUDGET_SEC:-45}"
+ANALYSIS_SLACK_SEC="${VASP_TEST_ANALYSIS_SLACK_SEC:-15}"
 JOB_MINUTES=$WALLTIME_MIN                                # SLURM allocation = the walltime cap
-RUN_MINUTES=$(( JOB_MINUTES - ANALYSIS_MARGIN_MIN )); (( RUN_MINUTES < 1 )) && RUN_MINUTES=1
+if [[ -n "${VASP_TEST_ANALYSIS_MARGIN_MIN:-}" ]]; then   # legacy override, still honoured
+    ANALYSIS_MARGIN_SEC=$(( VASP_TEST_ANALYSIS_MARGIN_MIN * 60 ))
+else
+    ANALYSIS_MARGIN_SEC=$(( KILL_GRACE_SEC + SACCT_BUDGET_SEC + ANALYSIS_SLACK_SEC ))
+fi
+RUN_SECONDS=$(( JOB_MINUTES * 60 - ANALYSIS_MARGIN_SEC ))
+(( RUN_SECONDS < 60 )) && RUN_SECONDS=$(( JOB_MINUTES * 60 / 2 ))
+(( RUN_SECONDS < 30 )) && RUN_SECONDS=30
+RUN_MINUTES=$(( RUN_SECONDS / 60 ))                      # for the messages only
+RUN_CLOCK=$(printf '%d:%02d' $(( RUN_SECONDS / 60 )) $(( RUN_SECONDS % 60 )))
 # RAM left free per DEBUG node, as a FRACTION of the node (profile:
 # WP_DEBUG_MEM_MARGIN; 0.05 => 95% usable).  A legacy absolute WP_DEBUG_RESERVE_GB is
 # still honoured if the profile predates the fraction.  The absolute MB is resolved
@@ -388,7 +422,7 @@ if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
     echo "STAGE 3: benchmarking the FIXED config (KPAR=${FIX_KPAR} NCORE=${FIX_NCORE} NSIM=${FIX_NSIM})" >&2
     echo "         at ${tr} ranks on '${part}' (${tnodes} node(s) x ${tntpn}, ${mempc} MB/cpu," >&2
     echo "         ${DEBUG_MARGIN_MB} MB/node held back = $(awk -v m=$memnode -v r=$DEBUG_MARGIN_MB 'BEGIN{printf "%.0f", 100.0*(1-r/m)}')% usable," >&2
-    echo "         cap ${max_test} cores; ${RUN_MINUTES}-min VASP run in a ${JOB_MINUTES}-min job); production target ${PROD_RANKS} ranks." >&2
+    echo "         cap ${max_test} cores; ${RUN_CLOCK} VASP run in a ${JOB_MINUTES}-min job); production target ${PROD_RANKS} ranks." >&2
     exec sbatch "$job"
 fi
 
@@ -481,7 +515,7 @@ for _kv in "KPAR=${FIX_KPAR}" "NCORE=${FIX_NCORE}" "NSIM=${FIX_NSIM}" \
     wp_incar_set INCAR "${_kv%%=*}" "${_kv#*=}" "benchmark (vasp-test)"
 done
 
-hdr "VASP RESOURCE BENCHMARK  (${PARTITION}, ${NTASKS} ranks, ${RUN_MINUTES} min)"
+hdr "VASP RESOURCE BENCHMARK  (${PARTITION}, ${NTASKS} ranks, ${RUN_CLOCK} of ${JOB_MINUTES} min)"
 echo "  job id        : $SLURM_JOB_ID"
 echo "  run directory : $RUNDIR"
 echo "  executable    : $VASP_EXE"
@@ -522,13 +556,13 @@ fi
 hdr "RUNNING VASP (timed)"
 run_start=$(date +%s)
 # --signal=TERM lets VASP exit at the next safe point; --kill-after forces it.
-timeout --signal=TERM --kill-after=30s "${RUN_MINUTES}m" \
+timeout --signal=TERM --kill-after="${KILL_GRACE_SEC}s" "${RUN_SECONDS}s" \
     srun --cpu-bind=cores "$VASP_EXE"
 rc=$?
 run_end=$(date +%s)
 wall=$(( run_end - run_start ))
 if [[ $rc -eq 124 || $rc -eq 137 ]]; then
-    echo "  VASP reached the ${RUN_MINUTES}-minute benchmark limit and was stopped (expected)."
+    echo "  VASP reached the ${RUN_CLOCK} benchmark limit and was stopped (expected)."
 elif [[ $rc -eq 0 ]]; then
     echo "  VASP finished on its own before the limit (small system) -- metrics still valid."
 else
@@ -545,7 +579,11 @@ OUTCAR="$RUNDIR/OUTCAR"
 hdr "MEASURED RESOURCE USAGE"
 RAW=""
 if command -v sacct >/dev/null 2>&1; then
-    for _ in $(seq 1 15); do
+    # Poll against a DEADLINE, not a fixed count. The walltime arithmetic above
+    # reserves SACCT_BUDGET_SEC for exactly this, so the loop has to honour that
+    # number rather than spend 15 x 3s whatever is left of the allocation.
+    _sacct_deadline=$(( $(date +%s) + SACCT_BUDGET_SEC ))
+    while :; do
         # --units=M forces EVERY memory field into MB, so the parser never has to
         # guess whether a suffix-less number is bytes or KB (this cluster reports
         # MaxRSS as "576512K" but AveRSS as raw bytes -> a 1024x error). Older
@@ -557,6 +595,10 @@ if command -v sacct >/dev/null 2>&1; then
         if printf '%s\n' "$RAW" | awk -F'|' '$6!="" && $6!~/^0?$/{f=1} END{exit !f}'; then
             break
         fi
+        (( $(date +%s) >= _sacct_deadline )) && {
+            echo "  (sacct still had no MaxRSS after ${SACCT_BUDGET_SEC}s -- not waiting longer)" >&2
+            break
+        }
         sleep 3
     done
 fi
