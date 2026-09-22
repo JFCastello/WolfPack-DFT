@@ -939,10 +939,20 @@ if [[ $LDAU == T && ( $CALC_BASE == "static SCF" || ((gw_family)) ) ]]; then
   tip "not as a self-interaction correction. Sanity-check whether U belongs on that shell at all."
 fi
 
-# --- GW-specific knobs ---
+# --- GW-specific knobs (the GW rule set, not the DFT one) ------------------
 if ((gw_family)); then
   if [[ -n ${NCORE:-} && ${NCORE%.*} -gt 1 ]]; then
     fail "NCORE=${NCORE} with GW: GW requires NCORE=1. Parallelise over k-points with KPAR instead."
+    tip "\"Unfortunately you need to use the default for GW and RPA calculations.\" -- https://vasp.at/wiki/Optimizing_the_parallelization"
+  fi
+  if [[ -n ${NOMEGA:-} && ${NOMEGA%.*} -gt 0 ]]; then
+    for _t in NTAUPAR NOMEGAPAR; do
+      _v="$(getp "$_t")"; _v="${_v%.*}"
+      if [[ -n $_v && $_v -gt 0 ]] && (( ${NOMEGA%.*} % _v != 0 )); then
+        fail "${_t}=${_v} is not a divisor of NOMEGA=${NOMEGA}."
+        tip "\"For this purpose both tags have to be divisors of NOMEGA.\" -- https://vasp.at/wiki/Practical_guide_to_GW_calculations"
+      fi
+    done
   fi
   if [[ -z $ENCUTGW_SET ]]; then
     warn "ENCUTGW not set in INCAR -> defaulted to 2/3*ENCUT = ~$(awk -v e="${ENCUT:-0}" 'BEGIN{printf "%.0f", e*2.0/3.0}') eV."
@@ -955,10 +965,22 @@ if ((gw_family)); then
   tip "The DFT step feeding GW must be well converged with plenty of empty states (LOPTICS=.TRUE., large NBANDS)."
 fi
 
-# --- KPAR divisibility (your KPAR=21 vs NKPTS=96 lesson) ---
+# --- KPAR divisibility -----------------------------------------------------
+# Two regimes, two verdicts. "KPAR should factorize the number of k points" is
+# on the electronic-minimization page; the GW guide does not repeat it, and in
+# GW the k-group holds chi and W, so memory binds. Telling a GW user to "pick a
+# divisor of NKPTS" can send them to a layout that OOMs.
 if [[ -n ${KPAR:-} && ${KPAR%.*} -gt 1 && -n ${NKPTS:-} && ${NKPTS%.*} -gt 0 ]]; then
   if (( ${NKPTS%.*} % ${KPAR%.*} != 0 )); then
-    warn "KPAR=${KPAR} does not divide NKPTS=${NKPTS} -> uneven k-group load (idle ranks). Pick a divisor of NKPTS."
+    _idle=$(awk -v n="${NKPTS%.*}" -v k="${KPAR%.*}" \
+              'BEGIN{g=int((n+k-1)/k); printf "%.1f", 100*(1-n/(g*k))}')
+    if ((gw_family)); then
+      note "KPAR=${KPAR} does not divide NKPTS=${NKPTS} -> ~${_idle}% of core-time idles."
+      tip "In GW that is a cost, not an error: the k-group holds chi and W, so a group that FITS beats"
+      tip "one that balances. Change KPAR only if memory already has room; else add zero-weighted k-points."
+    else
+      warn "KPAR=${KPAR} does not divide NKPTS=${NKPTS} -> uneven k-group load (~${_idle}% idle ranks). Pick a divisor of NKPTS."
+    fi
   fi
 fi
 

@@ -217,7 +217,28 @@ vasp-dry-run            # writes ./slurm_dryrun.sh, submits it (~30 s of compute
 With **no argument**, auto-finds `.wolfpack/dryrun_OUTCAR`. It enumerates
 (KPAR, NCORE, NPAR) candidates, ranks them by the
 [VASP-wiki parallelization rules](https://www.vasp.at/wiki/index.php/Category:Parallelization),
-and writes the production job to **`slurm.sh`** with:
+and writes the production job to **`slurm.sh`**.
+
+> **Two rule sets, kept apart.** VASP parallelizes GW/RPA by different rules
+> than a relaxation or an SCF, so the tool uses separate enumerators, scorers
+> and rejections. Every recommendation says which one produced it
+> (`parallelization rules : ...`).
+>
+> | | relax / SCF (D) | GW / RPA (G) |
+> |---|---|---|
+> | ranks fill whole nodes | D1 | G1 (same: MPI placement) |
+> | `N_ranks % KPAR == 0` | D3 | G2 |
+> | `NKPTS % KPAR == 0` | **D2, required** | **not applied** — priced, not vetoed |
+> | `NCORE` | D4/D5 — factor of cores-per-node and of the k-group | **G3 — always 1** (which makes D4/D5 vacuous) |
+> | `NBANDS` | D6 — padded to a multiple of `NPAR` | not applied |
+> | `NTAUPAR`/`NOMEGAPAR` | — | G4 divisors of `NOMEGA`; G5 their product divides the k-group |
+> | what decides | k-point coverage | **G6 — the k-group holds χ and W and must fit memory** |
+>
+> `vasp-check` makes the same split when auditing a finished run. A test
+> (`tests/checks/regime_separation.py`) fails if either path calls the other's
+> rule functions.
+
+`slurm.sh` carries:
 
 - the chosen **KPAR/NCORE/NSIM** embedded as comments **and written into your
   `INCAR`** so STAGE 3 and production match (KPAR + NCORE for GW; KPAR + NCORE +

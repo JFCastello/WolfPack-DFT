@@ -468,7 +468,7 @@ class Candidate:
         return (
             "# --- Parallelization: CONVENTIONAL (quartic-scaling) GW ---\n"
             "# GW parallelizes only over k-points -> KPAR is the lever; NCORE = 1.\n"
-            f"KPAR  = {self.kpar}    # k-point groups (divisor of NKPTS)\n"
+            f"KPAR  = {self.kpar}    # k-point groups (divisor of the rank count)\n"
             "NCORE = 1     # REQUIRED for the GW step (no band-FFT distribution)\n"
             f"# Each k-point group gets {rpk} rank(s); they parallelize the\n"
             "# internal DFT/Exact diagonalization. Do NOT set NPAR for GW.\n"
@@ -495,7 +495,7 @@ class Candidate:
             f"# --- Parallelization: {head} ---",
             "# Primary lever: the imaginary time/frequency grid split.",
             "# VASP recommends setting MAXMEM and letting it choose NTAUPAR/NOMEGAPAR.",
-            f"KPAR     = {self.kpar}     # k-point groups (divisor of NKPTS)",
+            f"KPAR     = {self.kpar}     # k-point groups (divisor of the rank count)",
             "NCORE    = 1      # leave band-FFT distribution off; use the grid split",
         ]
         if self.recommend_maxmem and maxmem > 0:
@@ -1372,11 +1372,11 @@ def suggest_total_ranks(
          VASP's speed, this deteriorates the performance of the calculation."
         -- https://vasp.at/wiki/Category:Parallelization, "MPI setup"
 
-    So the candidate rank counts are WHOLE NODES, full stop, plus the sub-node
-    sizes that still live inside one node for a small job. KPAR, NCORE and NPAR
-    are then chosen as divisors of a count the cluster can hand out whole --
-    which is the physics mapped onto the machine, rather than the machine asked
-    to contort around the physics.
+    So the candidate rank counts are WHOLE NODES, full stop. Sub-node counts
+    appear only when the core cap is smaller than a node, i.e. a whole node is
+    not on offer at all. KPAR, NCORE and NPAR are then chosen as divisors of a
+    count the cluster can hand out whole -- the physics mapped onto the machine,
+    rather than the machine asked to contort around the physics.
 
     `irr_kpoints` and `nbands` are no longer used to invent rank counts. They
     still decide everything that matters: which KPAR, NCORE and NPAR to use
@@ -1392,13 +1392,16 @@ def suggest_total_ranks(
             out.add(n)
         n += cpn
 
-    # Sub-node sizes, for a job too small to earn a node. These never straddle
-    # a boundary, so the rule above is not violated.
-    f = cpn
-    while f > 1:
-        f //= 2
-        if min_cores <= f <= max_cores:
-            out.add(f)
+    # Sub-node sizes ONLY when a whole node is out of reach -- the cap itself is
+    # smaller than a node. Otherwise they are not offered, because this cluster
+    # allocates whole nodes: 24 ranks on a 48-core node bills 48 cores and uses
+    # 24. D1 is "N_ranks = N_nodes x C_node", and it pays for itself.
+    if cpn > max_cores:
+        f = cpn
+        while f > 1:
+            f //= 2
+            if min_cores <= f <= max_cores:
+                out.add(f)
 
     # If the cap is not a whole number of nodes, the largest usable count is
     # the last whole node under it -- asking for the remainder would allocate
@@ -1414,13 +1417,47 @@ def suggest_total_ranks(
 # ============================================================================
 
 
-def kpar_terms(kpar: int, irr_k: Optional[int],
-               coverage_weight: float,
-               kpar_reachable: Optional[int] = None) -> Dict[str, float]:
-    """The VASP-wiki KPAR rules, as scoring terms.
+# ============================================================================
+# TWO RULE SETS: electronic minimization vs GW/RPA.  Separate enumerators,
+# separate scorers, separate rejections.  Do not merge them.
+#
+# DFT (relax, SCF, DOS, bands) -- "Tips to parallelize electronic minimization",
+# https://vasp.at/wiki/index.php/Optimizing_the_parallelization
+#   D1  N_ranks fills whole nodes.
+#   D2  NKPTS % KPAR == 0        "KPAR should factorize the number of k points."
+#   D3  N_ranks % KPAR == 0
+#   D4  C_node % NCORE == 0 (or C_NUMA)  "NCORE a factor of the cores per node."
+#   D5  (N_ranks/KPAR) % NCORE == 0
+#   D6  NBANDS is padded up to a multiple of NPAR.
+#   -> build_candidates(), score_candidate(), dft_kpar_terms()
+#
+# GW / RPA -- https://vasp.at/wiki/index.php/Practical_guide_to_GW_calculations
+#   G1  = D1, G2 = D3.  Both are MPI/rank arithmetic, not algorithm rules.
+#   G3  NCORE = 1.  "you need to use the default for GW and RPA calculations."
+#   G4  NTAUPAR, NOMEGAPAR divide NOMEGA.                  [low-scaling]
+#   G5  NTAUPAR*NOMEGAPAR divides the k-group rank count.  [low-scaling]
+#   G6  A k-group holds chi and W and must FIT IN MEMORY; MAXMEM over NTAUPAR.
+#   -> build_gw_candidates(), score_gw_candidate(), gw_kpar_terms()
+#
+# D2, D4, D5, D6 are NOT applied to GW: D2 is stated only for electronic
+# minimization and in GW memory (G6) is what binds; D4/D5 are vacuous at
+# NCORE = 1; D6 is not what GW distributes.  gw_kpar_terms() still PRICES the
+# k-point imbalance -- it just does not veto on it.
+# ============================================================================
 
-    Two sentences from https://vasp.at/wiki/index.php/Optimizing_the_parallelization
-    carry the whole thing:
+
+def dft_kpar_terms(kpar: int, irr_k: Optional[int],
+                   coverage_weight: float,
+                   kpar_reachable: Optional[int] = None) -> Dict[str, float]:
+    """The KPAR rules for ELECTRONIC MINIMIZATION, as scoring terms (D2, D6).
+
+    DFT ONLY.  The GW/RPA path has its own, gw_kpar_terms(); see the rule-set
+    banner above for why calling this one from there is a bug.
+
+    Two sentences from the "Tips to parallelize electronic minimization"
+    section of https://vasp.at/wiki/index.php/Optimizing_the_parallelization
+    carry the whole thing (the section heading is part of the rule: it is what
+    scopes these two sentences to this regime and away from GW):
 
         "increase KPAR up to the number of irreducible k points.  Keep in
          mind that KPAR should factorize the number of k points."
@@ -1493,7 +1530,7 @@ def score_candidate(
     Larger is better.  The weights are calibrated so that:
       * a HARD wiki violation (e.g. KPAR > NKPTS) -> very large negative
       * the recommended setting (NCORE ~ sqrt(rpk), NCORE | NUMA) -> ~+25
-      * KPAR at the wiki's ceiling of NKPTS -> +18 (see kpar_terms)
+      * KPAR at the wiki's ceiling of NKPTS -> +18 (see dft_kpar_terms)
       * a memory-light layout that fits the partition default -> +5
       * throughput term: up to +5 for using the full account allowance
     """
@@ -1512,9 +1549,19 @@ def score_candidate(
         parts["KPAR_must_divide_total_ranks_(HARD_RULE)"] = -1000.0
 
     # "increase KPAR up to the number of irreducible k points.  Keep in mind
-    # that KPAR should factorize the number of k points."  See kpar_terms().
-    parts.update(kpar_terms(candidate.kpar, irr_k, coverage_weight=18.0,
-                            kpar_reachable=getattr(candidate, "kpar_reachable", None)))
+    # that KPAR should factorize the number of k points."  See dft_kpar_terms().
+    #
+    # This scorer is the DFT one. A GW candidate must never reach it: GW is
+    # scored by score_gw_candidate() against its own rules (G1-G6).
+    if candidate.calc_type != "DFT":
+        raise AssertionError(
+            f"score_candidate() is the DFT scorer and was handed a "
+            f"{candidate.calc_type} candidate. GW/RPA goes through "
+            f"score_gw_candidate(); the two rule sets are kept apart on "
+            f"purpose (see the rule-set banner above dft_kpar_terms())."
+        )
+    parts.update(dft_kpar_terms(candidate.kpar, irr_k, coverage_weight=18.0,
+                                kpar_reachable=getattr(candidate, "kpar_reachable", None)))
 
     # Gamma-only / NKPTS = 1: KPAR must be 1.
     if summary.is_gamma_only and candidate.kpar != 1:
@@ -1532,7 +1579,7 @@ def score_candidate(
     # (small_system_ncore_1_recipe, NIONS < 50) already exists below.
     #
     # And the term itself is now double-counting: "KPAR = NKPTS" is exactly
-    # where kpar_terms() pays its ceiling, and "NCORE = 1" is what
+    # where dft_kpar_terms() pays its ceiling, and "NCORE = 1" is what
     # small_system_ncore_1_recipe pays.  Scoring the conjunction a third time
     # said nothing new, it only shouted.  It existed as a counterweight to the
     # bonus KPAR = 1 used to collect for nothing; that bonus is gone, so the
@@ -1748,6 +1795,13 @@ def build_candidates(
     strict_ncore_one: bool,
 ) -> List[Candidate]:
     """Enumerate all valid (total_ranks, KPAR, NCORE, NPAR, NSIM, LPLANE)."""
+    if summary.calc_type != "DFT":
+        raise AssertionError(
+            f"build_candidates() enumerates ELECTRONIC-MINIMIZATION layouts "
+            f"(D1-D6) and was handed calc_type={summary.calc_type!r}. GW/RPA "
+            f"goes through build_gw_candidates(), which applies G1-G6 "
+            f"instead. See the rule-set banner above dft_kpar_terms()."
+        )
     if max_cores < min_cores or max_cores < 1:
         raise SystemExit("--max-cores must be >= --min-cores and >= 1.")
 
@@ -1769,10 +1823,12 @@ def build_candidates(
     # one node).
     ncore_cap = cpus_per_node
 
-    # The largest KPAR the hard rules leave reachable on THIS cluster for THIS
-    # k-point count: it must divide NKPTS and divide a rank count the machine
-    # can hand out whole. Computed once, so every candidate is scored against
-    # the same ceiling rather than against NKPTS, which may be unreachable.
+    # The largest KPAR the DFT hard rules leave reachable on THIS cluster for
+    # THIS k-point count: it must divide NKPTS (D2) and divide a rank count the
+    # machine can hand out whole (D1+D3). Computed once, so every candidate is
+    # scored against the same ceiling rather than against NKPTS, which may be
+    # unreachable. The GW builder computes its OWN ceiling, without D2 -- see
+    # the rule-set banner above dft_kpar_terms().
     kpar_reachable = 1
     if irr_k and irr_k > 1 and not summary.is_gamma_only:
         for _t in rank_choices:
@@ -2108,6 +2164,41 @@ def _gw_divisor_pairs(nomega: int) -> List[Tuple[int, int]]:
     return [(t, w) for t in divs for w in divs]
 
 
+def gw_kpar_terms(kpar: int, irr_k: Optional[int],
+                  coverage_weight: float,
+                  kpar_reachable: Optional[int] = None) -> Dict[str, float]:
+    """KPAR scoring for GW / RPA.  NOT the DFT terms -- see the rule-set banner.
+
+    KPAR hands k-points out round-robin in both regimes, so the imbalance
+    arithmetic is the same and is charged here too.  What is NOT borrowed is
+    D2's status as a rejection: that sentence is on the electronic-minimization
+    page, and in GW a k-group holds chi and W (G6), so a layout that idles a
+    few percent but FITS beats one that balances and swaps.  Here the imbalance
+    is a price; G6 is the rule.  The "increase KPAR up to NKPTS" directive is
+    kept and weighted high, because G3 pins NCORE = 1 and leaves KPAR as nearly
+    the whole parallelization -- measured against the ceiling the cluster can
+    actually reach, not against NKPTS.
+    """
+    if not irr_k or irr_k <= 0 or kpar <= 0:
+        return {}
+    parts: Dict[str, float] = {}
+
+    per_group = -(-irr_k // kpar)                 # ceil, in integers
+    idle = 1.0 - irr_k / float(per_group * kpar)
+    if idle > 1e-12:
+        # A PRICE, not a rejection -- see the docstring.  Same coefficient as
+        # the DFT path so the two are comparable when read side by side, but
+        # it is written out here rather than imported, because it is scored
+        # against a different set of competing terms.
+        parts["gw_kpar_does_NOT_factorise_nkpts_(PRICE,_not_a_rule_here)"] = -60.0 * idle
+
+    _ceiling = kpar_reachable if (kpar_reachable and kpar_reachable > 0) else irr_k
+    parts["gw_kpar_kpoint_coverage"] = coverage_weight * math.sqrt(
+        min(1.0, kpar / float(max(1, _ceiling)))
+    )
+    return parts
+
+
 def score_gw_candidate(
     *,
     summary: DryRunSummary,
@@ -2129,25 +2220,42 @@ def score_gw_candidate(
     irr_k = summary.irr_kpoints or summary.nkpts
     low = candidate.calc_type in ("GW_LOWSCALING", "RPA_LOWSCALING")
 
-    # ---- KPAR rules (shared) --------------------------------------------
+    # This scorer is the GW/RPA one. A DFT candidate must never reach it.
+    if candidate.calc_type == "DFT":
+        raise AssertionError(
+            "score_gw_candidate() is the GW/RPA scorer and was handed a DFT "
+            "candidate. Electronic minimization goes through "
+            "score_candidate(); the two rule sets are kept apart on purpose "
+            "(see the rule-set banner above dft_kpar_terms())."
+        )
+
+    # ---- G2: KPAR divides the rank count --------------------------------
+    # Shared with the DFT path's D3, and shared for a reason that has nothing
+    # to do with either algorithm: the k-point groups are carved out of the
+    # ranks, so an indivisible split does not exist.
     if candidate.total_ranks % candidate.kpar != 0:
-        parts["KPAR_must_divide_total_ranks_(HARD_RULE)"] = -1000.0
+        parts["G2_KPAR_must_divide_total_ranks_(HARD_RULE)"] = -1000.0
     if summary.is_gamma_only and candidate.kpar != 1:
         parts["gamma_only_requires_kpar_1_(HARD_RULE)"] = -200.0
-    # Same wiki rules as the DFT path (see kpar_terms()).  The directive is
-    # worth more here: with NCORE pinned to 1, conventional GW has no FFT
-    # level to fall back on, so KPAR is nearly the whole parallelization.
-    # Low-scaling GW/RPA shares the budget with NTAUPAR/NOMEGAPAR, scored
-    # below, so its KPAR directive is weighted lower.
-    parts.update(kpar_terms(candidate.kpar, irr_k,
-                            coverage_weight=20.0 if not low else 12.0,
-                            kpar_reachable=getattr(candidate, "kpar_reachable", None)))
+    # GW's OWN KPAR terms -- gw_kpar_terms(), not the DFT dft_kpar_terms().
+    # The directive is worth more here: with NCORE pinned to 1 by G3,
+    # conventional GW has no FFT level to fall back on, so KPAR is nearly the
+    # whole parallelization. Low-scaling GW/RPA shares the budget with
+    # NTAUPAR/NOMEGAPAR (G4/G5, scored below), so its KPAR term is lower.
+    parts.update(gw_kpar_terms(candidate.kpar, irr_k,
+                               coverage_weight=20.0 if not low else 12.0,
+                               kpar_reachable=getattr(candidate, "kpar_reachable", None)))
 
-    # ---- NCORE must be 1 for GW -----------------------------------------
+    # ---- G3: NCORE = 1, always ------------------------------------------
+    # "Unfortunately you need to use the default for GW and RPA calculations."
+    # https://vasp.at/wiki/index.php/Optimizing_the_parallelization
+    # This is the rule that makes D4 and D5 (NCORE vs cores-per-node, NCORE vs
+    # k-group size) inapplicable here rather than merely unstated: with
+    # NCORE = 1 there is nothing for them to constrain.
     if candidate.ncore != 1:
-        parts["gw_requires_ncore_1_(HARD_RULE)"] = -300.0
+        parts["G3_gw_requires_ncore_1_(HARD_RULE)"] = -300.0
     else:
-        parts["gw_ncore_1_ok"] = 4.0
+        parts["G3_gw_ncore_1_ok"] = 4.0
 
     # ---- Conventional GW: cores per k-group ------------------------------
     rpk = candidate.ranks_per_kgroup
@@ -2173,20 +2281,22 @@ def score_gw_candidate(
         t = candidate.ntaupar or 1
         w = candidate.nomegapar or 1
         if nomega:
+            # G4: "both tags have to be divisors of NOMEGA."
             if nomega % t == 0:
-                parts["ntaupar_divides_nomega"] = 10.0
+                parts["G4_ntaupar_divides_nomega"] = 10.0
             else:
-                parts["ntaupar_NOT_divisor_of_nomega_(HARD)"] = -80.0
+                parts["G4_ntaupar_NOT_divisor_of_nomega_(HARD_RULE)"] = -80.0
             if nomega % w == 0:
-                parts["nomegapar_divides_nomega"] = 6.0
+                parts["G4_nomegapar_divides_nomega"] = 6.0
             else:
-                parts["nomegapar_NOT_divisor_of_nomega_(HARD)"] = -60.0
+                parts["G4_nomegapar_NOT_divisor_of_nomega_(HARD_RULE)"] = -60.0
         # The τ/ω groups partition the available ranks: NTAUPAR*NOMEGAPAR must
         # divide the per-k-group rank count.
+        # G5: the tau/omega groups partition the ranks a k-group has.
         if rpk % max(1, t * w) == 0:
-            parts["tau_omega_groups_partition_ranks"] = 8.0
+            parts["G5_tau_omega_groups_partition_ranks"] = 8.0
         else:
-            parts["tau_omega_groups_do_NOT_fit_ranks_(HARD)"] = -120.0
+            parts["G5_tau_omega_groups_do_NOT_fit_ranks_(HARD_RULE)"] = -120.0
         # Larger NTAUPAR is faster (VASP defaults to the largest that fits in
         # MAXMEM); reward it, but only when memory actually fits (handled by
         # the memory penalties below).
@@ -2264,13 +2374,26 @@ def build_gw_candidates(
     gw_ref_ranks_override: Optional[int] = None,
     gw_ref_encutgw_override: Optional[float] = None,
 ) -> List[Candidate]:
-    """Enumerate GW / RPA layouts (NCORE pinned to 1).
+    """Enumerate GW / RPA layouts under the GW rule set (G1-G6).
 
-    Conventional GW: vary total_ranks and KPAR (divisor of total_ranks, capped
-    to NKPTS by default).  Low-scaling GW/RPA: additionally vary the
-    (NTAUPAR, NOMEGAPAR) divisor pair of NOMEGA, keeping NTAUPAR*NOMEGAPAR a
-    divisor of the per-k-group rank count.
+    GW/RPA ONLY.  Electronic minimization is enumerated by build_candidates()
+    under D1-D6; the rule-set banner above dft_kpar_terms() says why the two
+    are separate functions and must stay that way.
+
+    Conventional GW: vary total_ranks (G1) and KPAR (a divisor of total_ranks
+    by G2, capped to NKPTS by default), with NCORE pinned to 1 by G3.
+    Low-scaling GW/RPA: additionally vary the (NTAUPAR, NOMEGAPAR) divisor
+    pair of NOMEGA (G4), keeping NTAUPAR*NOMEGAPAR a divisor of the per-k-group
+    rank count (G5).  Memory -- a k-point group holds chi and W (G6) -- is what
+    decides among them, which is why NKPTS % KPAR == 0 is NOT a filter here.
     """
+    if summary.calc_type == "DFT":
+        raise AssertionError(
+            "build_gw_candidates() enumerates GW/RPA layouts (G1-G6) and was "
+            "handed a DFT calculation. Electronic minimization goes through "
+            "build_candidates(), which applies D1-D6 instead. See the "
+            "rule-set banner above dft_kpar_terms()."
+        )
     if max_cores < min_cores or max_cores < 1:
         raise SystemExit("--max-cores must be >= --min-cores and >= 1.")
 
@@ -2292,27 +2415,45 @@ def build_gw_candidates(
     nomega = summary.nomega
     pairs = _gw_divisor_pairs(nomega) if (low and nomega) else [(1, 1)]
 
+    # GW's OWN reachable KPAR ceiling. It differs from the DFT one by exactly
+    # the rule that is absent here: KPAR need only divide a rank count the
+    # machine can hand out whole (G1+G2), not NKPTS (D2). So on a 48-core node
+    # with NKPTS = 63 the DFT ceiling is 3 and the GW ceiling is 48 -- the same
+    # cluster, the same k-points, two different answers, because the two
+    # regimes are governed by two different rule sets.
+    kpar_reachable_gw = 1
+    if irr_k and irr_k > 1 and not summary.is_gamma_only:
+        for _t in rank_choices:
+            for _k in positive_divisors(_t):
+                if _k <= irr_k and _k > kpar_reachable_gw:
+                    kpar_reachable_gw = _k
+
     candidates: List[Candidate] = []
     for total_ranks in rank_choices:
         ntasks_per_node = min(total_ranks, cpus_per_node)
         nodes = max(1, math.ceil(total_ranks / ntasks_per_node))
 
-        # The same two hard divisibility rules as the DFT path: KPAR divides
-        # the rank count AND factorizes NKPTS. This was the DFT builder's rule
-        # written out a second time, and it kept the old soft treatment -- so a
-        # GW run came out with NKPTS = 63 and KPAR = 2, which leaves one group
-        # short every pass. Whatever is true of k-point groups in DFT is true
-        # of them in GW, and more so: there the groups also hold chi and W.
+        # ---- G2: KPAR divides the rank count. That is the ONLY divisibility
+        # rejection on this path, and it is here because the k-point groups are
+        # carved out of the ranks -- an indivisible split does not exist.
+        #
+        # NKPTS % KPAR == 0 is NOT enforced here. That is D2, and D2 belongs to
+        # "Tips to parallelize electronic minimization"; the GW guide does not
+        # repeat it, and in this regime it has competition it does not have in
+        # DFT. A k-point group holds chi and W (G6), so the layouts that matter
+        # are the ones that FIT, and rejecting on k-point balance can throw
+        # away the only ones that do. The imbalance is still real and still
+        # charged -- gw_kpar_terms() prices it -- but it does not veto.
+        #
+        # This block used to be a copy of the DFT enumeration. It is not one
+        # any more, and it must not become one again.
         kpar_choices = positive_divisors(total_ranks)
         if summary.is_gamma_only:
             kpar_choices = [1]
-        else:
-            if irr_k and irr_k > 1:
-                kpar_choices = [k for k in kpar_choices if irr_k % k == 0]
-            if limit_kpar_to_irr and irr_k:
-                kpar_choices = [k for k in kpar_choices if k <= max(1, irr_k)]
-            if not kpar_choices:
-                continue
+        elif limit_kpar_to_irr and irr_k:
+            kpar_choices = [k for k in kpar_choices if k <= max(1, irr_k)]
+        if not kpar_choices:
+            continue
 
         for kpar in kpar_choices:
             rpk = total_ranks // kpar          # ranks per k-point group
@@ -2344,6 +2485,7 @@ def build_gw_candidates(
                     nodes=nodes, ntasks_per_node=ntasks_per_node, cpu_bind="cores",
                     memory=memory, calc_type=summary.calc_type, nomega=summary.nomega,
                     recommend_maxmem=recommend_maxmem,
+                    kpar_reachable=kpar_reachable_gw,
                 )
                 score, p = score_gw_candidate(
                     summary=summary, partition_info=partition_info,
@@ -2379,6 +2521,7 @@ def build_gw_candidates(
                     ntasks_per_node=ntasks_per_node, cpu_bind="cores",
                     memory=memory, calc_type=summary.calc_type, nomega=summary.nomega,
                     ntaupar=knob_t, nomegapar=knob_w, recommend_maxmem=recommend_maxmem,
+                    kpar_reachable=kpar_reachable_gw,
                 )
                 score, p = score_gw_candidate(
                     summary=summary, partition_info=partition_info,
@@ -2871,6 +3014,14 @@ def print_best_candidate(
     conv = candidate.calc_type == "GW_CONVENTIONAL"
     print(f"score                   : {candidate.score:.1f}")
     print(f"calculation type        : {candidate.calc_type}")
+    # Which rule book chose this layout. The two regimes are enumerated and
+    # scored by separate code paths, so the line is not decoration.
+    if low or conv:
+        print("parallelization rules   : GW / RPA  "
+              "(NCORE = 1; a k-group must fit in memory)")
+    else:
+        print("parallelization rules   : relax / SCF  "
+              "(NKPTS % KPAR == 0; NCORE divides cores-per-node)")
     print(f"total MPI ranks         : {candidate.total_ranks}")
     print(f"nodes                   : {candidate.nodes}")
     print(f"ntasks-per-node         : {candidate.ntasks_per_node}")
@@ -2976,40 +3127,42 @@ def print_best_candidate(
             print("     that goes into the definitive job script.")
         print()
 
-    # The wiki's own tip for exactly this situation. Worth saying out loud,
-    # because it is the only way out and it is not obvious:
-    #
+    # D2 is a rejection, so in a DFT run KPAR always divides NKPTS. The cost
+    # shows up instead as a KPAR stuck far below NKPTS, and the wiki has the
+    # one way out:
     #   "If the number of k points is a prime number (or does not factorize
     #    well), copy the IBZKPT file to KPOINTS and add zero-weigthed points."
     #   -- https://vasp.at/wiki/Optimizing_the_parallelization
-    #
-    # It fires when NO rank count this cluster can hand out whole has a KPAR
-    # that divides NKPTS exactly. 190 k-points on 48-core nodes is that case:
-    # 190 = 2 x 5 x 19 shares only a factor 2 with any multiple of 48, so every
-    # usable KPAR leaves the k-point groups uneven and some ranks idle at the
-    # end of each pass.
     _irr = summary.irr_kpoints or summary.nkpts
     _cpn = int(partition_info.get("cpus_per_node") or 0)
     if (_irr and _irr > 1 and candidate.calc_type == "DFT"
+            and candidate.kpar < _irr and _cpn):
+        print("[K-POINT COUNT]  KPAR is capped below NKPTS by the rules, not by choice")
+        print(f"  NKPTS = {_irr}, KPAR = {candidate.kpar}. KPAR must divide NKPTS "
+              f"and divide a rank")
+        print(f"  count this cluster hands out whole (a multiple of {_cpn}); "
+              f"{candidate.kpar} is the largest that")
+        print("  does both. To raise it: cp IBZKPT KPOINTS and add zero-weighted "
+              "points until")
+        print("  NKPTS factorizes better.")
+        print()
+
+    # The GW counterpart of the block above: same arithmetic, different verdict.
+    if (_irr and _irr > 1 and (low or conv)
             and candidate.kpar > 1 and _irr % candidate.kpar != 0):
         _idle = 100.0 * (1.0 - _irr / (math.ceil(_irr / candidate.kpar)
                                        * candidate.kpar))
-        print("[K-POINT COUNT]  the chosen KPAR does not divide NKPTS exactly")
-        print(f"  NKPTS = {_irr}, KPAR = {candidate.kpar}: the k-points go out "
-              f"round-robin, so the")
-        print(f"  busiest group gets {math.ceil(_irr / candidate.kpar)} of them "
-              f"and every other group waits for it --")
-        print(f"  {_idle:.1f}% of the allocated core-time buys nothing.")
-        if _cpn:
-            print(f"  This cluster hands out whole nodes of {_cpn} cores, so every "
-                  f"rank count it can")
-            print(f"  give is a multiple of {_cpn}, and no KPAR dividing one of "
-                  f"those factorizes {_irr}.")
-            print("  The VASP wiki's way out, if that matters for your run:")
-            print("     cp IBZKPT KPOINTS     # then add zero-weighted points")
-            print("  until NKPTS factorizes over the rank counts above.")
-            print("  (https://vasp.at/wiki/Optimizing_the_parallelization)")
-            print()
+        print("[K-POINT COUNT]  KPAR does not divide NKPTS -- allowed here")
+        print(f"  NKPTS = {_irr}, KPAR = {candidate.kpar}: the busiest group "
+              f"gets {math.ceil(_irr / candidate.kpar)}, so {_idle:.1f}% of the "
+              f"core-time idles.")
+        print("  An SCF would reject this (D2). GW is not governed by that page: "
+              "a k-group holds")
+        print(f"  chi and W, so memory decides and the {_idle:.1f}% was priced, "
+              f"not vetoed. Pay it")
+        print("  back with zero-weighted k-points (cp IBZKPT KPOINTS), or force "
+              "KPAR.")
+        print()
 
     print("[WHY]  (top score contributions)")
     for line in candidate.reasons:
