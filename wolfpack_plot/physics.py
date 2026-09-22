@@ -220,7 +220,11 @@ def auto_select_units(cdos, efermi, emin, emax, structure, grouping, n_needed,
          elements, take the top n_needed (e.g. Cu-d, S-p, ...);
       2. otherwise switch to inequivalent WYCKOFF SITES of the active grouping
          (e.g. Pt1-d, Pt2-d), ranked by window weight, and take the top n_needed;
-      3. if even that is not enough, fall back to per-atom units.
+      3. if even that is not enough, fall back to per-atom units -- but only
+         when the active grouping is coarser than the cell's symmetry.
+         Under the symmetry grouping the sites in 2. ARE the orbits, so
+         splitting further would invent a distinction the space group
+         denies. Fewer units come back instead.
     The chosen order always respects the descending window contribution.
 
     Returns (chosen_units, level_used, full_ranking_used).  Raises ValueError if
@@ -242,13 +246,32 @@ def auto_select_units(cdos, efermi, emin, emax, structure, grouping, n_needed,
     if len(site_rank) >= n_needed:
         return site_rank[:n_needed], "site", site_rank
 
-    # --- fallback 2: per-atom units (element grouping) ---
-    atom_grouping = _site_grouping(structure, "element")
-    atom_rank = rank_sites(cdos, efermi, emin, emax, structure, atom_grouping)
-    if atom_rank:
-        level = "atom" if len(atom_rank) >= len(site_rank) else "site"
-        best = atom_rank if len(atom_rank) >= len(site_rank) else site_rank
-        return best[:n_needed], level, best
+    # --- fallback 2: per-atom units, but ONLY where atoms are really distinct --
+    #
+    # This fallback splits one element into Si1, Si2, ... It is legitimate when
+    # the ACTIVE grouping is coarser than the symmetry of the cell -- with
+    # --group element or --group formula, two atoms on inequivalent sites get
+    # lumped together and going per-atom recovers a real difference.
+    #
+    # It is NOT legitimate under the symmetry grouping. There, site_rank already
+    # IS the list of symmetry orbits, so splitting further hands back atoms that
+    # the space group says are the same. Diamond Si is the case: one orbit, and
+    # the per-atom split produced Si1-p and Si2-p at 50% each, which rgb then
+    # drew in red and green -- the same physical quantity twice, under a legend
+    # that printed the same label both times, in a figure that had already
+    # reported "inequivalent sites per element: Si:1".
+    #
+    # So: offer fewer units rather than invented ones. The caller decides what
+    # to do with a system that cannot supply what the method wants; that is a
+    # question about the method, not a licence to fabricate a distinction.
+    if grouping.get("mode") != "symmetry":
+        atom_grouping = _site_grouping(structure, "element")
+        atom_rank = rank_sites(cdos, efermi, emin, emax, structure, atom_grouping)
+        if atom_rank and len(atom_rank) > len(site_rank):
+            return atom_rank[:n_needed], "atom", atom_rank
+
+    if site_rank:
+        return site_rank[:n_needed], "site", site_rank
 
     # nothing better than the element ranking we have
     return el_rank[:n_needed], "element", el_rank

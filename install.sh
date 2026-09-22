@@ -306,8 +306,10 @@ elif [[ $DO_CONFIGURE -eq 1 ]]; then
         echo "    (re-run 'vasp-configure' any time to adjust these values.)"
     else
         echo "    A short wizard will detect your VASP modules and SLURM"
-        echo "    partitions and ask you to confirm. Press Enter to accept a"
-        echo "    detected/default value."
+        echo "    partitions and ask you to confirm. Every question explains"
+        echo "    what the value is and which command reads it, so you can"
+        echo "    tell the machine's size from your allocation's limit."
+        echo "    Press Enter to accept a detected/default value."
         if confirm "Run cluster configuration now?"; then
             "${configure_cmd[@]}" && CONFIGURED="yes"
         else

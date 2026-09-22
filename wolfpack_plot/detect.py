@@ -208,7 +208,12 @@ def detect_calc(folder):
             return False
 
     has_dos = present("DOSCAR")
-    has_eig = present("EIGENVAL") or present("EIGENVAL_OPT")
+    # A KPOINTS_OPT run writes NO EIGENVAL_OPT and no DOSCAR_OPT -- checked
+    # against the VASP 6.5.1 source, where the only extra output file is
+    # PROCAR_OPT (src/linear_response.F:1863, gated on LORBIT>10). The
+    # KPOINTS_OPT eigenvalues live inside vasprun.xml, in the
+    # <eigenvalues_kpoints_opt> block.
+    has_eig = present("EIGENVAL")
     has_vr = present("vasprun.xml")
     has_procar = present("PROCAR") or present("PROCAR_OPT")
 
@@ -227,12 +232,15 @@ def detect_calc(folder):
     problems = []
     if mgga and icharg is not None and icharg >= 10:
         problems.append(
-            f"METAGGA={mgga} with ICHARG={icharg}: ICHARG>=10 freezes the CHARGE "
-            "DENSITY, but a meta-GGA Hamiltonian also needs the kinetic-energy "
-            "density tau, which is built from the orbitals and is NOT in the "
-            "CHGCAR. VASP runs anyway and returns eigenvalues from the wrong "
-            "potential. A meta-GGA band/DOS run must be self-consistent "
-            "(ICHARG=0, ISTART=1) on a regular mesh, with the path in KPOINTS_OPT.")
+            f"METAGGA={mgga} with ICHARG={icharg}: a meta-GGA Hamiltonian needs "
+            "the kinetic-energy density tau, which is built from the orbitals "
+            "and is NOT in the CHGCAR, so a frozen charge density is not enough. "
+            "VASP REFUSES this combination outright -- 'ICHARG>9 is currently "
+            "not supported for meta-GGA functionals' (src/fock.F) -- so any "
+            "output in this folder was NOT produced by this INCAR. Run it "
+            "self-consistently on a regular mesh instead"
+            + (", with the high-symmetry path in KPOINTS_OPT."
+               if kmode == "line" or kopt else "."))
     if mgga and kmode == "line" and not kopt:
         problems.append(
             f"METAGGA={mgga} with a line-mode KPOINTS and no KPOINTS_OPT: tau "
@@ -259,9 +267,24 @@ def detect_calc(folder):
     # the path sits in KPOINTS_OPT. Judging by KPOINTS alone would classify a
     # meta-GGA/hybrid band run as a DOS run.
     if kopt is not None:
-        why = "KPOINTS_OPT holds the k-path (self-consistent band run"
-        why += f"; METAGGA={mgga})" if mgga else "; hybrid/meta-GGA scheme)"
-        return result(KIND_BANDS, why)
+        # KPOINTS_OPT is not meta-GGA-only -- any functional may use it, and a
+        # plain PBE run that does should not be described as a meta-GGA scheme.
+        scheme = f"METAGGA={mgga}" if mgga else "KPOINTS_OPT scheme"
+        # ONE run carries BOTH halves of the figure. KPOINTS is the regular mesh
+        # that drove self-consistency (and produced the DOS); KPOINTS_OPT is the
+        # path VASP diagonalised afterwards in one shot. They land in the SAME
+        # vasprun.xml -- the bands under <eigenvalues_kpoints_opt>, the DOS under
+        # the ordinary <dos> -- so a meta-GGA run gets the same combined
+        # bands+DOS figure a PBE Scf/ Bands/ Dos/ tree gets, from one folder and
+        # with no extra command.
+        if has_dos and has_vr:
+            return result(KIND_BOTH,
+                          "KPOINTS_OPT holds the k-path and KPOINTS the mesh "
+                          "that made it self-consistent, so this one run "
+                          f"carries both bands and DOS ({scheme})")
+        return result(KIND_BANDS,
+                      "KPOINTS_OPT holds the k-path (self-consistent band run; "
+                      f"{scheme})")
 
     # --- band structure: a k-path is the defining evidence -------------------
     if kmode == "line":
@@ -322,6 +345,11 @@ def detect_layout(root, bands_dir="Bands", dos_dir="Dos", scf_dir="Scf"):
     common = dict(layout="single", kind=kind, w90=info["w90"], why=info["why"],
                   metagga=info["metagga"], kpoints_opt=info["kpoints_opt"],
                   problems=info["problems"], info=info)
+    if kind == KIND_BOTH:
+        # One self-consistent run holding both (the KPOINTS_OPT scheme). Both
+        # readers point at the same folder and pick their own half out of the
+        # same vasprun.xml.
+        return dict(common, bands=root, dos=root, scf=root)
     if kind == KIND_BANDS:
         return dict(common, bands=root, dos=None, scf=root)
     if kind == KIND_DOS:

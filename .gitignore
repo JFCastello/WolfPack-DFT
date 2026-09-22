@@ -129,7 +129,9 @@ Test/
 
 # The local test harness: a SLURM testbed, its fixtures, and the checks that
 # run against it. Kept out of the repository at the user's request -- it lives
-# on the machine that runs it, not in the published tree.
+# on the machine that runs it, not in the published tree. It sits under Test/
+# (so the repo root stays readable), which the rule above already excludes;
+# these two lines stay so a harness recreated anywhere else is caught too.
 tests/
 **/tests/
 

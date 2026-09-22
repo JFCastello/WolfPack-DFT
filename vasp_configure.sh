@@ -49,6 +49,11 @@
 #   --main-cpus N          --debug-cpus N
 #   --main-mem MB          --debug-mem MB           --max-cores N
 #   --debug-max-cores N       (core cap for the vasp-test benchmark job)
+#   --chunk-walltime MIN      (walltime of ONE chunk of a chained relax/SCF;
+#                              vasp-relax-loop --walltime overrides it per run)
+#   --chunk-margin MIN        (minutes kept at the end of a chunk so VASP can
+#                              close its ionic step; raised to 8% of the
+#                              walltime when that is larger)
 #   --main-mem-margin F       (fraction of a MAIN node's RAM left free; 0.02 = 98% usable)
 #   --debug-mem-margin F      (same for DEBUG nodes)
 #   --module-cmd {ml,module}
@@ -85,6 +90,8 @@ WP_MAIN_MEM_PER_NODE_MB=""; WP_DEBUG_MEM_PER_NODE_MB=""
 WP_MAIN_NUMA_CORES=""; WP_MAX_CORES=""
 # Pipeline policy (asked in section 7; not hardcoded in the stage scripts).
 WP_TEST_WALLTIME_MIN=""    # debug/test partition walltime cap (min); VASP runs this minus the analysis margin
+WP_CHUNK_WALLTIME_MIN=""   # walltime of ONE chunk of a chained relax/SCF (min)
+WP_CHUNK_MARGIN_MIN=""     # minutes kept at the end of a chunk so VASP can stop cleanly
 WP_MEM_UTIL_MIN=""         # cluster's minimum memory-utilisation policy (fraction, e.g. 0.80)
 WP_MEM_UTIL=""             # sizing TARGET the tools aim for (= policy + 1% buffer)
 # Memory head-room kept free per node, as a FRACTION of the node's RAM (replaces the
@@ -147,6 +154,8 @@ while [[ $# -gt 0 ]]; do
         --debug-mem)        _cli WP_DEBUG_MEM_PER_NODE_MB "${2:?}"; shift 2 ;;
         --max-cores)        _cli WP_MAX_CORES "${2:?}"; shift 2 ;;
         --test-walltime)    _cli WP_TEST_WALLTIME_MIN "${2:?}"; shift 2 ;;
+        --chunk-walltime)   _cli WP_CHUNK_WALLTIME_MIN "${2:?}"; shift 2 ;;
+        --chunk-margin)     _cli WP_CHUNK_MARGIN_MIN "${2:?}"; shift 2 ;;
         --mem-util-min)     _cli WP_MEM_UTIL_MIN "${2:?}"; shift 2 ;;
         --main-mem-margin)  _cli WP_MAIN_MEM_MARGIN "${2:?}"; shift 2 ;;
         --debug-mem-margin) _cli WP_DEBUG_MEM_MARGIN "${2:?}"; shift 2 ;;
@@ -200,12 +209,28 @@ fi
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-ask() {  # ask VARNAME "prompt" "default"   (keeps default on empty / non-interactive)
-    local __var="$1" __prompt="$2" __def="${3:-}" __ans=""
+ask() {  # ask VARNAME "prompt" "default" ["what it is and what reads it"]
+    # The fourth argument is the point of this function beyond reading a line.
+    # These questions decide how every job this toolkit writes is shaped, and a
+    # bare "Max total cores per job [240]:" tells a first-time user nothing
+    # about whether 240 is the machine's size or their allocation's limit --
+    # two different numbers, and answering with the wrong one produces scripts
+    # the scheduler rejects. So each question says what the value IS and which
+    # command consumes it. Printed only when someone is there to read it.
+    local __var="$1" __prompt="$2" __def="${3:-}" __why="${4:-}" __ans=""
     if [[ $INTERACTIVE -eq 0 ]]; then printf -v "$__var" '%s' "$__def"; return; fi
-    if [[ -n "$__def" ]]; then read -r -p "    $__prompt [$__def]: " __ans || true
-    else                      read -r -p "    $__prompt: " __ans || true; fi
+    if [[ -n "$__why" ]]; then
+        printf '%s\n' "$__why" | fold -s -w 66 | sed "s/^/      ${c_cya}/;s/\$/${c_rst}/"
+    fi
+    # Print the prompt ourselves instead of using `read -p`. Bash suppresses a
+    # -p prompt whenever stdin is not a terminal, so anyone feeding the wizard
+    # from a pipe or a here-doc saw the explanations above with no question
+    # attached to them. The answer still comes from stdin either way.
+    if [[ -n "$__def" ]]; then printf '    %s [%s]: ' "$__prompt" "$__def" >&2
+    else                       printf '    %s: '      "$__prompt"          >&2; fi
+    read -r __ans || true
     printf -v "$__var" '%s' "${__ans:-$__def}"
+    [[ -n "$__why" ]] && echo
 }
 
 # Make module / ml callable in this (possibly non-login) shell if we can.
@@ -737,7 +762,8 @@ echo
 # ---- 1. email ----
 info "Notification email (used as #SBATCH --mail-user in emitted scripts)"
 : "${WP_EMAIL:=$(git config --get user.email 2>/dev/null || echo "${EMAIL:-}")}"
-ask WP_EMAIL "Email (blank = no mail line)" "$WP_EMAIL"
+ask WP_EMAIL "Email (blank = no mail line)" "$WP_EMAIL" \
+    "Where SLURM mails job start/end. Blank leaves the --mail-user line out of every generated script."
 echo
 
 # ---- 2. VASP version (module OR local build) ----
@@ -783,7 +809,8 @@ if [[ -z "$WP_VASP_MODULES" && $INTERACTIVE -eq 1 ]]; then
         ask WP_VASP_MODULES "Whole module line to load for VASP (space-separated)" ""
     fi
 fi
-ask WP_VASP_STD "VASP std executable (name on PATH, or full path to a custom binary/wrapper)" "$WP_VASP_STD"
+ask WP_VASP_STD "VASP std executable" "$WP_VASP_STD" \
+    "The binary every generated job runs. A bare name is looked up on PATH after the modules load; an absolute path skips PATH entirely, which is what a custom build needs."
 
 # Informational check -- never blocks, never loops.
 if [[ "$WP_VASP_STD" == */* ]]; then                 # custom build: check its libs
@@ -816,8 +843,10 @@ if [[ $INTERACTIVE -eq 1 ]] && command -v sinfo >/dev/null 2>&1; then
 fi
 : "${WP_MAIN_PARTITION:=$(default_partition)}"; : "${WP_MAIN_PARTITION:=main}"
 : "${WP_DEBUG_PARTITION:=$(guess_debug_part)}"; : "${WP_DEBUG_PARTITION:=$WP_MAIN_PARTITION}"
-ask WP_MAIN_PARTITION  "MAIN (production) partition name"   "$WP_MAIN_PARTITION"
-ask WP_DEBUG_PARTITION "DEBUG (short/test) partition name"  "$WP_DEBUG_PARTITION"
+ask WP_MAIN_PARTITION  "MAIN (production) partition name"   "$WP_MAIN_PARTITION" \
+    "Where production jobs are submitted. vasp-recommend-slurm sizes every layout against this partition's nodes."
+ask WP_DEBUG_PARTITION "DEBUG (short/test) partition name"  "$WP_DEBUG_PARTITION" \
+    "Where the vasp-test benchmark runs: a short queue with quick turnaround. Name the MAIN partition here if your site has no separate debug queue -- the test is still sized by the DEBUG limits below."
 echo
 
 # ---- 4. per-partition node specs ----
@@ -835,10 +864,14 @@ _probe WP_MAIN_MEM_PER_NODE_MB  "$WP_MAIN_PARTITION"  detect_mem_per_node
 _probe WP_DEBUG_CPUS_PER_NODE   "$WP_DEBUG_PARTITION" detect_cpus_per_node
 _probe WP_DEBUG_MEM_PER_NODE_MB "$WP_DEBUG_PARTITION" detect_mem_per_node
 _probe WP_MAIN_NUMA_CORES       "$WP_MAIN_PARTITION"  detect_numa_cores
-ask WP_MAIN_CPUS_PER_NODE    "MAIN  cores per node"        "$WP_MAIN_CPUS_PER_NODE"
-ask WP_MAIN_MEM_PER_NODE_MB  "MAIN  memory per node (MB)"  "$WP_MAIN_MEM_PER_NODE_MB"
-ask WP_DEBUG_CPUS_PER_NODE   "DEBUG cores per node"        "$WP_DEBUG_CPUS_PER_NODE"
-ask WP_DEBUG_MEM_PER_NODE_MB "DEBUG memory per node (MB)"  "$WP_DEBUG_MEM_PER_NODE_MB"
+ask WP_MAIN_CPUS_PER_NODE    "MAIN  cores per node"        "$WP_MAIN_CPUS_PER_NODE" \
+    "Cores on one MAIN node. The rank counts vasp-recommend-slurm offers are multiples of this, because VASP expects ranks to fill one node before the next is used."
+ask WP_MAIN_MEM_PER_NODE_MB  "MAIN  memory per node (MB)"  "$WP_MAIN_MEM_PER_NODE_MB" \
+    "RAM on one MAIN node. Decides how many ranks fit per node once vasp-test has measured the real per-rank memory."
+ask WP_DEBUG_CPUS_PER_NODE   "DEBUG cores per node"        "$WP_DEBUG_CPUS_PER_NODE" \
+    "Cores on one DEBUG node -- the size of the machine the benchmark actually runs on."
+ask WP_DEBUG_MEM_PER_NODE_MB "DEBUG memory per node (MB)"  "$WP_DEBUG_MEM_PER_NODE_MB" \
+    "RAM on one DEBUG node. The benchmark asks for as much of it as the margin below allows, because its job is to find the memory ceiling."
 echo
 
 # ---- 5. max cores ----
@@ -847,7 +880,8 @@ detected_max="$(detect_core_cap "$WP_MAIN_PARTITION")"
 if [[ -n "$detected_max" ]]; then note "  detected cap: ${detected_max} cores"; wp_why
 else note "  no cap found in SLURM -- please supply one."; fi
 : "${WP_MAX_CORES:=$detected_max}"
-ask WP_MAX_CORES "Max total cores per job" "$WP_MAX_CORES"
+ask WP_MAX_CORES "Max total cores per job" "$WP_MAX_CORES" \
+    "The most cores ONE production job may hold. This is your allocation's limit, not the machine's size. vasp-recommend-slurm REFUSES to recommend a layout above it rather than write a script the scheduler would reject."
 echo
 
 # ---- 5b. DEBUG/test job cap ----
@@ -876,7 +910,8 @@ if (( _dbg_bench > 0 )); then
     note "                     the test only has to reproduce KPAR x NCORE, not fill the queue"
 fi
 : "${WP_DEBUG_MAX_CORES:=$_dbg_bench}"
-ask WP_DEBUG_MAX_CORES "Max total cores for a DEBUG/test job" "$WP_DEBUG_MAX_CORES"
+ask WP_DEBUG_MAX_CORES "Max total cores for a DEBUG/test job" "$WP_DEBUG_MAX_CORES" \
+    "The same cap for the vasp-test benchmark, so a test can never quietly grow into a production-sized job."
 echo
 
 # ---- 6b. pipeline policy (was hardcoded in the stage scripts) ----
@@ -894,6 +929,9 @@ if [[ -n $_wall ]]; then
     (( _wall > 5 )) && _wall=$(( _wall - 1 ))
 fi
 : "${WP_TEST_WALLTIME_MIN:=$_wall}"
+# Same defaults vasp-chain falls back to (DEF_WALLTIME_MIN / DEF_MARGIN_MIN).
+: "${WP_CHUNK_WALLTIME_MIN:=600}"
+: "${WP_CHUNK_MARGIN_MIN:=5}"
 : "${WP_MEM_UTIL_MIN:=0.80}"
 : "${WP_GW_NODE_FRAC:=0.67}"
 # Memory margins are FRACTIONS of a node's RAM left free (0.02 => 98% usable).
@@ -905,11 +943,20 @@ if [[ -z "$WP_DEBUG_MEM_MARGIN" && -n "$WP_DEBUG_RESERVE_GB" && "$WP_DEBUG_MEM_P
 fi
 : "${WP_MAIN_MEM_MARGIN:=0.02}"
 : "${WP_DEBUG_MEM_MARGIN:=0.05}"
-ask WP_TEST_WALLTIME_MIN  "DEBUG/test walltime cap (min) -- VASP runs this minus the analysis margin" "$WP_TEST_WALLTIME_MIN"
-ask WP_MEM_UTIL_MIN       "Minimum memory-utilisation policy (fraction, e.g. 0.80)"                    "$WP_MEM_UTIL_MIN"
-ask WP_MAIN_MEM_MARGIN    "MAIN  node memory margin (fraction left FREE; 0.02 = 98% usable)"           "$WP_MAIN_MEM_MARGIN"
-ask WP_DEBUG_MEM_MARGIN   "DEBUG node memory margin (fraction left FREE; 0.05 = 95% usable)"           "$WP_DEBUG_MEM_MARGIN"
-ask WP_GW_NODE_FRAC       "GW SWEET node fraction -- grow the GW request to this share of a node (speed) leaving the rest for backfill; 0 = need-based" "$WP_GW_NODE_FRAC"
+ask WP_TEST_WALLTIME_MIN  "DEBUG/test walltime cap (min)" "$WP_TEST_WALLTIME_MIN" \
+    "Walltime of the vasp-test benchmark job. VASP gets this minus about 90 s, which is what the in-job memory analysis needs to read sacct and write the report."
+ask WP_CHUNK_WALLTIME_MIN "Chunk walltime (min)" "$WP_CHUNK_WALLTIME_MIN" \
+    "Walltime of ONE chunk when a long relaxation or SCF is split by vasp-relax-loop / vasp-scf-loop. Shorter chunks backfill into the queue sooner; longer ones mean fewer queue waits and fewer restarts. Asking for N minutes is a ceiling, not a duration: a chunk ends as soon as its step budget is spent."
+ask WP_CHUNK_MARGIN_MIN   "Chunk end margin (min)" "$WP_CHUNK_MARGIN_MIN" \
+    "Time kept free at the end of each chunk so VASP can finish the ionic step it is on and write its WAVECAR before SLURM kills the job. Raised to 8% of the chunk walltime when that is larger."
+ask WP_MEM_UTIL_MIN       "Minimum memory-utilisation policy (fraction)"                    "$WP_MEM_UTIL_MIN" \
+    "Your site's rule for how much of the RAM a job requests it must actually use. Memory requests are sized so measured usage lands at or above this."
+ask WP_MAIN_MEM_MARGIN    "MAIN  node memory margin (fraction left free)"           "$WP_MAIN_MEM_MARGIN" \
+    "Fraction of a MAIN node's RAM left unrequested, for the operating system and the job's own overhead. 0.02 means 98% of the node is offered to VASP."
+ask WP_DEBUG_MEM_MARGIN   "DEBUG node memory margin (fraction left free)"           "$WP_DEBUG_MEM_MARGIN" \
+    "The same for DEBUG nodes, larger by default because the benchmark deliberately runs close to the ceiling."
+ask WP_GW_NODE_FRAC       "GW SWEET node fraction (0 = need-based)" "$WP_GW_NODE_FRAC" \
+    "GW and RPA only: grows a GW request up to this share of a node so it batches faster, leaving the rest for backfill. 0 sizes it strictly to what the run needs."
 # Clamp the margins into a sane range so a typo cannot wipe out a node's memory.
 for _mv in WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN; do
     printf -v "$_mv" '%s' "$(awk -v x="${!_mv}" 'BEGIN{ x=x+0; if(x<0)x=0; if(x>0.5)x=0.5; printf "%.3f", x }')"
@@ -927,6 +974,27 @@ if [[ -n "$WP_VASP_LD_LIBRARY_PATH" ]]; then
     WP_EXTRA_ENV='export LD_LIBRARY_PATH='"$WP_VASP_LD_LIBRARY_PATH"':$LD_LIBRARY_PATH;'"$WP_EXTRA_ENV"
 fi
 mkdir -p "$(dirname "$CONF")"
+# Read back any WP_* assignment the wizard does not manage, so the rewrite
+# below can put it back verbatim (value kept exactly as written, quotes and all).
+declare -A _PRESERVED_VAL=(); _PRESERVED_KEYS=""
+if [[ -f "$CONF" ]]; then
+    _managed=" WP_EMAIL WP_MODULE_CMD WP_MODULE_PURGE WP_VASP_MODULES WP_VASP_STD \
+WP_VASP_GAM WP_VASP_NCL WP_VASP_LD_LIBRARY_PATH WP_EXTRA_ENV WP_MAIN_PARTITION \
+WP_DEBUG_PARTITION WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
+WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB WP_MAIN_NUMA_CORES WP_MAX_CORES \
+WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN WP_MEM_UTIL_MIN \
+WP_MEM_UTIL WP_GW_NODE_FRAC WP_DEBUG_MAX_CORES \
+WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN "
+    while IFS= read -r _line; do
+        [[ "$_line" =~ ^[[:space:]]*(WP_[A-Za-z0-9_]+)=(.*)$ ]] || continue
+        _k="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
+        [[ "$_managed" == *" $_k "* ]] && continue
+        _PRESERVED_VAL["$_k"]="$_v"; _PRESERVED_KEYS+=" $_k"
+    done < "$CONF"
+    [[ -n "$_PRESERVED_KEYS" ]] && \
+        note "keeping hand-added setting(s):$_PRESERVED_KEYS"
+fi
+
 {
     echo "# WolfPack-DFT cluster profile -- generated by vasp-configure on $(date -Iseconds)"
     echo "# Sourced by the shell job scripts and parsed by vasp-recommend-slurm."
@@ -938,13 +1006,28 @@ mkdir -p "$(dirname "$CONF")"
              WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
              WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB \
              WP_MAIN_NUMA_CORES WP_MAX_CORES \
-             WP_TEST_WALLTIME_MIN WP_MEM_UTIL_MIN WP_MEM_UTIL \
+             WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN \
+             WP_MEM_UTIL_MIN WP_MEM_UTIL \
              WP_GW_NODE_FRAC \
              WP_DEBUG_MAX_CORES WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN; do
         # WP_EXTRA_ENV may carry a literal $LD_LIBRARY_PATH -> single-quote it.
         if [[ "$k" == WP_EXTRA_ENV ]]; then printf "%s='%s'\n" "$k" "${!k}"
         else printf '%s="%s"\n' "$k" "${!k}"; fi
     done
+    # Anything the user added by hand that this wizard does not know about.
+    #
+    # The header three lines up says "or edit by hand (KEY=value)". Taking that
+    # invitation and then having the next `vasp-configure` truncate the file
+    # back to the list above -- silently, with no diff and no warning -- is the
+    # kind of data loss you only notice when a job behaves differently for no
+    # visible reason. Keep them, and say they were kept.
+    if [[ -n "${_PRESERVED_KEYS:-}" ]]; then
+        echo
+        echo "# Kept from your hand-edited profile (vasp-configure does not manage these):"
+        for k in $_PRESERVED_KEYS; do
+            printf '%s=%s\n' "$k" "${_PRESERVED_VAL[$k]}"
+        done
+    fi
 } > "$CONF"
 
 info "${c_grn}Wrote $CONF${c_rst}"
@@ -957,6 +1040,7 @@ echo "    main partition  : $WP_MAIN_PARTITION  (${WP_MAIN_CPUS_PER_NODE} cores,
 echo "    debug partition : $WP_DEBUG_PARTITION  (${WP_DEBUG_CPUS_PER_NODE} cores, ${WP_DEBUG_MEM_PER_NODE_MB} MB/node)"
 echo "    max cores/job   : $WP_MAX_CORES"
 echo "    test walltime   : ${WP_TEST_WALLTIME_MIN} min   mem policy: >=${WP_MEM_UTIL_MIN} (target ${WP_MEM_UTIL})"
+echo "    chunk walltime  : ${WP_CHUNK_WALLTIME_MIN} min (margin ${WP_CHUNK_MARGIN_MIN} min)   -- one chunk of a chained relax/SCF"
 echo "    mem margins     : main ${WP_MAIN_MEM_MARGIN} (=$(awk -v m=$WP_MAIN_MEM_MARGIN 'BEGIN{printf "%.0f", (1-m)*100}')% usable)"\
 "   debug ${WP_DEBUG_MEM_MARGIN} (=$(awk -v m=$WP_DEBUG_MEM_MARGIN 'BEGIN{printf "%.0f", (1-m)*100}')% usable)"
 echo "    debug max cores : $WP_DEBUG_MAX_CORES"

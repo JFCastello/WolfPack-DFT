@@ -157,10 +157,26 @@ def _resolve_groups(cfg, bands_data, dos_data, structure, n_orb, grouping, eferm
             for line in contribution_table(ranking):
                 print("    " + line)
             print(f"      -> --projections \"{spec}\"")
+        # A method that needs EXACTLY k groups has to refuse when the system
+        # cannot supply k, the same way it refuses without --auto-projections.
+        # Warning and carrying on is how a two-colour figure of one physical
+        # quantity got drawn: the shortfall is a fact about the CELL, and no
+        # amount of ranking invents a distinction that is not there.
         if len(chosen) < n_needed:
+            _names = ", ".join(u["token"] for u in chosen) or "none"
+            if method in ("cmyk", "duo", "one_orbital"):
+                raise ValueError(
+                    f"--method {method} needs exactly {n_needed} projection "
+                    f"group(s), but this cell offers only {len(chosen)} "
+                    f"({_names}). Atoms that symmetry makes equivalent are one "
+                    f"group, not several. Give {n_needed} groups explicitly with "
+                    f'--projections, or use --method stacked (any number) or '
+                    f"--method one_orbital (exactly 1). Run --list to see what "
+                    f"this cell offers.")
             warnings.warn(
-                f"auto-projections wanted {n_needed} unit(s) but only "
-                f"{len(chosen)} carry weight; {method} may need more.")
+                f"auto-projections wanted {n_needed} unit(s) but this cell "
+                f"offers {len(chosen)} ({_names}); {method} will draw "
+                f"{len(chosen)}.")
 
     if spec:
         groups = parse_projection_spec(spec, structure, n_orb, grouping)
