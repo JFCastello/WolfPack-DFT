@@ -406,6 +406,7 @@ class Candidate:
     ntaupar: Optional[int] = None      # low-scaling: imaginary-time grid groups
     nomegapar: Optional[int] = None    # low-scaling: imaginary-frequency grid groups
     recommend_maxmem: bool = False     # whether the INCAR snippet should set MAXMEM
+    kpar_reachable: Optional[int] = None  # largest KPAR the hard rules allow here
 
     @property
     def sort_key(self) -> Tuple[float, int, int, int]:
@@ -1414,7 +1415,8 @@ def suggest_total_ranks(
 
 
 def kpar_terms(kpar: int, irr_k: Optional[int],
-               coverage_weight: float) -> Dict[str, float]:
+               coverage_weight: float,
+               kpar_reachable: Optional[int] = None) -> Dict[str, float]:
     """The VASP-wiki KPAR rules, as scoring terms.
 
     Two sentences from https://vasp.at/wiki/index.php/Optimizing_the_parallelization
@@ -1458,12 +1460,21 @@ def kpar_terms(kpar: int, irr_k: Optional[int],
     if idle > 1e-12:
         parts["kpar_does_NOT_factorise_nkpts"] = -60.0 * idle
 
-    # "increase KPAR up to the number of irreducible k points" -- saturating,
-    # because the same page warns that "the parallel efficiency of each level
-    # drops near its limit" and that "the k-point parallelization ... requires
-    # additional memory" (the memory terms below price that separately).
+    # "increase KPAR up to the number of irreducible k points" -- but measured
+    # against what is REACHABLE, not against NKPTS.
+    #
+    # KPAR must divide NKPTS and the rank count, and the rank count must fill
+    # whole nodes. Those three together often cap KPAR far below NKPTS: with
+    # NKPTS = 190 on 48-core nodes the largest legal KPAR is 10, because
+    # 190 = 2 x 5 x 19 shares only {1,2,5,10} with any multiple of 48 up to the
+    # cap. Scoring 10 as "10/190 of the way there" buries it under the
+    # band-parallelism terms and hands the job to KPAR = 1 -- the opposite of
+    # the wiki's first recommendation. A candidate at the ceiling the rules
+    # leave it deserves full marks for k-parallelism; the cost of that ceiling
+    # being low is reported separately, with the remedy.
+    _ceiling = kpar_reachable if (kpar_reachable and kpar_reachable > 0) else irr_k
     parts["kpar_kpoint_coverage"] = coverage_weight * math.sqrt(
-        min(1.0, kpar / float(irr_k))
+        min(1.0, kpar / float(max(1, _ceiling)))
     )
     return parts
 
@@ -1502,7 +1513,8 @@ def score_candidate(
 
     # "increase KPAR up to the number of irreducible k points.  Keep in mind
     # that KPAR should factorize the number of k points."  See kpar_terms().
-    parts.update(kpar_terms(candidate.kpar, irr_k, coverage_weight=18.0))
+    parts.update(kpar_terms(candidate.kpar, irr_k, coverage_weight=18.0,
+                            kpar_reachable=getattr(candidate, "kpar_reachable", None)))
 
     # Gamma-only / NKPTS = 1: KPAR must be 1.
     if summary.is_gamma_only and candidate.kpar != 1:
@@ -1533,12 +1545,19 @@ def score_candidate(
     else:
         parts["ncore_does_NOT_divide_cpus_per_node"] = -15.0
 
-    # Wiki recommendation (NCORE wiki page): NCORE ~ sqrt(available_ranks).
-    if rpk > 0 and candidate.ncore > 0:
+    # NPAR ~ sqrt(ranks per k-point group).
+    #
+    # Band parallelism is a square: NPAR groups each of NCORE ranks, with
+    # NPAR * NCORE = ranks per k-group. Communication is between the groups
+    # (Hamiltonian, orthonormalisation) and inside them (the FFTs), so the
+    # total is smallest when the two are balanced -- NPAR ~ NCORE ~ sqrt(rpk).
+    # Scored on NPAR rather than NCORE because NPAR is the quantity the
+    # optimum is stated for, and because NCORE is already pinned by the
+    # node/NUMA divisibility rule above.
+    if rpk > 0 and candidate.npar > 0:
         ideal = max(1, int(round(math.sqrt(rpk))))
-        delta = abs(candidate.ncore - ideal)
-        # Bell-shaped reward; ideal -> +12, drops off quickly.
-        parts["ncore_near_sqrt_available"] = 12.0 * math.exp(-delta * delta / 4.0)
+        delta = abs(candidate.npar - ideal)
+        parts["npar_near_sqrt_ranks_per_kgroup"] = 12.0 * math.exp(-delta * delta / 4.0)
 
     # NUMA-aware setting (NCORE wiki: "particularly good choice").
     if numa_cores and numa_cores > 0:
@@ -1750,19 +1769,54 @@ def build_candidates(
     # one node).
     ncore_cap = cpus_per_node
 
+    # The largest KPAR the hard rules leave reachable on THIS cluster for THIS
+    # k-point count: it must divide NKPTS and divide a rank count the machine
+    # can hand out whole. Computed once, so every candidate is scored against
+    # the same ceiling rather than against NKPTS, which may be unreachable.
+    kpar_reachable = 1
+    if irr_k and irr_k > 1 and not summary.is_gamma_only:
+        for _t in rank_choices:
+            for _k in positive_divisors(_t):
+                if _k <= irr_k and irr_k % _k == 0 and _k > kpar_reachable:
+                    kpar_reachable = _k
+
     candidates: List[Candidate] = []
     for total_ranks in rank_choices:
         ntasks_per_node = min(total_ranks, cpus_per_node)
         nodes = max(1, math.ceil(total_ranks / ntasks_per_node))
 
-        # KPAR enumeration: divisors of total_ranks; capped to NKPTS by default.
+        # ---- KPAR: the two divisibility rules are HARD ---------------------
+        #
+        # RULE 3  N_ranks % KPAR == 0
+        #   KPAR splits the ranks into k-point groups; they have to come out
+        #   equal. (https://vasp.at/wiki/KPAR: "choose KPAR such that it is an
+        #   integer divisor of the total number of cores".)
+        #
+        # RULE 2  NKPTS % KPAR == 0
+        #   "Keep in mind that KPAR should factorize the number of k points."
+        #   (https://vasp.at/wiki/Optimizing_the_parallelization)
+        #
+        #   This used to be priced as a penalty proportional to the resulting
+        #   idle time, on the argument that 1% waste is cheap. It is now a
+        #   REJECTION, because a rule that can be bought off is not a rule and
+        #   because the cases where it bites are the ones where it matters: the
+        #   uneven group is the one everything waits for, every electronic step,
+        #   for the whole run.
+        #
+        #   When nothing survives it -- NKPTS prime, or sharing no factor with
+        #   any rank count this cluster can hand out whole -- the tool says so
+        #   and points at the wiki's remedy (zero-weighted points in KPOINTS)
+        #   instead of quietly picking the least-bad violation.
         kpar_choices = positive_divisors(total_ranks)
         if summary.is_gamma_only:
-            kpar_choices = [1]
-        elif limit_kpar_to_irr and irr_k:
-            filtered = [k for k in kpar_choices if k <= max(1, irr_k)]
-            if filtered:
-                kpar_choices = filtered
+            kpar_choices = [1]                       # NKPTS = 1 forces it
+        else:
+            if irr_k and irr_k > 1:
+                kpar_choices = [k for k in kpar_choices if irr_k % k == 0]
+            if limit_kpar_to_irr and irr_k:
+                kpar_choices = [k for k in kpar_choices if k <= max(1, irr_k)]
+            if not kpar_choices:
+                continue                             # no legal KPAR here
 
         for kpar in kpar_choices:
             rpk = total_ranks // kpar
@@ -1773,11 +1827,24 @@ def build_candidates(
             if strict_ncore_one:
                 ncore_choices = [1]
             else:
+                # RULE 5  (N_ranks / KPAR) % NCORE == 0 -- divisors of rpk.
+                # RULE 4  NCORE must divide the node or the NUMA domain:
+                #   "Choose NCORE as a factor of the cores per node to avoid
+                #    communicating between nodes for the FFTs."
+                #   (https://vasp.at/wiki/Optimizing_the_parallelization)
+                # A band group that straddles a node boundary puts every FFT --
+                # the most frequent communication VASP does -- on the
+                # interconnect.
                 ncore_choices = [c for c in positive_divisors(rpk) if c <= ncore_cap]
+                ncore_choices = [c for c in ncore_choices
+                                 if cpus_per_node % c == 0
+                                 or (numa_cores and numa_cores % c == 0)]
                 # Cap to a sensible upper bound: 2x NUMA size, else cores/node.
                 if numa_cores and numa_cores > 0:
                     soft_cap = min(ncore_cap, 2 * numa_cores)
                     ncore_choices = [c for c in ncore_choices if c <= soft_cap]
+                if not ncore_choices:
+                    continue
 
             for ncore in ncore_choices:
                 npar = rpk // ncore
@@ -1820,6 +1887,7 @@ def build_candidates(
                             ntasks_per_node=ntasks_per_node,
                             cpu_bind="cores",
                             memory=memory,
+                            kpar_reachable=kpar_reachable,
                         )
                         score, parts = score_candidate(
                             summary=summary,
@@ -2072,7 +2140,8 @@ def score_gw_candidate(
     # Low-scaling GW/RPA shares the budget with NTAUPAR/NOMEGAPAR, scored
     # below, so its KPAR directive is weighted lower.
     parts.update(kpar_terms(candidate.kpar, irr_k,
-                            coverage_weight=20.0 if not low else 12.0))
+                            coverage_weight=20.0 if not low else 12.0,
+                            kpar_reachable=getattr(candidate, "kpar_reachable", None)))
 
     # ---- NCORE must be 1 for GW -----------------------------------------
     if candidate.ncore != 1:
@@ -2228,13 +2297,22 @@ def build_gw_candidates(
         ntasks_per_node = min(total_ranks, cpus_per_node)
         nodes = max(1, math.ceil(total_ranks / ntasks_per_node))
 
+        # The same two hard divisibility rules as the DFT path: KPAR divides
+        # the rank count AND factorizes NKPTS. This was the DFT builder's rule
+        # written out a second time, and it kept the old soft treatment -- so a
+        # GW run came out with NKPTS = 63 and KPAR = 2, which leaves one group
+        # short every pass. Whatever is true of k-point groups in DFT is true
+        # of them in GW, and more so: there the groups also hold chi and W.
         kpar_choices = positive_divisors(total_ranks)
         if summary.is_gamma_only:
             kpar_choices = [1]
-        elif limit_kpar_to_irr and irr_k:
-            filtered = [k for k in kpar_choices if k <= max(1, irr_k)]
-            if filtered:
-                kpar_choices = filtered
+        else:
+            if irr_k and irr_k > 1:
+                kpar_choices = [k for k in kpar_choices if irr_k % k == 0]
+            if limit_kpar_to_irr and irr_k:
+                kpar_choices = [k for k in kpar_choices if k <= max(1, irr_k)]
+            if not kpar_choices:
+                continue
 
         for kpar in kpar_choices:
             rpk = total_ranks // kpar          # ranks per k-point group
@@ -2806,8 +2884,14 @@ def print_best_candidate(
               "    (do NOT set both NCORE and NPAR)")
         print(f"NSIM                    : {candidate.nsim}")
         print(f"LPLANE                  : {format_bool(candidate.lplane)}")
+        # NBANDS is RAISED by VASP to a multiple of NPAR -- it does not warn,
+        # it just does it, and the padded bands cost memory and time like any
+        # other. Show what VASP will actually use.
+        _pad = candidate.effective_nbands - (summary.nbands or 0)
         print(f"effective NBANDS        : {candidate.effective_nbands}"
-              f"  (raw dry-run: {summary.nbands})")
+              f"  (dry run: {summary.nbands}"
+              + (f", VASP pads +{_pad} to reach a multiple of NPAR={candidate.npar}"
+                 if _pad > 0 else ", already a multiple of NPAR") + ")")
         print(f"bands per band-group    : {candidate.bands_per_group:.2f}")
     if low:
         print(f"NOMEGA                  : {candidate.nomega}")
