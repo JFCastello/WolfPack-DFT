@@ -190,6 +190,9 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from wolfpack_geometry import node_layout   # noqa: E402
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
@@ -1347,45 +1350,60 @@ def suggest_total_ranks(
     irr_kpoints: Optional[int],
     nbands: Optional[int],
 ) -> List[int]:
-    """Pick a smart, deduplicated set of total_ranks values to evaluate."""
+    """The rank counts this CLUSTER can actually give, largest first.
+
+    ==========================================================================
+    THE CLUSTER DECIDES THE SHAPE; THE PHYSICS DECIDES WHICH SHAPE
+    ==========================================================================
+    This used to work the other way round. It generated rank counts from the
+    physics -- multiples of NKPTS, NBANDS-friendly NPAR products, round numbers
+    from benchmark papers -- and left the node split to cope afterwards. On a
+    cluster of 48-core nodes that offered 190 ranks, because NKPTS was 190, and
+    190 ranks do not fill 48-core nodes. Everything downstream then had to
+    invent something: the geometry put one rank on each of 190 nodes, and the
+    job script claimed a --ntasks-per-node that was not true.
+
+    VASP is explicit that this is the wrong shape, not merely an awkward one:
+
+        "VASP assumes the ranks first fill up a node before the next node is
+         occupied... If the ranks are placed differently, communication between
+         the nodes occurs for every parallel FFT. Because FFTs are essential to
+         VASP's speed, this deteriorates the performance of the calculation."
+        -- https://vasp.at/wiki/Category:Parallelization, "MPI setup"
+
+    So the candidate rank counts are WHOLE NODES, full stop, plus the sub-node
+    sizes that still live inside one node for a small job. KPAR, NCORE and NPAR
+    are then chosen as divisors of a count the cluster can hand out whole --
+    which is the physics mapped onto the machine, rather than the machine asked
+    to contort around the physics.
+
+    `irr_kpoints` and `nbands` are no longer used to invent rank counts. They
+    still decide everything that matters: which KPAR, NCORE and NPAR to use
+    within each of these, scored by the wiki's rules.
+    """
+    cpn = max(1, int(cpus_per_node))
     out: set[int] = set()
 
-    # Full-node multiples
-    n = cpus_per_node
+    # Whole nodes.
+    n = cpn
     while n <= max_cores:
-        out.add(n)
-        n += cpus_per_node
+        if n >= min_cores:
+            out.add(n)
+        n += cpn
 
-    # Common fractions of a node (lets the small AMD-main jobs be evaluated)
-    for frac_div in (2, 4, 8, 16):
-        f = cpus_per_node // frac_div
+    # Sub-node sizes, for a job too small to earn a node. These never straddle
+    # a boundary, so the rule above is not violated.
+    f = cpn
+    while f > 1:
+        f //= 2
         if min_cores <= f <= max_cores:
             out.add(f)
 
-    # Multiples of NKPTS (so KPAR = NKPTS is a divisor of total_ranks)
-    if irr_kpoints and irr_kpoints > 1:
-        n = irr_kpoints
-        while n <= max_cores:
-            if n >= min_cores:
-                out.add(n)
-            n += irr_kpoints
-
-    # Round numbers commonly used in VASP benchmarks
-    for n in (8, 12, 16, 20, 24, 32, 40, 44, 48, 64, 80, 88, 96, 120, 128):
-        if min_cores <= n <= max_cores:
-            out.add(n)
-
-    # NPAR x KPAR style numbers with NBANDS-friendly NPAR values
-    if nbands:
-        for npar in (2, 4, 6, 8, 12, 16, 24, 32):
-            for kpar in (1, 2, 4, 8):
-                for ncore in (1, 2, 4, 8):
-                    t = npar * kpar * ncore
-                    if min_cores <= t <= max_cores:
-                        out.add(t)
-
-    if min_cores <= max_cores:
-        out.add(max_cores)
+    # If the cap is not a whole number of nodes, the largest usable count is
+    # the last whole node under it -- asking for the remainder would allocate
+    # the node anyway and leave part of it idle.
+    if not out and min_cores <= max_cores:
+        out.add(max(min_cores, min(max_cores, cpn)))
 
     return sorted(out)
 
@@ -2458,51 +2476,18 @@ def compute_request_geometry(candidate: "Candidate",
     # impossible (DFT KPAR=1 too big, or a single group larger than a node) fall back
     # to a plain memory split.
     kpar = max(1, int(getattr(candidate, "kpar", 1) or 1))
-    rpk = total // kpar if (kpar and total % kpar == 0) else 0
-    if total <= cap:                                        # whole job fits ONE node
-        nodes, ntpn = 1, total
-    elif rpk and rpk <= cap:
-        # Keep whole k-groups on a node -- but PACK AS MANY AS FIT, rather than
-        # giving each its own node.
-        #
-        # This used to read `nodes, ntpn = kpar, rpk`, i.e. exactly one k-group
-        # per node. That is right when a k-group is large (conventional GW,
-        # where splitting one means cross-node chi/W traffic) and catastrophic
-        # when it is small: at KPAR = NKPTS a group is a SINGLE RANK, so the
-        # rule asked for one node per rank. On a 190-k-point DFT run that came
-        # out as `--nodes=190 --ntasks-per-node=1` -- 9120 cores allocated to
-        # run 190, 38x the account's cap, and the job sat in the queue on
-        # AssocMaxNodePerJobLimit. A group cannot straddle a boundary it never
-        # reaches, so the constraint is only that a node hold a WHOLE number of
-        # groups.
-        groups_per_node = max(1, cap // rpk)
-        nodes = math.ceil(kpar / groups_per_node)
-        ntpn = min(cap, math.ceil(total / nodes))
-    else:                                                   # memory-only fallback
-        ntpn = min(cpn, total, cap)
-        nodes = math.ceil(total / ntpn)
-        ntpn = min(cpn, math.ceil(total / nodes))           # even fill across nodes
 
-    # ---- ACCOUNT CAP, measured in ALLOCATED cores -------------------------
-    # The cap the user configured is on cores, and SLURM hands out WHOLE nodes:
-    # a job on N nodes is charged N * cpus_per_node whatever --ntasks says. The
-    # tool used to check the cap against the RANK count only, so a layout that
-    # spread 190 ranks over 190 nodes looked like "190 of 240" while actually
-    # asking for 9120 cores. Check the real thing, and pack densely if the
-    # group-aligned layout cannot pay for itself.
-    # The cap travels in partition_info so every caller gets it without having
-    # to remember to pass it; the explicit argument overrides.
+    # The layout comes from wolfpack_geometry.node_layout, which vasp-test's
+    # helper uses too. It was written out here AND there, and the two copies
+    # were wrong in the same way -- so fixing this one left the DEFINITIVE
+    # script (slurm_vasptest.sh, the one the pipeline says to submit) still
+    # asking for one node per MPI rank.
     if max_cores is None:
         try:
             max_cores = int(partition_info.get("max_cores") or 0) or None
         except (TypeError, ValueError):
             max_cores = None
-    if max_cores and nodes * cpn > max_cores:
-        dense_ntpn = max(1, min(cpn, cap))
-        dense_nodes = math.ceil(total / dense_ntpn)
-        if dense_nodes * cpn <= max_cores or dense_nodes < nodes:
-            nodes = dense_nodes
-            ntpn = min(cpn, math.ceil(total / nodes))
+    nodes, ntpn = node_layout(total, kpar, cpn, usable, usage, max_cores=max_cores)
 
     # Size the request: the mem_util sizing, but trimmed so ntpn ranks fit the node
     # (keeps the whole-group layout rather than adding a node). Stays in
@@ -2906,6 +2891,41 @@ def print_best_candidate(
             print("     measures the real per-rank RSS and that value is the one")
             print("     that goes into the definitive job script.")
         print()
+
+    # The wiki's own tip for exactly this situation. Worth saying out loud,
+    # because it is the only way out and it is not obvious:
+    #
+    #   "If the number of k points is a prime number (or does not factorize
+    #    well), copy the IBZKPT file to KPOINTS and add zero-weigthed points."
+    #   -- https://vasp.at/wiki/Optimizing_the_parallelization
+    #
+    # It fires when NO rank count this cluster can hand out whole has a KPAR
+    # that divides NKPTS exactly. 190 k-points on 48-core nodes is that case:
+    # 190 = 2 x 5 x 19 shares only a factor 2 with any multiple of 48, so every
+    # usable KPAR leaves the k-point groups uneven and some ranks idle at the
+    # end of each pass.
+    _irr = summary.irr_kpoints or summary.nkpts
+    _cpn = int(partition_info.get("cpus_per_node") or 0)
+    if (_irr and _irr > 1 and candidate.calc_type == "DFT"
+            and candidate.kpar > 1 and _irr % candidate.kpar != 0):
+        _idle = 100.0 * (1.0 - _irr / (math.ceil(_irr / candidate.kpar)
+                                       * candidate.kpar))
+        print("[K-POINT COUNT]  the chosen KPAR does not divide NKPTS exactly")
+        print(f"  NKPTS = {_irr}, KPAR = {candidate.kpar}: the k-points go out "
+              f"round-robin, so the")
+        print(f"  busiest group gets {math.ceil(_irr / candidate.kpar)} of them "
+              f"and every other group waits for it --")
+        print(f"  {_idle:.1f}% of the allocated core-time buys nothing.")
+        if _cpn:
+            print(f"  This cluster hands out whole nodes of {_cpn} cores, so every "
+                  f"rank count it can")
+            print(f"  give is a multiple of {_cpn}, and no KPAR dividing one of "
+                  f"those factorizes {_irr}.")
+            print("  The VASP wiki's way out, if that matters for your run:")
+            print("     cp IBZKPT KPOINTS     # then add zero-weighted points")
+            print("  until NKPTS factorizes over the rank counts above.")
+            print("  (https://vasp.at/wiki/Optimizing_the_parallelization)")
+            print()
 
     print("[WHY]  (top score contributions)")
     for line in candidate.reasons:

@@ -338,7 +338,17 @@ if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
         echo "#SBATCH --partition=${part}"
         echo "#SBATCH --nodes=${tnodes}"
         echo "#SBATCH --ntasks=${tr}"
-        echo "#SBATCH --ntasks-per-node=${tntpn}"
+        # Only when nodes x ntasks-per-node is exactly the rank count. This is
+        # the line that produced "srun: warning: can't honor --ntasks-per-node
+        # set to 48 which doesn't match the requested tasks 190 with the number
+        # of requested nodes 4. Ignoring --ntasks-per-node." -- and SLURM then
+        # allocated 192 CPUs for 190 ranks. The recommender was taught this;
+        # the benchmark script, written here, was not.
+        if (( tnodes * tntpn == tr )); then
+            echo "#SBATCH --ntasks-per-node=${tntpn}"
+        else
+            echo "# no --ntasks-per-node: ${tr} ranks do not divide evenly over ${tnodes} node(s)"
+        fi
         echo "#SBATCH --cpus-per-task=1"
         echo "#SBATCH --mem-per-cpu=${mempc}"
         echo "#SBATCH --time=${ttime}"
@@ -752,6 +762,7 @@ HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
     --prod-ranks "$PROD_RANKS" --prod-kpar "$FIX_KPAR" --prod-ncore "$FIX_NCORE" \
     --prod-npar "$FIX_NPAR" --prod-nsim "$FIX_NSIM" \
     --prod-partition "$PROD_PARTITION" --cpus-per-node "$PROD_CPN" \
+    --max-cores "${WP_MAX_CORES:-0}" \
     --node-mem-mb "$PROD_NODE_MEM" --mem-util "$MEM_UTIL" \
     --pred-peak-mb "${pred_mem_per_rank:-0}" --pred-flat-mb "${pred_flat_mb:-0}" \
     --pred-mem-per-cpu "${mem_per_cpu:-0}" --pred-nodes "${pred_nodes:-0}" --pred-ntpn "${pred_ntpn:-0}" \

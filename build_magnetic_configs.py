@@ -500,7 +500,31 @@ def enumerate_magnetic(args):
 
     # ---- moment magnitudes ----------------------------------------------
     incar_path = root / "INCAR"
+    # NO INCAR IS A HARD ERROR, not a default.
+    #
+    # Every configuration folder gets a copy of this file, so without it each
+    # one carries a two-line INCAR -- ISPIN and MAGMOM and nothing else. That
+    # is not a reduced calculation, it is a DIFFERENT one: no ENCUT, no
+    # functional, no convergence criteria, no ionic block. A METAGGA=R2SCAN
+    # relaxation silently becomes a default-cutoff PBE static run, and the only
+    # sign is that the folders look complete.
+    #
+    # It has already happened once, to an INCAR misnamed `INACAR`. A typo in a
+    # filename should not cost a week of compute, so say so here rather than
+    # let the folders carry the omission.
+    if not incar_path.is_file() and not args.no_incar:
+        _near = sorted(x.name for x in root.iterdir()
+                       if x.is_file() and x.name.upper().replace("A", "") == "INCR")
+        sys.exit("error: no INCAR in this directory.\n"
+                 "       Every configuration folder is built from it -- without one they\n"
+                 "       would carry only ISPIN and MAGMOM, and run a calculation you did\n"
+                 "       not ask for (no ENCUT, no functional, no ionic block).\n"
+                 + (f"\n       Did you mean: {', '.join(_near)} ?\n" if _near else "")
+                 + "\n       Put your INCAR here, or pass --no-incar to accept a minimal one.")
     incar_text = incar_path.read_text() if incar_path.is_file() else ""
+    if not incar_text:
+        print("note: no INCAR -- every folder will carry only ISPIN and MAGMOM "
+              "(--no-incar was given).", file=sys.stderr)
     magnitudes, mag_src = None, "pymatgen defaults (high-spin)"
     if incar_text:
         try:
@@ -745,6 +769,11 @@ def main():
                    help="Treat exactly these elements as magnetic, e.g. 'V,Fe'. "
                         "Default: every element pymatgen has a default moment "
                         "for.")
+    p.add_argument("--no-incar", action="store_true",
+                   help="Proceed without an INCAR. Each folder then gets a "
+                        "minimal one -- ISPIN and MAGMOM only -- which is a "
+                        "DIFFERENT calculation from anything you have set up. "
+                        "Only useful if you intend to write the INCARs yourself.")
     p.add_argument("--max-orderings", type=int, default=64, metavar="N",
                    help="Cap on how many orderings to enumerate. Default: 64 "
                         "(pymatgen's own).")

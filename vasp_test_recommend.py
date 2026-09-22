@@ -33,6 +33,11 @@ import re
 import sys
 from pathlib import Path
 
+# The node layout lives in one file so it cannot diverge again -- see the note
+# at the top of wolfpack_geometry.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from wolfpack_geometry import node_layout, ntasks_per_node_line   # noqa: E402
+
 
 # --------------------------------------------------------------------------- #
 # OUTCAR memory breakdown (for the test -> production scaling)
@@ -167,7 +172,7 @@ def round_up(x, step=50):
 
 
 def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
-             gw_node_frac=0.0):
+             gw_node_frac=0.0, max_cores=None):
     """(mem_per_cpu, nodes, ntasks_per_node) keeping WHOLE k-point groups on a node.
 
     Sizes the request for >= mem_util utilisation, but the per-node ceiling comes
@@ -179,18 +184,15 @@ def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
     one group does not fit a node even at full usage (KPAR=1, or a huge group)."""
     usable = max(int(math.ceil(prod_use)), node_mem - max(reserve, 0))
     desired = max(200, round_up(prod_use / max(mem_util, 0.05)))
-    by_use = max(1, usable // max(int(math.ceil(prod_use)), 1))   # ranks/node at REAL usage
-    cap = max(1, min(cpn, by_use))
-    kpar = max(1, int(kpar or 1))
-    rpk = total // kpar if (kpar and total % kpar == 0) else 0
-    if total <= cap:                                  # whole job fits ONE node
-        nodes, ntpn = 1, total
-    elif kpar > 1 and rpk and rpk <= cap:             # split across KPAR nodes (one group/node)
-        nodes, ntpn = kpar, rpk
-    else:                                             # memory-only fallback
-        ntpn = min(cpn, total, cap)
-        nodes = max(1, math.ceil(total / ntpn))
-        ntpn = min(cpn, math.ceil(total / nodes))
+
+    # The layout comes from wolfpack_geometry.node_layout -- the SAME function
+    # vasp-recommend-slurm uses. It used to be a second copy of the rule living
+    # here, which is how the "one node per rank" bug survived being fixed: the
+    # first-pass slurm.sh came out right and slurm_vasptest.sh -- the one this
+    # file writes, and the one the pipeline tells you to submit -- kept asking
+    # for 190 nodes to run 190 ranks.
+    nodes, ntpn = node_layout(total, kpar, cpn, usable, prod_use,
+                              max_cores=max_cores)
     fit_req = usable // max(ntpn, 1)
     mem_per_cpu = max(200, min(desired, max(int(math.ceil(prod_use)), (fit_req // 50) * 50)))
     # GW SWEET raise: grow the request to the queue-friendly node share (gw_node_frac,
@@ -210,7 +212,7 @@ def _sub(text, pattern, repl):
     return re.sub(pattern, repl, text, count=1, flags=re.MULTILINE)
 
 
-def update_slurm(path, mem_per_cpu, nodes, ntpn):
+def update_slurm(path, mem_per_cpu, nodes, ntpn, total_ranks=0):
     """Rewrite the production slurm.sh memory/geometry in place."""
     try:
         t = Path(path).read_text()
@@ -218,7 +220,16 @@ def update_slurm(path, mem_per_cpu, nodes, ntpn):
         return False
     t = _sub(t, r"^#SBATCH --mem-per-cpu=.*$", f"#SBATCH --mem-per-cpu={mem_per_cpu}")
     t = _sub(t, r"^#SBATCH --nodes=.*$", f"#SBATCH --nodes={nodes}")
-    t = _sub(t, r"^#SBATCH --ntasks-per-node=.*$", f"#SBATCH --ntasks-per-node={ntpn}")
+    # --ntasks-per-node only when nodes x ntpn is exactly the rank count; the
+    # line the recommender leaves behind may be either a directive or the
+    # comment explaining its absence, so replace whichever is there.
+    line = ntasks_per_node_line(nodes, ntpn, total_ranks or nodes * ntpn)
+    if re.search(r"^#SBATCH --ntasks-per-node=.*$", t, flags=re.MULTILINE):
+        t = _sub(t, r"^#SBATCH --ntasks-per-node=.*$", line)
+    elif re.search(r"^# no --ntasks-per-node:.*$", t, flags=re.MULTILINE):
+        t = _sub(t, r"^# no --ntasks-per-node:.*$", line)
+    else:
+        t = _sub(t, r"^#SBATCH --nodes=.*$", f"#SBATCH --nodes={nodes}\n{line}")
     if "updated by vasp-test" not in t:
         t = t.replace("#!/bin/bash\n",
                       "#!/bin/bash\n# (memory updated by vasp-test from a real "
@@ -282,6 +293,10 @@ def main():
     p.add_argument("--prod-partition", default="main")
     p.add_argument("--cpus-per-node", type=int, required=True)
     p.add_argument("--node-mem-mb", type=int, required=True)
+    p.add_argument("--max-cores", type=int, default=0,
+                   help="Account core cap. Checked against ALLOCATED cores "
+                        "(nodes x cpus-per-node), which is what SLURM charges, "
+                        "not the rank count.")
     p.add_argument("--mem-util", type=float, default=0.80)
     # GW: the benchmark only reaches the FLAT phase and CANNOT measure the GW floor, so
     # we use VASP's own reported requirement (--gw-floor-mb / parsed from OUTCAR) or an
@@ -451,6 +466,7 @@ def main():
         prod_use = flat_use
     mem_per_cpu, nodes, ntpn = geometry(args.prod_ranks, args.cpus_per_node,
                                         prod_use, args.node_mem_mb,
+                                        max_cores=args.max_cores,
                                         mem_util=args.mem_util, kpar=args.prod_kpar,
                                         gw_node_frac=(args.gw_node_frac if args.gw else 0.0))
     # GW feasibility at the MEASURED memory: a whole k-group must fit one node. If
@@ -728,10 +744,13 @@ def main():
               f"ref_kpar={args.prod_kpar}")
         return 7
 
-    if args.update_slurm and update_slurm(args.update_slurm, mem_per_cpu, nodes, ntpn):
+    if args.update_slurm and update_slurm(args.update_slurm, mem_per_cpu, nodes,
+                                      ntpn, args.prod_ranks):
         print(f"\n[FILES] updated production memory in {args.update_slurm} "
               f"-> --mem-per-cpu={mem_per_cpu}, --nodes={nodes}, "
-              f"--ntasks-per-node={ntpn}")
+              + (f"--ntasks-per-node={ntpn}" if nodes * ntpn == args.prod_ranks
+                 else f"{args.prod_ranks} ranks over {nodes} node(s) "
+                      f"(no --ntasks-per-node: it would not be true)"))
     if args.gw and args.incar and write_incar_maxmem(args.incar, maxmem):
         print(f"[FILES] wrote MAXMEM={maxmem} into {args.incar} (backup INCAR.bak)")
     return 0
