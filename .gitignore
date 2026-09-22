@@ -126,6 +126,13 @@ slurm_vasptest.sh
 # ============================================================================
 Test/
 **/Test/
+
+# The local test harness: a SLURM testbed, its fixtures, and the checks that
+# run against it. Kept out of the repository at the user's request -- it lives
+# on the machine that runs it, not in the published tree.
+tests/
+**/tests/
+
 POTCAR
 **/POTCAR
 POTCAR.spin
