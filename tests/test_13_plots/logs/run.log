@@ -1,0 +1,11 @@
+  [32m[ OK ][0m a directory with no VASP output is refused, and says what it needs
+  [32m[ OK ][0m the reference calculation finished
+  [32m[ OK ][0m the plotter left no traceback
+  [32m[ OK ][0m figures were written (4 png)
+  [32m[ OK ][0m every figure is a real, non-empty PNG
+  [32m[ OK ][0m the band structure the plotter reads has Si's published PBE gap  (0.573 vs 0.6 +/- 0.25)
+      (the plotter printed no gap to cross-check)
+  [32m[ OK ][0m E_F is read from the vasprun.xml alone, with no OUTCAR to fall back on  (6.0288 vs 6.0288 +/- 0.001)
+  [32m[ OK ][0m a bands-only folder does not crash the plotter
+  [32m[ OK ][0m a bands-only folder really produces figures, not just an absence of tracebacks (4 png)
+  [32m[ OK ][0m --auto-projections without a DOS refuses, and says what to do instead

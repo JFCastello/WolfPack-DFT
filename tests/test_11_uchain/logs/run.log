@@ -1,0 +1,10 @@
+      VASP tutorial: chi_0 = 0.50, chi = 0.12  ->  U = 6.33 eV
+  [32m[ OK ][0m U reproduces the VASP tutorial's own worked example  (6.333 vs 6.33 +/- 0.02)
+  [32m[ OK ][0m U is positive, as the tutorial's arithmetic gives
+  [32m[ OK ][0m the non-self-consistent response is reported  (0.500000 vs 0.50 +/- 0.005)
+  [32m[ OK ][0m the self-consistent response is reported  (0.120000 vs 0.12 +/- 0.005)
+  [32m[ OK ][0m a missing U_data.dat is refused with a message, not a traceback
+  [32m[ OK ][0m a single data point cannot give a slope, and is refused
+  [32m[ OK ][0m a zero response does not print an infinite U
+  [32m[ OK ][0m a malformed U_data.dat is refused
+  [32m[ OK ][0m collect-u-data refuses where there is nothing to collect

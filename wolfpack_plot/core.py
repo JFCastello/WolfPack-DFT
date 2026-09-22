@@ -141,9 +141,28 @@ def _resolve_groups(cfg, bands_data, dos_data, structure, n_orb, grouping, eferm
     if not spec and auto_n > 0:
         fixed = METHOD_N_UNITS.get(method)
         n_needed = fixed if fixed else auto_n
-        chosen, level, ranking = auto_select_units(
-            dos_data["cdos"], efermi, cfg.emin, cfg.emax, structure, grouping,
-            n_needed, symprec=getattr(cfg, "symprec", SYMPREC))
+        # WHERE THE RANKING WEIGHTS COME FROM: the DOS, and only the DOS.
+        # Reaching into dos_data["cdos"] without checking it exists is what
+        # killed five of the six quick plots in a bands-only folder, with
+        # "'NoneType' object is not subscriptable".
+        if dos_data is not None:
+            chosen, level, ranking = auto_select_units(
+                dos_data["cdos"], efermi, cfg.emin, cfg.emax, structure,
+                grouping, n_needed, symprec=getattr(cfg, "symprec", SYMPREC))
+        else:
+            # No DOS in this folder. Ranking the units from the BAND
+            # projections instead was tried and rejected: measured on a folder
+            # that has both, the band-derived ranking calls diamond silicon
+            # "Si-d" where the DOS calls it "Si-p". Substituting a measure that
+            # disagrees with the one it replaces would be this tool deciding
+            # the physics, so it refuses and says what to do instead.
+            raise ValueError(
+                "--auto-projections ranks the projection groups by their "
+                "weight in the energy window, and this folder has no DOS to "
+                "rank them by (KPOINTS is line-mode; there is no DOSCAR or "
+                "<dos> block).\n"
+                "Either name the groups explicitly with --projections, or run "
+                "the plotter in a folder that also holds the DOS run.")
         if not chosen:
             raise ValueError(
                 "auto-projection selection found no projected weight in the "

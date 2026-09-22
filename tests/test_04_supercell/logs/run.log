@@ -1,0 +1,9 @@
+  [32m[ OK ][0m Si 2x2x2: 2 sites -> 16 (x8)
+  [32m[ OK ][0m Si 2x2x2: volume is exactly 8x the primitive (320.3830)
+  [32m[ OK ][0m MgO 1x1x3: 2 sites -> 6 (x3, not x27)
+  [32m[ OK ][0m MgO 1x1x3: volume is exactly 3x (56.0436)
+  [32m[ OK ][0m Fe 1x1x1: the identity leaves 1 site
+  [32m[ OK ][0m a zero multiplier is refused
+  [32m[ OK ][0m a negative multiplier is refused
+  [32m[ OK ][0m a missing POSCAR is refused, by name
+  [32m[ OK ][0m a file that is not a POSCAR is refused

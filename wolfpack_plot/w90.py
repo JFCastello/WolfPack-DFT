@@ -182,7 +182,9 @@ def resolve_w90_fermi(folder, win, explicit=None):
         if vx.is_file():
             try:
                 from pymatgen.io.vasp.outputs import Vasprun
-                v = Vasprun(str(vx), parse_dos=False, parse_eigen=False,
+                # parse_dos stays on: pymatgen only sets Vasprun.efermi
+                # while parsing the <dos> block (see wolfpack_plot/vaspio.py).
+                v = Vasprun(str(vx), parse_eigen=False,
                             parse_projected_eigen=False, parse_potcar_file=False)
                 if v.efermi is not None:
                     return float(v.efermi), f"VASP {vx}"

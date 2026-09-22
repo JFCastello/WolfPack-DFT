@@ -1,0 +1,12 @@
+  [32m[ OK ][0m a profile is generated where none existed
+  [32m[ OK ][0m the generated profile carries the expected settings (27)
+  [32m[ OK ][0m a flag sets the value it names
+  [32m[ OK ][0m a flag changes NOTHING but the value it names
+  [32m[ OK ][0m a hand-added setting survives a full regeneration
+  [32m[ OK ][0m the chunk walltime can be set from the configuration tool
+  [32m[ OK ][0m --show reads back the value that was written
+  [32m[ OK ][0m --max-cores 0 does not end up in the profile (got '240')
+  [32m[ OK ][0m --max-cores -8 does not end up in the profile (got '240')
+  [32m[ OK ][0m --max-cores abc does not end up in the profile (got '240')
+  [32m[ OK ][0m an empty module list is accepted and stored empty
+  [32m[ OK ][0m --vasp-modules does not swallow the following flag

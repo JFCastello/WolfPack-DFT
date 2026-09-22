@@ -126,11 +126,42 @@ def _raw_title(poscar_path):
 
 
 def parse_scaling(values):
-    """Return a scaling spec from 3 ints (diagonal) or 9 ints (row-major 3x3)."""
+    """Return a scaling spec from 3 ints (diagonal) or 9 ints (row-major 3x3).
+
+    Rejects specifications that are not supercells. A DIAGONAL entry of zero
+    collapses a lattice vector -- the transformation matrix is singular and
+    pymatgen raises LinAlgError from somewhere deep inside numpy. A NEGATIVE
+    entry is worse, because it works: diag(2, -1, 2) has determinant -4 and
+    builds a MIRRORED 8-atom cell that is reported as "natoms=8 (x4)" with no
+    hint that the handedness was flipped. Nobody asks for -1 on purpose; a
+    mistyped "2 -1 2" is what produces it.
+
+    A full 3x3 may legitimately have negative entries -- that is how a
+    non-diagonal supercell is written -- so only its DETERMINANT is checked.
+    """
     if len(values) == 3:
+        bad = [v for v in values if v < 1]
+        if bad:
+            raise ValueError(
+                f"--scaling must be positive integers; got {list(values)}. "
+                "A zero collapses a lattice vector and a negative one mirrors "
+                "the cell -- neither is a supercell.")
         return list(values)
     if len(values) == 9:
-        return [values[0:3], values[3:6], values[6:9]]
+        m = [values[0:3], values[3:6], values[6:9]]
+        det = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+               - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+               + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+        if det == 0:
+            raise ValueError(
+                f"the 3x3 transformation {m} is singular (determinant 0): it "
+                "collapses the cell rather than enlarging it.")
+        if det < 0:
+            raise ValueError(
+                f"the 3x3 transformation {m} has determinant {det}, which "
+                "mirrors the cell. A supercell transformation must have a "
+                "positive determinant.")
+        return m
     raise ValueError("--scaling expects 3 ints (na nb nc) or 9 ints (3x3 row-major)")
 
 
@@ -170,7 +201,15 @@ def main():
         sys.exit(f"error: {e}")
 
     # Poscar (not Structure.from_file) preserves selective dynamics, velocities, comment
-    poscar_in = Poscar.from_file(str(args.poscar), check_for_potcar=False)
+    try:
+        poscar_in = Poscar.from_file(str(args.poscar), check_for_potcar=False)
+    except Exception as exc:                                   # noqa: BLE001
+        # pymatgen raises whatever its parser hits -- IndexError, ValueError,
+        # UnicodeDecodeError -- and a traceback tells the user nothing about
+        # which of their files is the problem.
+        sys.exit(f"error: '{args.poscar}' could not be read as a POSCAR "
+                 f"({type(exc).__name__}: {exc}).\n"
+                 "       Expected a VASP 4 or 5 POSCAR/CONTCAR.")
     structure = poscar_in.structure
     n0, v0 = len(structure), structure.volume
 

@@ -1,0 +1,7 @@
+  [32m[ OK ][0m the module's own regression cases still hold
+  [32m[ OK ][0m 2025 layouts swept, every one satisfies all five invariants
+  [32m[ OK ][0m KPAR = NKPTS does not mean one node per rank (4 nodes for 190 ranks, not 190)
+  [32m[ OK ][0m the 240-core cap is checked against CORES, not ranks (192 cores)
+  [32m[ OK ][0m whole k-groups are packed onto a node, not spread one per node (3 nodes for 144 ranks)
+  [32m[ OK ][0m no --ntasks-per-node is claimed when 190 ranks do not divide over 4 nodes
+  [32m[ OK ][0m and the script says WHY the directive is absent, instead of leaving a gap

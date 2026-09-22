@@ -1,0 +1,11 @@
+  [32m[ OK ][0m a missing INCAR is refused, and the message names it
+  [32m[ OK ][0m a missing POSCAR is refused, and the message names it
+  [32m[ OK ][0m a missing KPOINTS is refused, and the message names it
+  [32m[ OK ][0m a missing POTCAR is refused, and the message names it
+  [32m[ OK ][0m a zero-byte POSCAR is refused, not treated as present
+  [32m[ OK ][0m stage 1 submitted and returned
+  [32m[ OK ][0m stage 1 captured the dry-run OUTCAR
+  [32m[ OK ][0m stage 1 does not claim a memory table it does not have
+  [32m[ OK ][0m the OUTCAR carries NKPTS, which stage 2 needs (29)
+  [32m[ OK ][0m the OUTCAR carries NBANDS (8)
+  [32m[ OK ][0m stage 1 really ran a dry run, not a calculation

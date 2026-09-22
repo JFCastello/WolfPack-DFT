@@ -1,0 +1,12 @@
+  [32m[ OK ][0m run-nscf-steps refuses without the LDAU templates
+  [32m[ OK ][0m a LDAUU template with no {alpha} placeholder is refused
+  [32m[ OK ][0m a missing ground-state directory is refused by name
+  [32m[ OK ][0m an NSCF template without ICHARG=11 is refused
+  [32m[ OK ][0m run-scf-steps refuses before run-nscf-steps has been run
+  [32m[ OK ][0m one folder per alpha was prepared (4 for 4 alphas)
+  [32m[ OK ][0m each alpha folder carries its own LDAUU/LDAUJ and keeps ICHARG=11
+  [32m[ OK ][0m the self-consistent step prepared its four folders (4)
+  [32m[ OK ][0m the SCF step does NOT freeze the charge density
+  [32m[ OK ][0m collect-u-data read the perturbed OUTCARs
+  [32m[ OK ][0m one row per alpha in U_data.dat (4)
+  [32m[ OK ][0m the workflow end to end reproduces the tutorial's U  (6.333 vs 6.33 +/- 0.15)

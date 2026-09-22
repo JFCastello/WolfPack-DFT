@@ -126,6 +126,36 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "ERROR: sbatch not found. Run this on a cluster login node." >&2
         exit 1
     fi
+    # The four inputs are sitting right here. Checking that they EXIST and are
+    # not empty costs nothing, and without it this stage cheerfully submits a
+    # job that cannot start: the user is told "Submitted batch job 14", gets
+    # exit status 0, and finds out from the queue. A zero-byte file passes
+    # every [[ -f ]] test ever written, so -s is the test that matters.
+    #
+    # Only PRESENCE is checked. What is inside them is the user's physics and
+    # none of this script's business.
+    _missing=()
+    for _f in INCAR POSCAR KPOINTS POTCAR; do
+        [[ -s "$_f" ]] || _missing+=("$_f")
+    done
+    if (( ${#_missing[@]} )); then
+        {
+            echo "ERROR: cannot run a dry run here -- missing or empty: ${_missing[*]}"
+            for _f in "${_missing[@]}"; do
+                if [[ -e "$_f" ]]; then echo "         $_f exists but is empty (0 bytes)"
+                else                    echo "         $_f is not in $(pwd)"; fi
+            done
+            # The mistake that produced this check was a file called INACAR.
+            for _f in "${_missing[@]}"; do
+                for _near in $(ls 2>/dev/null); do
+                    [[ "$_near" != "$_f" && "${#_near}" -ge 5 && "${_near^^}" == *"${_f:0:2}"*"${_f: -2}"* ]] \
+                        && echo "         did you mean '$_near'?" && break
+                done
+            done
+            echo "       Nothing was submitted."
+        } >&2
+        exit 2
+    fi
     part="${WP_DEBUG_PARTITION:-debug}"
     # A non-collinear / spin-orbit run needs the vasp_ncl binary: vasp_std cannot
     # do it. vasp-configure asks for WP_VASP_NCL and saved it, but nothing ever

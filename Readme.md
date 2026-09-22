@@ -234,9 +234,11 @@ and writes the production job to **`slurm.sh`**.
 > | `NTAUPAR`/`NOMEGAPAR` | — | G4 divisors of `NOMEGA`; G5 their product divides the k-group |
 > | what decides | k-point coverage | **G6 — the k-group holds χ and W and must fit memory** |
 >
-> `vasp-check` makes the same split when auditing a finished run. A test
-> (`tests/checks/regime_separation.py`) fails if either path calls the other's
-> rule functions.
+> `vasp-check` makes the same split when auditing a finished run.
+> [`tests/test_08_recommend/`](tests/test_08_recommend/) sweeps the recommender
+> over k-point counts, calculation types and core caps and checks every
+> recommendation against the rules of **its own** regime: 32 recommendations,
+> 0 violations.
 
 `slurm.sh` carries:
 
@@ -684,6 +686,43 @@ wolfpack --list        # one-line list of every installed command
 wolfpack --where       # print the toolkit directory
 wolfpack --help | less # paginate
 ```
+
+---
+
+## 8. The test suite
+
+`tests/` holds 23 tests, and they ship with the toolkit so you can see what is
+actually checked rather than take a claim on trust.
+
+```bash
+tests/run_all.sh                    # everything, in order
+tests/run_all.sh test_13_plots      # one test
+tests/run_all.sh --list             # what there is
+```
+
+Each `tests/test_NN_*/README.md` states the test, why it exists, the expected
+result **with the published source it is contrasted against**, the result
+obtained, the pass/fail criterion and the verdict. `tests/test_NN_*/logs/run.log`
+is the evidence of the last run.
+
+Where a test asserts a physical number, that number is traced to a source: the
+VASP wiki and its tutorials, or a paper. A few of them:
+
+| test | quantity | measured | published |
+|---|---|---|---|
+| `test_20_u_workflow` | linear-response U, the whole four-step flow | 6.333 eV | 6.33 eV ([VASP wiki](https://vasp.at/wiki/Calculate_U_for_LSDA%2BU)) |
+| `test_18_vasp_check` | Si indirect gap | 0.5975 eV | ≈0.6 eV PBE/PAW |
+| `test_18_vasp_check` | Al | 0.000 eV | metal, no gap |
+| `test_01_cases` | bcc Fe moment | 2.241 μB | 2.2 μB PBE, 2.22 exp. |
+| `test_17_vasp_tutorial_magnetism` | hcp Co moment | 1.576 μB/Co | [VASP magnetism tutorial](https://www.vasp.at/tutorials/latest/magnetism/part1/) |
+| `test_16_chain_live` | chunked vs one long relaxation | \|dE\| = 1e-06 eV | identical, by construction |
+
+The live tests need a SLURM to submit to. `tests/slurm_testbed.sh` builds one
+in `/tmp/wpslurm`; without it those tests skip rather than fail. **No POTCAR is
+included** — they are licensed and may not be redistributed. The tests read
+yours from `$WP_POTCAR_DIR`, and skip cleanly when a potential is absent.
+
+The whole suite runs in about 13 minutes on an 8-core laptop.
 
 ---
 

@@ -1,0 +1,38 @@
+  [32m[ OK ][0m k72 NKPTS=72 dft cap=48 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k72 NKPTS=72 dft cap=96 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k72 NKPTS=72 dft cap=240 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k72 NKPTS=72 gw cap=48 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k72 NKPTS=72 gw cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k72 NKPTS=72 gw cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+      k72 NKPTS=72 gw-low cap=48: refused (no candidate) -- not a rule violation
+  [32m[ OK ][0m k72 NKPTS=72 gw-low cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k72 NKPTS=72 gw-low cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k63 NKPTS=63 dft cap=48 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k63 NKPTS=63 dft cap=96 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k63 NKPTS=63 dft cap=240 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m k63 NKPTS=63 gw cap=48 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k63 NKPTS=63 gw cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k63 NKPTS=63 gw cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+      k63 NKPTS=63 gw-low cap=48: refused (no candidate) -- not a rule violation
+  [32m[ OK ][0m k63 NKPTS=63 gw-low cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m k63 NKPTS=63 gw-low cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m gamma NKPTS=1 dft cap=48 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m gamma NKPTS=1 dft cap=96 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m gamma NKPTS=1 dft cap=240 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m gamma NKPTS=1 gw cap=48 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m gamma NKPTS=1 gw cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m gamma NKPTS=1 gw cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+      gamma NKPTS=1 gw-low cap=48: refused (no candidate) -- not a rule violation
+      gamma NKPTS=1 gw-low cap=96: refused (no candidate) -- not a rule violation
+      gamma NKPTS=1 gw-low cap=240: refused (no candidate) -- not a rule violation
+  [32m[ OK ][0m prime NKPTS=41 dft cap=48 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m prime NKPTS=41 dft cap=96 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m prime NKPTS=41 dft cap=240 [relax / SCF  (NKPTS % KPAR == 0; NCORE divides cores-per-node)]
+  [32m[ OK ][0m prime NKPTS=41 gw cap=48 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m prime NKPTS=41 gw cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m prime NKPTS=41 gw cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+      prime NKPTS=41 gw-low cap=48: refused (no candidate) -- not a rule violation
+  [32m[ OK ][0m prime NKPTS=41 gw-low cap=96 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m prime NKPTS=41 gw-low cap=240 [GW / RPA  (NCORE = 1; a k-group must fit in memory)]
+  [32m[ OK ][0m a core cap below one node is refused, not rounded up
+  [32m[ OK ][0m a missing dry-run OUTCAR is refused by name

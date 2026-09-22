@@ -1,0 +1,101 @@
+{
+  "Si": {
+    "what": "diamond silicon -- the canonical band-structure benchmark",
+    "why": "the VASP wiki's own bandstructure example; insulator, 2 atoms",
+    "a0_pbe": 5.47,
+    "a0_exp": 5.431,
+    "gap_pbe": 0.6,
+    "gap_exp": 1.17,
+    "gap_tol": 0.25,
+    "magnetic": false,
+    "metal": false,
+    "nelect": 8,
+    "sites": 2,
+    "formula": "Si",
+    "spacegroup": "Fd-3m",
+    "spacegroup_number": 227,
+    "elements": [
+      "Si"
+    ]
+  },
+  "Al": {
+    "what": "fcc aluminium -- the canonical free-electron metal",
+    "why": "no gap at all; catches a tool that assumes a semiconductor, and exercises the smearing path (ISMEAR must not be tetrahedron-only)",
+    "a0_pbe": 4.04,
+    "a0_exp": 4.05,
+    "gap_pbe": 0.0,
+    "gap_tol": 0.05,
+    "magnetic": false,
+    "metal": true,
+    "nelect": 3,
+    "sites": 1,
+    "formula": "Al",
+    "spacegroup": "Fm-3m",
+    "spacegroup_number": 225,
+    "elements": [
+      "Al"
+    ]
+  },
+  "MgO": {
+    "what": "rocksalt MgO -- the canonical wide-gap ionic insulator",
+    "why": "a large gap PBE still underestimates badly; the opposite extreme from Al in the same 2-atom cell",
+    "a0_pbe": 4.25,
+    "a0_exp": 4.212,
+    "gap_pbe": 4.5,
+    "gap_exp": 7.8,
+    "gap_tol": 0.6,
+    "magnetic": false,
+    "metal": false,
+    "nelect": 8,
+    "sites": 2,
+    "formula": "MgO",
+    "spacegroup": "Fm-3m",
+    "spacegroup_number": 225,
+    "elements": [
+      "Mg",
+      "O"
+    ]
+  },
+  "Fe": {
+    "what": "bcc iron -- the canonical itinerant ferromagnet",
+    "why": "a tool that drops ISPIN or MAGMOM gets 0 instead of 2.2 muB, and the energy is wrong by ~0.5 eV/atom. One atom, seconds to run",
+    "a0_pbe": 2.83,
+    "a0_exp": 2.867,
+    "magmom_pbe": 2.2,
+    "magmom_tol": 0.35,
+    "magnetic": true,
+    "metal": true,
+    "nelect": 8,
+    "sites": 1,
+    "formula": "Fe",
+    "spacegroup": "Im-3m",
+    "spacegroup_number": 229,
+    "elements": [
+      "Fe"
+    ]
+  },
+  "NiO": {
+    "what": "rocksalt NiO in the AFM-II ordering -- the canonical DFT+U case",
+    "why": "PBE makes it a metal; PBE+U opens a gap. The reference case for everything this toolkit does with U, magnetism and AFM ordering",
+    "a0_pbe": 4.19,
+    "a0_exp": 4.17,
+    "magmom_pbe": 1.4,
+    "magmom_u": 1.7,
+    "magmom_tol": 0.4,
+    "gap_u": 3.0,
+    "gap_exp": 4.3,
+    "gap_tol": 1.2,
+    "magnetic": true,
+    "metal": false,
+    "afm": true,
+    "nelect": 26,
+    "sites": 4,
+    "formula": "NiO",
+    "spacegroup": "Fm-3m",
+    "spacegroup_number": 225,
+    "elements": [
+      "Ni",
+      "O"
+    ]
+  }
+}

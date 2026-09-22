@@ -25,7 +25,26 @@
 #                  --aggressive mode, per-file size report, confirmation prompt
 ###############################################################################
 
+# --help must answer, not fall through to `cd`. Without this the argument
+# reaches `cd "$1"`, bash's own `cd` builtin prints ITS documentation, and the
+# safest thing a user can type before a destructive command answers with the
+# manual for a different command. (It deletes nothing -- cd returns 2 and the
+# `|| exit 1` below stops the script -- but nothing about that is obvious.)
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,25p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'
+        echo
+        echo "USAGE"
+        echo "  vasp-nuke [DIR]        remove VASP OUTPUT files from DIR (default: .)"
+        echo
+        echo "  Inputs (INCAR, POSCAR, KPOINTS, POTCAR) and your own files are never"
+        echo "  touched. It refuses while a chunked run is live, because WAVECAR and"
+        echo "  CONTCAR are that run's restart objects."
+        exit 0 ;;
+    -*) echo "vasp-nuke: unknown option '$1' (try --help)" >&2; exit 2 ;;
+esac
 dir="${1:-.}"
+[[ -d "$dir" ]] || { echo "vasp-nuke: '$dir' is not a directory." >&2; exit 1; }
 
 cd "$dir" || exit 1
 

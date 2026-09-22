@@ -1,0 +1,7 @@
+  [32m[ OK ][0m ReqMem written as 1000Mc gives the same 80% (AveRSS x NCPUS / ReqMem)  (80 vs 80 +/- 5)
+  [32m[ OK ][0m ReqMem written as 48000Mn gives the same 80% (AveRSS x NCPUS / ReqMem)  (80 vs 80 +/- 5)
+  [32m[ OK ][0m ReqMem written as 240000M gives the same 80% (AveRSS x NCPUS / ReqMem)  (80 vs 80 +/- 5)
+  [32m[ OK ][0m CPU efficiency is TotalCPU/CPUTime (120h of 240h = 50%)  (50 vs 50 +/- 3)
+  [32m[ OK ][0m a job with no accounting data yet is reported as such, not as zeros
+  [32m[ OK ][0m without sacct it says so instead of failing obscurely
+  [32m[ OK ][0m a directory with no recorded jobs says so

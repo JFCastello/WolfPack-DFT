@@ -205,7 +205,23 @@ for raw in "${METHOD_LIST[@]}"; do
         continue
     fi
     args=("${COMMON[@]}" --method "$m" --subdir "${SUBDIR[$m]}" --name "$m")
-    [[ "${NUNITS[$m]}" -gt 0 ]] && args+=(--auto-projections "${NUNITS[$m]}")
+    # --auto-projections ranks the projection groups by their weight in the
+    # energy window, and it is the DOS that supplies that weight. A bands-only
+    # folder has none, so passing the flag there guarantees a refusal: five of
+    # the six figures were lost that way, in folders that plot perfectly well
+    # without it (the plotter then uses one group per element, its documented
+    # default). Say it once, not once per method.
+    if [[ "${NUNITS[$m]}" -gt 0 ]]; then
+        if [[ "${LAYOUT_KIND:-}" == "bands" ]]; then
+            [[ -z "${_said_no_auto:-}" ]] && {
+                info "no DOS here, so groups are not auto-ranked: one group per element"
+                info "      (name them yourself with -- --projections \"...\")"
+                _said_no_auto=1
+            }
+        else
+            args+=(--auto-projections "${NUNITS[$m]}")
+        fi
+    fi
     # The overlaid blue/orange plain plot (for --spin both) belongs ONLY in
     # 0_Plain, so suppress it for every other method.
     [[ "$m" != "plain" ]] && args+=(--no-overlay-plain)

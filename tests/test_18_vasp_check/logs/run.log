@@ -1,0 +1,12 @@
+  [32m[ OK ][0m an empty directory does not crash vasp-check
+  [32m[ OK ][0m an empty directory is reported as having nothing to check
+  [32m[ OK ][0m Si: reported as a semiconductor/insulator
+  [32m[ OK ][0m Si: the gap vasp-check prints matches the published PBE value  (0.5975 vs 0.6 +/- 0.25)
+  [32m[ OK ][0m Si: a converged run is reported as converged
+  [32m[ OK ][0m Al: the report says the system is metallic
+      Al: vasp-check prints a gap of 0.0304 eV (pymatgen reads 0.000)
+  [32m[ OK ][0m Al: any gap it prints is below the smearing width, not a real gap
+  [32m[ OK ][0m Al: the metallic warning accompanies the gap number
+  [32m[ OK ][0m Fe: the report has a magnetization section
+  [32m[ OK ][0m Fe: the moment vasp-check prints matches the published 2.2 muB  (2.2410 vs 2.2 +/- 0.4)
+  [32m[ OK ][0m an SCF that ran out of NELM is reported as unconverged

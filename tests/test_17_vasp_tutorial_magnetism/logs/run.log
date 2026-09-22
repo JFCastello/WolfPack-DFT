@@ -1,0 +1,5 @@
+  [32m[ OK ][0m the tutorial's own inputs run to completion
+      total magnetization 3.1513726 muB for 2 Co  ->  1.576 muB/Co
+  [32m[ OK ][0m hcp Co moment is a bit below the tutorial's experimental 1.7 muB/Co  (1.576 vs 1.60 +/- 0.15)
+  [32m[ OK ][0m without ISPIN there is no magnetization line at all
+  [32m[ OK ][0m the ferromagnet is lower in energy by 0.2443 eV/atom, so the moment is real

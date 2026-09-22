@@ -115,6 +115,27 @@ WP_GW_NODE_FRAC=""         # GW SWEET: grow the GW request to this node fraction
 CLI_KEYS=()
 _cli(){ printf -v "$1" '%s' "$2"; CLI_KEYS+=("$1"); }
 
+# A value that has to be a COUNT. These end up in #SBATCH lines and in the
+# recommender's arithmetic, so "abc", "0" and "-8" are not settings, they are
+# typos -- and writing them into the profile means the recommender silently
+# falls back to a default the user never chose, producing a layout outside the
+# cap they thought they had set. Refuse at the door instead.
+_cli_int(){                      # _cli_int VAR VALUE FLAG
+    case "$2" in
+        ''|*[!0-9]*) echo "vasp-configure: $3 needs a positive whole number, got '$2'." >&2; exit 2 ;;
+    esac
+    [[ "$2" -ge 1 ]] || { echo "vasp-configure: $3 must be at least 1, got '$2'." >&2; exit 2; }
+    _cli "$1" "$2"
+}
+
+# A value that has to be a FRACTION in (0, 1]: memory-utilisation policies and
+# node margins. A margin of 2 leaves -100% of the node for the job.
+_cli_frac(){                     # _cli_frac VAR VALUE FLAG
+    awk -v v="$2" 'BEGIN{ if (v+0 != v || v+0 <= 0 || v+0 > 1) exit 1 }' 2>/dev/null \
+        || { echo "vasp-configure: $3 must be a fraction between 0 and 1, got '$2'." >&2; exit 2; }
+    _cli "$1" "$2"
+}
+
 # A value that may legitimately be EMPTY.
 #
 # "${2:?}" rejects an empty string as well as a missing one, so there was no way
@@ -148,18 +169,18 @@ while [[ $# -gt 0 ]]; do
         --vasp-ld-path)     _cli_may_be_empty WP_VASP_LD_LIBRARY_PATH "--vasp-ld-path" "${2-__WP_UNSET__}"; shift 2 ;;
         --main-partition)   _cli WP_MAIN_PARTITION "${2:?}"; shift 2 ;;
         --debug-partition)  _cli WP_DEBUG_PARTITION "${2:?}"; shift 2 ;;
-        --main-cpus)        _cli WP_MAIN_CPUS_PER_NODE "${2:?}"; shift 2 ;;
-        --debug-cpus)       _cli WP_DEBUG_CPUS_PER_NODE "${2:?}"; shift 2 ;;
-        --main-mem)         _cli WP_MAIN_MEM_PER_NODE_MB "${2:?}"; shift 2 ;;
-        --debug-mem)        _cli WP_DEBUG_MEM_PER_NODE_MB "${2:?}"; shift 2 ;;
-        --max-cores)        _cli WP_MAX_CORES "${2:?}"; shift 2 ;;
-        --test-walltime)    _cli WP_TEST_WALLTIME_MIN "${2:?}"; shift 2 ;;
-        --chunk-walltime)   _cli WP_CHUNK_WALLTIME_MIN "${2:?}"; shift 2 ;;
-        --chunk-margin)     _cli WP_CHUNK_MARGIN_MIN "${2:?}"; shift 2 ;;
-        --mem-util-min)     _cli WP_MEM_UTIL_MIN "${2:?}"; shift 2 ;;
-        --main-mem-margin)  _cli WP_MAIN_MEM_MARGIN "${2:?}"; shift 2 ;;
-        --debug-mem-margin) _cli WP_DEBUG_MEM_MARGIN "${2:?}"; shift 2 ;;
-        --debug-max-cores)  _cli WP_DEBUG_MAX_CORES "${2:?}"; shift 2 ;;
+        --main-cpus)        _cli_int WP_MAIN_CPUS_PER_NODE "${2:?}" "--main-cpus"; shift 2 ;;
+        --debug-cpus)       _cli_int WP_DEBUG_CPUS_PER_NODE "${2:?}" "--debug-cpus"; shift 2 ;;
+        --main-mem)         _cli_int WP_MAIN_MEM_PER_NODE_MB "${2:?}" "--main-mem"; shift 2 ;;
+        --debug-mem)        _cli_int WP_DEBUG_MEM_PER_NODE_MB "${2:?}" "--debug-mem"; shift 2 ;;
+        --max-cores)        _cli_int WP_MAX_CORES "${2:?}" "--max-cores"; shift 2 ;;
+        --test-walltime)    _cli_int WP_TEST_WALLTIME_MIN "${2:?}" "--test-walltime"; shift 2 ;;
+        --chunk-walltime)   _cli_int WP_CHUNK_WALLTIME_MIN "${2:?}" "--chunk-walltime"; shift 2 ;;
+        --chunk-margin)     _cli_int WP_CHUNK_MARGIN_MIN "${2:?}" "--chunk-margin"; shift 2 ;;
+        --mem-util-min)     _cli_frac WP_MEM_UTIL_MIN "${2:?}" "--mem-util-min"; shift 2 ;;
+        --main-mem-margin)  _cli_frac WP_MAIN_MEM_MARGIN "${2:?}" "--main-mem-margin"; shift 2 ;;
+        --debug-mem-margin) _cli_frac WP_DEBUG_MEM_MARGIN "${2:?}" "--debug-mem-margin"; shift 2 ;;
+        --debug-max-cores)  _cli_int WP_DEBUG_MAX_CORES "${2:?}" "--debug-max-cores"; shift 2 ;;
         # legacy: absolute GB of debug head-room -> converted to a fraction below
         --debug-reserve)    _cli WP_DEBUG_RESERVE_GB "${2:?}"; shift 2 ;;
         --gw-node-frac)     _cli WP_GW_NODE_FRAC "${2:?}"; shift 2 ;;

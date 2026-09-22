@@ -1,0 +1,17 @@
+  [32m[ OK ][0m the rank-0 total is read as MB, not left in kBytes
+  [32m[ OK ][0m the grid row is read from its own line
+  [32m[ OK ][0m the nonl-proj row is not confused with another
+  [32m[ OK ][0m the wavefun row is read from its own line
+  [32m[ OK ][0m the estimator returns the MEASURED value at the layout it was measured on (|d| = 0.000000 MB)
+  [32m[ OK ][0m per-rank memory falls as ranks rise (1800 1548 1380 1338 1317 MB)
+  [32m[ OK ][0m no extrapolation goes negative
+  [32m[ OK ][0m it does not scale away the part that is NOT distributed over ranks
+  [32m[ OK ][0m 1080 sizings swept: none under-requests, none oversubscribes a node
+  [32m[ OK ][0m stage 3 rewrote the production job script
+  [32m[ OK ][0m the node count was updated (190 -> 4)
+  [32m[ OK ][0m the memory request was updated from the measurement
+  [32m[ OK ][0m the stale --ntasks-per-node=1 is GONE, not left contradicting --nodes=4
+  [32m[ OK ][0m and the script says why there is no such directive
+  [32m[ OK ][0m the script records that a benchmark rewrote it
+  [32m[ OK ][0m when 4 x 48 = 192 really is the rank count, the directive IS written
+  [32m[ OK ][0m a real slurmctld accepts the script stage 3 rewrote

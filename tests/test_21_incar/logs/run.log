@@ -1,0 +1,16 @@
+  [32m[ OK ][0m an existing tag is replaced on its own line, not appended (line 6)
+  [32m[ OK ][0m the new value is there
+  [32m[ OK ][0m the old value is gone, not shadowed by a duplicate below
+  [32m[ OK ][0m a tag's own trailing comment survives a value change
+  [32m[ OK ][0m an explicit new note replaces the old one
+  [32m[ OK ][0m a new tag lands in ITS OWN section, not at the bottom of the file (EDIFF at 8, between 7 and 9)
+  [32m[ OK ][0m a missing section is created, with its header
+  [32m[ OK ][0m the created section goes in canonical order (after DOS, which precedes it)
+  [32m[ OK ][0m a file with no section headers does not get any
+  [32m[ OK ][0m the tag is still set in a headerless file
+  [32m[ OK ][0m a commented-out tag is prefixed, not deleted
+  [32m[ OK ][0m its old value is still readable in the comment
+  [32m[ OK ][0m a commented-out tag reads back as unset
+  [32m[ OK ][0m wp_incar_get reads back an active value
+  [32m[ OK ][0m the awk and python section tables agree (the release gate the publisher runs)
+  [32m[ OK ][0m the drift gate detects a table that was altered on purpose

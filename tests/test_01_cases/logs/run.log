@@ -1,0 +1,8 @@
+  [32m[ OK ][0m Si: 2 sites, Fd-3m
+  [32m[ OK ][0m Al: 1 sites, Fm-3m
+  [32m[ OK ][0m MgO: 2 sites, Fm-3m
+  [32m[ OK ][0m Fe: 1 sites, Im-3m
+  [32m[ OK ][0m NiO: 4 sites, Fm-3m
+  [32m[ OK ][0m Fe: bcc moment matches the published PBE value  (2.2410229 vs 2.2 +/- 0.35)
+  [32m[ OK ][0m Si: indirect gap matches the published PBE value  (0.598 vs 0.6 +/- 0.25)
+  [32m[ OK ][0m Al: no gap, as a free-electron metal must have  (0.000 vs 0.0 +/- 0.05)

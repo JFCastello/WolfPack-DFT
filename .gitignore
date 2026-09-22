@@ -127,13 +127,19 @@ slurm_vasptest.sh
 Test/
 **/Test/
 
-# The local test harness: a SLURM testbed, its fixtures, and the checks that
-# run against it. Kept out of the repository at the user's request -- it lives
-# on the machine that runs it, not in the published tree. It sits under Test/
-# (so the repo root stays readable), which the rule above already excludes;
-# these two lines stay so a harness recreated anywhere else is caught too.
-tests/
-**/tests/
+# The test suite IS versioned -- the checks, their documentation and the log of
+# the last run are part of the project. What is not, and must never be:
+#
+#   tests/work/  everything a run produces. It is 150+ MB of scratch, and the
+#                fixtures copy real POTCARs into it, which are licensed (see
+#                above). The global POTCAR rules below catch those anyway;
+#                this rule is what keeps the scratch out.
+#
+# NOTE: my own commentary (tests/**/NOTES.md, tests/REPORT.md, tests/docs/)
+# IS tracked -- it belongs on the private branch. It is stripped when the
+# public tree is built; see the PRIVATE_TESTS list in publish_public.sh.
+tests/work/
+**/tests/work/
 
 POTCAR
 **/POTCAR
@@ -142,8 +148,6 @@ WAVECAR.chi
 WAVEDER
 QP_audit.png
 
-# Stray file produced by a shell redirect typo (a memory figure used as a name):
-554308
 
 # --- chunked-run state (vasp-scf-loop / vasp-relax-loop) -------------------
 # Live state, per-chunk archives and the rendered job for a chained run. Local

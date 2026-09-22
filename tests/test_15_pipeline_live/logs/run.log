@@ -1,0 +1,15 @@
+  [32m[ OK ][0m stage 1 submitted
+  [32m[ OK ][0m stage 1 captured the OUTCAR
+  [32m[ OK ][0m stage 2 chose a layout
+  [32m[ OK ][0m stage 2 wrote a production job script
+  [32m[ OK ][0m slurm.sh geometry is self-consistent (1 x 8 = 8)
+  [32m[ OK ][0m slurm.sh stays inside the 8-core cap (8 cores)
+  [32m[ OK ][0m SLURM accepts slurm.sh
+  [32m[ OK ][0m the INCAR carries the KPAR that was recommended (8)
+  [32m[ OK ][0m stage 3 submitted
+  [32m[ OK ][0m stage 3 ran VASP (electronic steps recorded)
+  [32m[ OK ][0m the benchmark ran the recommended config (KPAR=8)
+  [32m[ OK ][0m stage 3 left no traceback
+  [32m[ OK ][0m stage 3 wrote the definitive job script
+  [32m[ OK ][0m the definitive script stays inside the core cap
+  [32m[ OK ][0m SLURM accepts slurm_vasptest.sh

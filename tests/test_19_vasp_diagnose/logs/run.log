@@ -1,0 +1,8 @@
+  [32m[ OK ][0m an oom-kill in the SLURM log is diagnosed as OOM
+  [32m[ OK ][0m an OOM is not also blamed on the walltime
+  [32m[ OK ][0m a DUE TO TIME LIMIT kill is diagnosed as a walltime kill
+  [32m[ OK ][0m a walltime kill is not also blamed on memory
+  [32m[ OK ][0m a segmentation fault is diagnosed as a crash
+  [32m[ OK ][0m an SCF that exhausted NELM is diagnosed as non-convergence
+  [32m[ OK ][0m a run that did not fail is not given a failure cause
+  [32m[ OK ][0m an empty directory does not crash vasp-diagnose

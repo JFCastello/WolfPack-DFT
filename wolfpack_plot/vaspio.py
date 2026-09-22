@@ -134,7 +134,14 @@ def read_fermi(scf_dir: Path, fallback_dir=None) -> float:
     vxml = scf_dir / "vasprun.xml"
     if vxml.is_file():
         try:
-            ef = Vasprun(str(vxml), parse_dos=False, parse_eigen=False,
+            # parse_dos MUST stay on. pymatgen assigns Vasprun.efermi in ONE
+            # place -- `self.efermi = self.tdos.efermi`, inside the
+            # `elif parse_dos and tag == "dos"` branch of Vasprun._parse -- so
+            # with parse_dos=False this attribute is always None and this whole
+            # branch is dead. It went unnoticed because the OUTCAR fallback
+            # below answers whenever an OUTCAR is present; a folder that has a
+            # vasprun.xml and no OUTCAR could not be plotted at all.
+            ef = Vasprun(str(vxml), parse_eigen=False,
                          parse_projected_eigen=False, parse_potcar_file=False).efermi
             if ef is not None:
                 return float(ef)
@@ -152,7 +159,7 @@ def read_fermi(scf_dir: Path, fallback_dir=None) -> float:
         v2 = fallback_dir / "vasprun.xml"
         if v2.is_file():
             warnings.warn(f"Falling back to E_F from {v2} (no usable SCF E_F).")
-            ef = Vasprun(str(v2), parse_dos=False, parse_potcar_file=False).efermi
+            ef = Vasprun(str(v2), parse_potcar_file=False).efermi   # see above: efermi needs the DOS block
             if ef is not None:
                 return float(ef)
     raise RuntimeError(f"Unable to determine the Fermi level from {scf_dir}.")
