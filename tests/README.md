@@ -1,6 +1,6 @@
 # WolfPack-DFT — test suite
 
-27 tests. They ship with the toolkit, so what is checked can be read rather
+28 tests. They ship with the toolkit, so what is checked can be read rather
 than taken on trust.
 
 **No POTCAR is here, or anywhere in this repository.** They carry
@@ -81,6 +81,7 @@ reads as a finding about the toolkit when it is not one.
 | `test_25_chain_structure` | what a CHUNKED relaxation changed, not its last chunk |
 | `test_26_queue_wait` | the queue statistics, against arithmetic we chose |
 | `test_27_magmom_flag` | --magmom: magnitudes change, orderings do not |
+| `test_28_bench_failed` | a benchmark that died must not size production |
 
 ## Adding one
 

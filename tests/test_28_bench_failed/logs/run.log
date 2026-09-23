@@ -1,0 +1,29 @@
+  [32m[ OK ][0m a healthy benchmark still exits 0 (got 0)
+  [32m[ OK ][0m a healthy benchmark is still ADEQUATE
+  [32m[ OK ][0m and it still writes the production memory
+  [32m[ OK ][0m and the production job script is still produced
+  [32m[ OK ][0m the benchmark was OOM-killed -> exit 8, distinct from success and from the GW re-pick (got 8)
+  [32m[ OK ][0m the benchmark was OOM-killed -> the verdict is FAILED
+  [32m[ OK ][0m the benchmark was OOM-killed -> it is never also called ADEQUATE
+  [32m[ OK ][0m the benchmark was OOM-killed -> it does not claim to have updated anything
+  [32m[ OK ][0m the benchmark was OOM-killed -> the production job script is left UNTOUCHED
+  [32m[ OK ][0m VASP exited with code 1 -> exit 8, distinct from success and from the GW re-pick (got 8)
+  [32m[ OK ][0m VASP exited with code 1 -> the verdict is FAILED
+  [32m[ OK ][0m VASP exited with code 1 -> it is never also called ADEQUATE
+  [32m[ OK ][0m VASP exited with code 1 -> it does not claim to have updated anything
+  [32m[ OK ][0m VASP exited with code 1 -> the production job script is left UNTOUCHED
+  [32m[ OK ][0m VASP completed no electronic step in 19s -> exit 8, distinct from success and from the GW re-pick (got 8)
+  [32m[ OK ][0m VASP completed no electronic step in 19s -> the verdict is FAILED
+  [32m[ OK ][0m VASP completed no electronic step in 19s -> it is never also called ADEQUATE
+  [32m[ OK ][0m VASP completed no electronic step in 19s -> it does not claim to have updated anything
+  [32m[ OK ][0m VASP completed no electronic step in 19s -> the production job script is left UNTOUCHED
+  [32m[ OK ][0m under FAILED the measured lines are not presented as findings
+  [32m[ OK ][0m and it says plainly that nothing below is a measurement of this run
+  [32m[ OK ][0m the refusal names KPAR, which duplicates the density per k-group
+  [32m[ OK ][0m and quotes the actual KPAR, so the cost is concrete
+  [32m[ OK ][0m it names ranks-per-node, the other memory lever
+  [32m[ OK ][0m and says what to do next
+  [32m[ OK ][0m the OOM pattern matches slurmstepd's real message, copied from the incident
+  [32m[ OK ][0m and it does not fire on an ordinary benchmark log
+  [32m[ OK ][0m vasp_test.sh parses with the detection in it
+  [32m[ OK ][0m vasp-test passes the reason to the helper rather than deciding twice

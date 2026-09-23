@@ -340,6 +340,13 @@ def main():
     p.add_argument("--avg-loop", type=float, default=0.0)
     p.add_argument("--nscf", type=int, default=0)
     p.add_argument("--wall", type=int, default=0)
+    p.add_argument("--bench-failed", default="",
+                   help="non-empty when the benchmark job did not actually run "
+                        "(OOM-killed, non-zero exit, or no electronic step "
+                        "completed). The text is the reason, and its presence "
+                        "makes the verdict FAILED and suppresses the production "
+                        "job script -- a measurement taken from a dead run "
+                        "cannot size anything.")
     p.add_argument("--update-slurm", type=Path, default=None)
     p.add_argument("--incar", type=Path, default=None,
                    help="GW only: write MAXMEM (= request - max(200,18%%)) into this INCAR "
@@ -524,8 +531,27 @@ def main():
     else:
         verdict.append("memory does NOT fit")
         advice.append("even one node can't hold this; reduce ranks or use a large-mem partition.")
-    adequate = (args.cpu_eff == 0 or args.cpu_eff >= 70) and fits and not gw_infeasible
-    if gw_infeasible:
+    # A BENCHMARK THAT DIED MEASURED NOTHING.
+    #
+    # This used to be decided by CPU efficiency and a memory sum alone, so a job
+    # that was OOM-killed 19 seconds in, having completed ZERO electronic steps,
+    # was reported ADEQUATE and handed the user a production script built from
+    # its numbers. Those numbers are not the requirement: VASP dies during FFT
+    # planning, BEFORE it allocates the wavefunctions, so the memory recorded is
+    # a floor the real run passes immediately.
+    #
+    # Sizing production from a floor is worse than not sizing at all, because it
+    # looks like a measurement. So the verdict is FAILED, nothing is written,
+    # and the report says which of the three signals fired.
+    bench_failed = bool(args.bench_failed.strip())
+    adequate = (not bench_failed) and (args.cpu_eff == 0 or args.cpu_eff >= 70) \
+        and fits and not gw_infeasible
+    if bench_failed:
+        headline = (f"FAILED -- {args.bench_failed.strip()}. The benchmark did not "
+                    "run, so nothing below is a measurement of this calculation.")
+        advice.append("NO production job script was written: sizing it from a run "
+                      "that died would hand you a script that dies the same way.")
+    elif gw_infeasible:
         headline = (f"INFEASIBLE -- the MEASURED memory ({prod_use:.0f} MB/rank) makes "
                     f"the KPAR={args.prod_kpar} k-group ({rpk} ranks x {prod_use/1024:.0f} "
                     f"GB = {rpk*prod_use/1024:.0f} GB) bigger than one node "
@@ -627,8 +653,15 @@ def main():
         L.append("     VASP's printed requirement from the failed run and re-size from that.")
     L.append("")
     L.append(f"[VERDICT]  {headline}")
+    # Under FAILED the bullets below are not conclusions -- "memory fits one
+    # node" is derived from a run that was killed for not fitting. Printing
+    # them unqualified is how a report contradicts itself in its own summary.
+    if bench_failed:
+        L.append("  - the lines below describe the numbers as measured; they are")
+        L.append("    NOT findings about this configuration, because the run died")
+        L.append("    before it allocated what it needed:")
     for v in verdict:
-        L.append(f"  - {v}")
+        L.append(f"  - {v}" if not bench_failed else f"      ({v})")
     for a in advice:
         L.append(f"  ! {a}")
 
@@ -746,6 +779,32 @@ def main():
                 fh.write(section)
         except OSError:
             pass
+
+    if bench_failed:
+        # Do NOT write the definitive job, and say so where it cannot be missed.
+        # Leaving a slurm_vasptest.sh behind after a dead benchmark is the exact
+        # shape of the bug this guards: a file that looks validated and is not.
+        print("\n" + "=" * 78)
+        print(" BENCHMARK FAILED -- no production job script was written")
+        print("=" * 78)
+        print(f"  what happened : {args.bench_failed.strip()}")
+        print(f"  measured      : {args.nscf} electronic step(s) in {args.wall}s")
+        print("")
+        print("  The memory figures above are what the run had reached WHEN IT DIED,")
+        print("  not what it needs. VASP allocates the wavefunctions after the FFT")
+        print("  planning it usually dies in, so the real requirement is higher --")
+        print("  sizing production from these numbers reproduces the failure.")
+        print("")
+        print("  What changes it, in order of how much memory it frees:")
+        print(f"    * lower KPAR. Each k-point group keeps its OWN copy of the")
+        print(f"      charge density and the grids, so KPAR={args.prod_kpar} means")
+        print(f"      {args.prod_kpar} copies. This is almost always the cause.")
+        print("    * fewer ranks per node, which gives each rank more of the node's")
+        print("      RAM. That is what WP_ALLOC_PROFILE=balanced is for.")
+        print("    * LREAL = Auto, if VASP advised it for this cell.")
+        print("")
+        print("  Then re-run vasp-test. Nothing downstream was updated.")
+        return 8
 
     if gw_infeasible:
         # Do NOT write the definitive job. Emit a machine-readable line so vasp-test

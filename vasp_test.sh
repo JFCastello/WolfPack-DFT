@@ -852,10 +852,52 @@ if [[ -z "$PY" || -z "$HELPER" ]]; then
     exit 4
 fi
 
+# --------------------------------------------------------------------------- #
+# DID THE BENCHMARK ACTUALLY RUN?
+#
+# Three ways it can fail while still producing numbers that look like a
+# measurement, and all three were being reported as ADEQUATE:
+#
+#   OOM       slurmstepd kills a task for exceeding --mem-per-cpu. VASP dies
+#             during FFT planning, BEFORE it allocates the wavefunctions, so
+#             the RSS recorded is a FLOOR the real run passes immediately.
+#   exit code anything outside {0, 124, 137}. 124/137 are the benchmark's own
+#             timeout stopping VASP on purpose, which is the normal path.
+#   no steps  zero 'LOOP:' lines means not one electronic step completed, so
+#             whatever was measured is the setup, not the calculation.
+#
+# The OOM signal comes from two places because either can be missing: sacct's
+# State (OUT_OF_MEMORY) needs accounting to have caught up, and slurmstepd's
+# message lands in the job's stderr whether it did or not.
+bench_oom=0
+if [[ -n "${RAW:-}" ]] && printf '%s\n' "$RAW" | awk -F'|' '$2 ~ /OUT_OF_ME/ {f=1} END{exit !f}'; then
+    bench_oom=1
+fi
+for _e in "$SUBMIT_DIR"/.wolfpack/benchmark-*.err "$SUBMIT_DIR"/.wolfpack/vasptest-*.err; do
+    [[ -s "$_e" ]] || continue
+    grep -qiE 'oom[-_]kill|Out Of Memory' "$_e" 2>/dev/null && { bench_oom=1; break; }
+done
+
+bench_why=""
+if (( bench_oom )); then
+    # SLURM_MEM_PER_CPU is what the job was actually granted, set by SLURM
+    # inside the allocation. The mempc computed when the script was rendered
+    # lives on the login node and is not in scope here.
+    bench_why="the benchmark was OOM-killed (a task exceeded --mem-per-cpu=${SLURM_MEM_PER_CPU:-?} MB)"
+elif [[ $rc -ne 0 && $rc -ne 124 && $rc -ne 137 ]]; then
+    bench_why="VASP exited with code $rc"
+elif (( nscf == 0 )); then
+    bench_why="VASP completed no electronic step in ${wall}s"
+fi
+
 # vasp-test OUTPUTS a NEW production job (slurm_vasptest.sh) that REFINES recommend's
 # slurm.sh with the REAL measured memory; slurm.sh is left as the first-pass record.
+# On a failed benchmark it is NOT created: a file that looks validated and is not
+# is worse than no file.
 DEFINITIVE="$SUBMIT_DIR/slurm_vasptest.sh"
-cp -f "$SUBMIT_DIR/slurm.sh" "$DEFINITIVE" 2>/dev/null || true
+if [[ -z "$bench_why" ]]; then
+    cp -f "$SUBMIT_DIR/slurm.sh" "$DEFINITIVE" 2>/dev/null || true
+fi
 mkdir -p "$SUBMIT_DIR/.wolfpack"
 HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
 "$PY" "$HELPER" "$OUTCAR" \
@@ -870,8 +912,10 @@ HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
     --pred-peak-mb "${pred_mem_per_rank:-0}" --pred-flat-mb "${pred_flat_mb:-0}" \
     --pred-mem-per-cpu "${mem_per_cpu:-0}" --pred-nodes "${pred_nodes:-0}" --pred-ntpn "${pred_ntpn:-0}" \
     --cpu-eff "$cpu_eff" --avg-loop "$avg_loop" --nscf "$nscf" --wall "$wall" \
+    --bench-failed "$bench_why" \
     $( ((IS_GW)) && printf -- '--gw --gw-node-frac %s --incar %s' "${WP_GW_NODE_FRAC:-0.67}" "$SUBMIT_DIR/INCAR" ) \
-    --update-slurm "$DEFINITIVE" --report "$SUBMIT_DIR/report.out" 2>&1 | tee "$HOUT"
+    $( [[ -z "$bench_why" ]] && printf -- '--update-slurm %s' "$DEFINITIVE" ) \
+    --report "$SUBMIT_DIR/report.out" 2>&1 | tee "$HOUT"
 _rc=${PIPESTATUS[0]}
 
 if (( _rc == 7 )); then
