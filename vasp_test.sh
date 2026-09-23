@@ -865,6 +865,7 @@ HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
     --prod-npar "$FIX_NPAR" --prod-nsim "$FIX_NSIM" \
     --prod-partition "$PROD_PARTITION" --cpus-per-node "$PROD_CPN" \
     --max-cores "${WP_MAX_CORES:-0}" \
+    --alloc-profile "${WP_ALLOC_PROFILE:-whole-nodes}" \
     --node-mem-mb "$PROD_NODE_MEM" --mem-util "$MEM_UTIL" \
     --pred-peak-mb "${pred_mem_per_rank:-0}" --pred-flat-mb "${pred_flat_mb:-0}" \
     --pred-mem-per-cpu "${mem_per_cpu:-0}" --pred-nodes "${pred_nodes:-0}" --pred-ntpn "${pred_ntpn:-0}" \

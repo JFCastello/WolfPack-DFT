@@ -136,6 +136,17 @@ _cli_frac(){                     # _cli_frac VAR VALUE FLAG
     _cli "$1" "$2"
 }
 
+# The allocation profile is one of exactly two words. Anything else is a typo,
+# and a typo here silently changes the shape of every job script: the recommender
+# would fall back to whole-nodes and the user would never be told.
+_cli_profile(){                  # _cli_profile VAR VALUE FLAG
+    case "${2,,}" in
+        whole-nodes|a) _cli "$1" "whole-nodes" ;;
+        balanced|b)    _cli "$1" "balanced" ;;
+        *) echo "vasp-configure: $3 must be 'whole-nodes' or 'balanced', got '$2'." >&2; exit 2 ;;
+    esac
+}
+
 # A value that may legitimately be EMPTY.
 #
 # "${2:?}" rejects an empty string as well as a missing one, so there was no way
@@ -174,6 +185,7 @@ while [[ $# -gt 0 ]]; do
         --main-mem)         _cli_int WP_MAIN_MEM_PER_NODE_MB "${2:?}" "--main-mem"; shift 2 ;;
         --debug-mem)        _cli_int WP_DEBUG_MEM_PER_NODE_MB "${2:?}" "--debug-mem"; shift 2 ;;
         --max-cores)        _cli_int WP_MAX_CORES "${2:?}" "--max-cores"; shift 2 ;;
+        --alloc-profile)    _cli_profile WP_ALLOC_PROFILE "${2:?}" "--alloc-profile"; shift 2 ;;
         --test-walltime)    _cli_int WP_TEST_WALLTIME_MIN "${2:?}" "--test-walltime"; shift 2 ;;
         --chunk-walltime)   _cli_int WP_CHUNK_WALLTIME_MIN "${2:?}" "--chunk-walltime"; shift 2 ;;
         --chunk-margin)     _cli_int WP_CHUNK_MARGIN_MIN "${2:?}" "--chunk-margin"; shift 2 ;;
@@ -905,6 +917,29 @@ ask WP_MAX_CORES "Max total cores per job" "$WP_MAX_CORES" \
     "The most cores ONE production job may hold. This is your allocation's limit, not the machine's size. vasp-recommend-slurm REFUSES to recommend a layout above it rather than write a script the scheduler would reject."
 echo
 
+# ---- 5a. how the ranks are laid out on the nodes ----
+: "${WP_ALLOC_PROFILE:=whole-nodes}"
+info "How this cluster hands out cores"
+note "  whole-nodes  a job gets whole nodes. --ntasks is a multiple of the cores"
+note "               per node, and the cap above counts CORES: 5 nodes of 48 is"
+note "               240 whether 190 ranks run or 240 do."
+note "  balanced     a job gets the cores it asks for, sharing nodes with other"
+note "               jobs. --ntasks comes from the physics and is spread evenly,"
+note "               n nodes of m ranks with n*m = ntasks exactly, and the cap"
+note "               counts RANKS."
+note "  If you are not sure, keep whole-nodes: it never asks for a shape the"
+note "  scheduler would refuse."
+ask WP_ALLOC_PROFILE "Allocation profile (whole-nodes | balanced)" "$WP_ALLOC_PROFILE" \
+    "Profile A (whole-nodes) rounds the rank count up to a whole number of nodes. Profile B (balanced) asks for the rank count the physics wants -- 190 ranks becomes 5 nodes of 38, not 240 -- and requires every node to carry the SAME number of ranks, because an uneven split makes one node the one every electronic step waits for. Both allow a rank count SMALLER than one node when the cell has too few bands to use a whole one."
+case "${WP_ALLOC_PROFILE,,}" in
+    whole-nodes|balanced) WP_ALLOC_PROFILE="${WP_ALLOC_PROFILE,,}" ;;
+    a) WP_ALLOC_PROFILE="whole-nodes" ;;
+    b) WP_ALLOC_PROFILE="balanced" ;;
+    *)  warn "unknown allocation profile '$WP_ALLOC_PROFILE' -- keeping whole-nodes."
+        WP_ALLOC_PROFILE="whole-nodes" ;;
+esac
+echo
+
 # ---- 5b. DEBUG/test job cap ----
 # The test benchmark runs on the DEBUG configuration.  When the DEBUG partition IS
 # the MAIN one (a cluster with no separate debug queue), this cap is what still keeps
@@ -1004,7 +1039,7 @@ WP_VASP_GAM WP_VASP_NCL WP_VASP_LD_LIBRARY_PATH WP_EXTRA_ENV WP_MAIN_PARTITION \
 WP_DEBUG_PARTITION WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
 WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB WP_MAIN_NUMA_CORES WP_MAX_CORES \
 WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN WP_MEM_UTIL_MIN \
-WP_MEM_UTIL WP_GW_NODE_FRAC WP_DEBUG_MAX_CORES \
+WP_MEM_UTIL WP_GW_NODE_FRAC WP_ALLOC_PROFILE WP_DEBUG_MAX_CORES \
 WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN "
     while IFS= read -r _line; do
         [[ "$_line" =~ ^[[:space:]]*(WP_[A-Za-z0-9_]+)=(.*)$ ]] || continue
@@ -1026,7 +1061,7 @@ fi
              WP_MAIN_PARTITION WP_DEBUG_PARTITION \
              WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
              WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB \
-             WP_MAIN_NUMA_CORES WP_MAX_CORES \
+             WP_MAIN_NUMA_CORES WP_MAX_CORES WP_ALLOC_PROFILE \
              WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN \
              WP_MEM_UTIL_MIN WP_MEM_UTIL \
              WP_GW_NODE_FRAC \

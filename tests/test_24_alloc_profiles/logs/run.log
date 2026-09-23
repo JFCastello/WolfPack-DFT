@@ -1,0 +1,11 @@
+  [32m[ OK ][0m profile B: 28 layouts, every one n x m = ntasks exactly, m <= 48, within the cap
+  [32m[ OK ][0m profile A asks for whole nodes (ntasks = 240, a multiple of 48)
+  [32m[ OK ][0m profile B is free of that multiple (ntasks = 41 = 1 x 41)
+  [32m[ OK ][0m and profile B's rank count divides the 41 k-points, which is what KPAR needs
+  [32m[ OK ][0m profile whole-nodes offers rank counts below one node for an 8-band cell (1 2 4 8)
+  [32m[ OK ][0m profile balanced offers rank counts below one node for an 8-band cell (1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47)
+  [32m[ OK ][0m profile B under a sub-node cap: 1 node x 24 ranks = 24, inside the 24 cap
+  [32m[ OK ][0m profile A under a sub-node cap refuses, and says the cap is the reason
+  [32m[ OK ][0m profile B: NCORE divides the ranks on a node in all 4 case(s)
+  [32m[ OK ][0m 6 script(s) from both profiles, every one accepted by a live slurmctld
+  [32m[ OK ][0m stage 3 and stage 2 share one layout rule (190 ranks -> 5 38)

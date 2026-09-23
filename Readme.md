@@ -121,6 +121,7 @@ pass `--purge-repo`.
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
 | `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
+| `vasp-queue-wait` | `vasp_queue_wait.sh` | **How long jobs actually wait** in each partition, split by job size: median, mean, p90 and worst, from SLURM's own accounting. The median is the headline — queue waits have a long tail, and a mean is what makes people say "this queue takes a day" about one that usually starts in ten minutes |
 | `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — reads `sacct` for the job ids the pipeline recorded and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
@@ -240,6 +241,34 @@ and writes the production job to **`slurm.sh`**.
 > recommendation against the rules of **its own** regime: 32 recommendations,
 > 0 violations.
 
+### Allocation profile: whole nodes, or the ranks you actually need
+
+`vasp-configure` asks how your cluster hands out cores, and the answer changes
+the shape of every job script:
+
+| `WP_ALLOC_PROFILE` | what it asks for | the cap counts |
+|---|---|---|
+| `whole-nodes` (default) | whole nodes: `--ntasks` is a multiple of the cores per node | **cores** — n nodes cost `n x cpus-per-node` whatever runs on them |
+| `balanced` | the rank count the physics wants, spread **evenly**: n nodes of m ranks with `n x m = ntasks` exactly | **ranks** — for a cluster that shares nodes between jobs |
+
+On 48-core nodes a calculation with 41 irreducible k-points wants a rank count
+that 41 divides, so KPAR can use them. `whole-nodes` gives it 192 or 240 and
+KPAR falls back to 1; `balanced` gives it **3 nodes x 41 = 123**.
+
+Even occupancy is not a nicety. An MPI rank count split unevenly over nodes
+makes one node the slowest, and every collective in every electronic step waits
+for it — invisible in the output, and visible only as a job that is slower than
+its rank count suggests.
+
+Both profiles allow a rank count **smaller than one node**: `NPAR` cannot exceed
+`NBANDS`, so a cell with few bands cannot use a whole node however many cores
+it is given.
+
+```bash
+vasp-configure --alloc-profile balanced     # or: whole-nodes
+vasp-configure --edit                       # or edit WP_ALLOC_PROFILE by hand
+```
+
 `slurm.sh` carries:
 
 - the chosen **KPAR/NCORE/NSIM** embedded as comments **and written into your
@@ -358,6 +387,28 @@ target and RSS-overhead factor can be pinned in the profile as `WP_MEM_UTIL` and
 
 ## 2. VASP run analysis
 
+### `vasp-queue-wait`
+
+What the queue has actually cost, per partition, from `sacct`:
+
+```bash
+vasp-queue-wait                  # last 7 days, every partition
+vasp-queue-wait --days 30        # a longer window
+vasp-queue-wait --mine           # only your own jobs
+vasp-queue-wait -p sequana_cpu   # one partition
+vasp-queue-wait --csv out.csv
+```
+
+It prints median, mean, p90 and worst wait, how many jobs are pending right
+now, and the same figures split by how many nodes a job asked for — a 1-node
+job and a 40-node job are not waiting in the same queue in any useful sense.
+
+Two things it deliberately does not do. It does not **predict** your wait: a
+queue depends on who else is submitting, on reservations and on fairshare, none
+of which are in the accounting database. And it does not count a job held by a
+dependency as queue wait — SLURM says so by making `Eligible` later than
+`Submit`, and blaming the partition for your own job graph would be wrong.
+
 ### `vasp-check`
 
 Post-mortem analysis of a finished or killed VASP run. Detects the calculation
@@ -379,6 +430,17 @@ vasp-check              # analyse the current directory
 vasp-check path/to/calc # analyse a specific directory
 vasp-check --help
 ```
+
+It also reports **what the relaxation did to the structure** — the POSCAR it
+started from against the CONTCAR it ended on, with the strain, the per-atom
+displacements and the space group either side.
+
+After a **chunked** run (`vasp-relax-loop`) it takes the "before" from the
+chain's own archive, `wolfpack_chain/chunk-001/POSCAR.in.gz`, and says so in the
+heading. The POSCAR in the folder is not the one the relaxation started from:
+the chain overwrites it at every restart, so diffing it would report what the
+last chunk moved — a small, reassuring number, and smallest exactly when the
+relaxation has wandered furthest.
 
 Exit codes: `0` = PASS, `1` = at least one FAIL, `2` = usage error.
 
@@ -627,6 +689,35 @@ species order still matches — the POTCAR.
 `MagneticStructureEnumerator`, the site matching is `StructureMatcher`, the space
 groups are `get_space_group_info`, and the `.cif` is whatever `CifWriter`
 produces. Nothing is worked around.
+
+**Which atoms are magnetic, and how large their moments start.** By default the
+magnitudes come from your `./INCAR`'s `MAGMOM` if it has one, and otherwise from
+pymatgen's default-moment table. `--magmom` overrides both, in either notation:
+
+```bash
+build-magnetic-configs --magmom "Ni:1.0,V:2.5"     # per species
+build-magnetic-configs --magmom "4*3.0 12*0.0"     # the INCAR's own shorthand,
+                                                   # one entry per ion, POSCAR order
+```
+
+Naming an element there is also a statement that it **is** magnetic, so a cell
+whose elements are all non-magnetic in pymatgen's table — which is refused
+without it — enumerates with it.
+
+Only the **magnitudes** are read. The signs are not, and could not be: which
+sites come out up and which down is the whole content of the enumeration, and a
+sign given here would be overwritten by every ordering pymatgen generates.
+
+Giving two symmetrically **inequivalent** atoms of one species different
+starting moments is not something the enumerator accepts — it strips per-site
+moments and rebuilds them from a `{species: magnitude}` dict. What it does have
+is a strategy that splits sites by Wyckoff symbol and gives them different
+moments in the output:
+
+```bash
+build-magnetic-configs --magmom "Ti:1.0" \
+    --strategies ferromagnetic,antiferromagnetic,ferrimagnetic_by_motif
+```
 
 **Your POSCAR is used as written.** The enumerator does not return the cell it
 was given — it can reduce the basis, reorder the sites and return different

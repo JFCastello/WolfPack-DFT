@@ -36,7 +36,8 @@ from pathlib import Path
 # The node layout lives in one file so it cannot diverge again -- see the note
 # at the top of wolfpack_geometry.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from wolfpack_geometry import node_layout, ntasks_per_node_line   # noqa: E402
+from wolfpack_geometry import (WHOLE_NODES, node_layout,   # noqa: E402
+                               ntasks_per_node_line)
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +173,8 @@ def round_up(x, step=50):
 
 
 def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
-             gw_node_frac=0.0, max_cores=None):
+             gw_node_frac=0.0, max_cores=None,
+             layout_profile=WHOLE_NODES):
     """(mem_per_cpu, nodes, ntasks_per_node) keeping WHOLE k-point groups on a node.
 
     Sizes the request for >= mem_util utilisation, but the per-node ceiling comes
@@ -191,8 +193,12 @@ def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
     # first-pass slurm.sh came out right and slurm_vasptest.sh -- the one this
     # file writes, and the one the pipeline tells you to submit -- kept asking
     # for 190 nodes to run 190 ranks.
+    # The SAME allocation profile the first-pass script was built with. If
+    # stage 3 laid the ranks out differently, the definitive job -- the one the
+    # pipeline prints as "<- submit this" -- would have a geometry the
+    # benchmark never measured.
     nodes, ntpn = node_layout(total, kpar, cpn, usable, prod_use,
-                              max_cores=max_cores)
+                              max_cores=max_cores, profile=layout_profile)
     fit_req = usable // max(ntpn, 1)
     mem_per_cpu = max(200, min(desired, max(int(math.ceil(prod_use)), (fit_req // 50) * 50)))
     # GW SWEET raise: grow the request to the queue-friendly node share (gw_node_frac,
@@ -293,6 +299,10 @@ def main():
     p.add_argument("--prod-partition", default="main")
     p.add_argument("--cpus-per-node", type=int, required=True)
     p.add_argument("--node-mem-mb", type=int, required=True)
+    p.add_argument("--alloc-profile", default=WHOLE_NODES,
+                   choices=("whole-nodes", "balanced"),
+                   help="how ranks are laid out on nodes; must match the "
+                        "profile vasp-recommend-slurm used (WP_ALLOC_PROFILE)")
     p.add_argument("--max-cores", type=int, default=0,
                    help="Account core cap. Checked against ALLOCATED cores "
                         "(nodes x cpus-per-node), which is what SLURM charges, "
@@ -467,6 +477,7 @@ def main():
     mem_per_cpu, nodes, ntpn = geometry(args.prod_ranks, args.cpus_per_node,
                                         prod_use, args.node_mem_mb,
                                         max_cores=args.max_cores,
+                                        layout_profile=args.alloc_profile,
                                         mem_util=args.mem_util, kpar=args.prod_kpar,
                                         gw_node_frac=(args.gw_node_frac if args.gw else 0.0))
     # GW feasibility at the MEASURED memory: a whole k-group must fit one node. If

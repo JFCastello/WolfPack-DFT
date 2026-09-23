@@ -51,6 +51,7 @@ COMMAND_MAP=(
     "vasp-relax-loop|vasp_chain.sh"
     "vasp-check|vasp_check.sh"
     "vasp-slurm-report|vasp_slurm_report.sh"
+    "vasp-queue-wait|vasp_queue_wait.sh"
     "vasp-clean|vasp_clean.sh"
     "vasp-nuke|vasp_nuke.sh"
     "run-nscf-steps|run_nscf_steps.sh"

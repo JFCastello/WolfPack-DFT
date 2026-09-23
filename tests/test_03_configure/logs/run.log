@@ -1,5 +1,5 @@
   [32m[ OK ][0m a profile is generated where none existed
-  [32m[ OK ][0m the generated profile carries the expected settings (27)
+  [32m[ OK ][0m the generated profile carries the expected settings (28)
   [32m[ OK ][0m a flag sets the value it names
   [32m[ OK ][0m a flag changes NOTHING but the value it names
   [32m[ OK ][0m a hand-added setting survives a full regeneration

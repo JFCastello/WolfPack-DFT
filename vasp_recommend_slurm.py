@@ -193,7 +193,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from wolfpack_geometry import node_layout   # noqa: E402
+from wolfpack_geometry import (BALANCED, WHOLE_NODES,   # noqa: E402
+                               balanced_layout, node_layout)
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
@@ -205,6 +206,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # ``numa_cores`` is the typical NUMA-domain size; if you care about the
 # exact number, run ``lstopo`` or ``numactl --hardware`` on a compute node
 # and override with --numa-cores.
+# How ranks are laid out on nodes. Profile A (whole-nodes) asks the cluster
+# for whole nodes and measures the cap in CORES; profile B (balanced) asks
+# for the rank count the physics wants, spread evenly, and measures the cap
+# in RANKS. Set from WP_ALLOC_PROFILE in the cluster profile.
+ALLOC_PROFILE: str = WHOLE_NODES
+
 CLUSTER_PARTITIONS: Dict[str, Dict[str, object]] = {
     # -- AMD Zen4 (Genoa) partitions --------------------------------------
     "main": {
@@ -1351,6 +1358,7 @@ def suggest_total_ranks(
     cpus_per_node: int,
     irr_kpoints: Optional[int],
     nbands: Optional[int],
+    layout_profile: str = WHOLE_NODES,
 ) -> List[int]:
     """The rank counts this CLUSTER can actually give, largest first.
 
@@ -1386,12 +1394,41 @@ def suggest_total_ranks(
     cpn = max(1, int(cpus_per_node))
     out: set[int] = set()
 
+    # ---- PROFILE B: the physics picks the count, the layout follows --------
+    # The paragraph above is about profile A, and it is still true there. What
+    # made sub-node counts wrong was not the count, it was the LAYOUT: 190
+    # ranks became one rank on each of 190 nodes. Profile B cannot produce that
+    # shape -- every count it offers is one balanced_layout can spread evenly,
+    # n * m = N with m <= cores per node -- so the reason to forbid these
+    # counts is gone, and 190 ranks is simply 5 nodes of 38.
+    #
+    # The cap is in RANKS here, not cores: profile B is for a cluster that
+    # hands out the cores a job asks for rather than whole nodes.
+    if layout_profile == BALANCED:
+        for n in range(max(1, min_cores), max_cores + 1):
+            if balanced_layout(n, cpn) is not None:
+                out.add(n)
+        return sorted(out)
+
     # Whole nodes.
     n = cpn
     while n <= max_cores:
         if n >= min_cores:
             out.add(n)
         n += cpn
+
+    # A cell too small to use a whole node. NPAR cannot exceed NBANDS -- there
+    # are only so many bands to hand out -- so on a 48-core node an 8-band cell
+    # leaves most ranks with nothing to do. Offering the divisors of a node
+    # lets such a case land on ONE node, partly filled, instead of being padded
+    # out to 48 ranks that cannot all work. They are divisors of cpn so the
+    # ranks still tile the node evenly, which is what profile A is about.
+    if nbands and nbands < cpn:
+        d = 1
+        while d < cpn:
+            if min_cores <= d <= max_cores and d <= max(1, nbands):
+                out.add(d)
+            d *= 2
 
     # Sub-node sizes ONLY when a whole node is out of reach -- the cap itself is
     # smaller than a node. Otherwise they are not offered, because this cluster
@@ -1794,6 +1831,7 @@ def build_candidates(
     limit_kpar_to_irr: bool,
     nsim_choices: Sequence[int],
     strict_ncore_one: bool,
+    layout_profile: str = "",
 ) -> List[Candidate]:
     """Enumerate all valid (total_ranks, KPAR, NCORE, NPAR, NSIM, LPLANE)."""
     if summary.calc_type != "DFT":
@@ -1811,12 +1849,14 @@ def build_candidates(
 
     irr_k = summary.irr_kpoints or summary.nkpts
 
+    layout_profile = layout_profile or ALLOC_PROFILE
     rank_choices = suggest_total_ranks(
         min_cores=min_cores,
         max_cores=max_cores,
         cpus_per_node=cpus_per_node,
         irr_kpoints=irr_k,
         nbands=summary.nbands,
+        layout_profile=layout_profile,
     )
 
     # Upper bound on NCORE: number of cores per node (intra-node FFTs).
@@ -1879,6 +1919,17 @@ def build_candidates(
             rpk = total_ranks // kpar
             if rpk <= 0:
                 continue
+
+            # PROFILE B: the layout is part of the candidate, not a consequence
+            # of it. n * m = N exactly, and m is chosen knowing rpk so a node
+            # can hold whole k-point groups. Recomputed per KPAR because rpk is
+            # what decides between two equally dense splits.
+            if layout_profile == BALANCED:
+                _bl = balanced_layout(total_ranks, cpus_per_node,
+                                      ranks_per_kgroup=rpk)
+                if _bl is None:
+                    continue
+                nodes, ntasks_per_node = _bl
 
             # NCORE choices: divisors of rpk, up to ncore_cap.
             if strict_ncore_one:
@@ -1946,10 +1997,21 @@ def build_candidates(
                             memory=memory,
                             kpar_reachable=kpar_reachable,
                         )
+                        # D4 is "choose NCORE as a factor of the cores per
+                        # node TO AVOID COMMUNICATING BETWEEN NODES FOR THE
+                        # FFTs" (https://vasp.at/wiki/Optimizing_the_parallelization).
+                        # The ranks that share an orbital's FFT are the ranks on
+                        # the node, and in profile B that is m, not the node's
+                        # physical core count -- a 48-core node running 12 ranks
+                        # has 12 to divide, not 48. Profile A fills the node, so
+                        # there the two are the same number.
+                        _d4_cores = (ntasks_per_node
+                                     if layout_profile == BALANCED
+                                     else cpus_per_node)
                         score, parts = score_candidate(
                             summary=summary,
                             partition_info=partition_info,
-                            cpus_per_node=cpus_per_node,
+                            cpus_per_node=_d4_cores,
                             numa_cores=numa_cores,
                             max_cores=max_cores,
                             candidate=cand,
@@ -2374,6 +2436,7 @@ def build_gw_candidates(
     gw_anchor_override: Optional[float] = None,
     gw_ref_ranks_override: Optional[int] = None,
     gw_ref_encutgw_override: Optional[float] = None,
+    layout_profile: str = "",
 ) -> List[Candidate]:
     """Enumerate GW / RPA layouts under the GW rule set (G1-G6).
 
@@ -2403,12 +2466,14 @@ def build_gw_candidates(
     irr_k = summary.irr_kpoints or summary.nkpts
     low = summary.calc_type in ("GW_LOWSCALING", "RPA_LOWSCALING")
 
+    layout_profile = layout_profile or ALLOC_PROFILE
     rank_choices = suggest_total_ranks(
         min_cores=min_cores,
         max_cores=max_cores,
         cpus_per_node=cpus_per_node,
         irr_kpoints=irr_k,
         nbands=summary.nbands,
+        layout_profile=layout_profile,
     )
 
     # NOMEGA is required to enumerate τ/ω splits for low-scaling.  If it was
@@ -2460,6 +2525,16 @@ def build_gw_candidates(
             rpk = total_ranks // kpar          # ranks per k-point group
             if rpk <= 0:
                 continue
+
+            # PROFILE B, same as the DFT path. It matters more here: G6 says a
+            # k-point group holds chi and W and must FIT IN MEMORY, and fewer
+            # ranks on a node is exactly how a group gets more memory.
+            if layout_profile == BALANCED:
+                _bl = balanced_layout(total_ranks, cpus_per_node,
+                                      ranks_per_kgroup=rpk)
+                if _bl is None:
+                    continue
+                nodes, ntasks_per_node = _bl
             ncore = 1
             npar = rpk                          # NCORE=1 => NPAR = available
 
@@ -2709,7 +2784,14 @@ def compute_request_geometry(candidate: "Candidate",
             max_cores = int(partition_info.get("max_cores") or 0) or None
         except (TypeError, ValueError):
             max_cores = None
-    nodes, ntpn = node_layout(total, kpar, cpn, usable, usage, max_cores=max_cores)
+    # The profile has to reach HERE, not only the candidate loop. The loop
+    # picks the layout; this is the function that writes it into slurm.sh, and
+    # when the two disagreed profile B's candidates came out balanced while the
+    # script got the whole-node split -- so ntasks-per-node no longer divided
+    # the rank count and the directive was withheld as untrue. Same shape as
+    # the bug that put the two copies of this rule in different files.
+    nodes, ntpn = node_layout(total, kpar, cpn, usable, usage,
+                              max_cores=max_cores, profile=ALLOC_PROFILE)
 
     # Size the request: the mem_util sizing, but trimmed so ntpn ranks fit the node
     # (keeps the whole-group layout rather than adding a node). Stays in
@@ -3535,6 +3617,14 @@ def apply_cluster_profile(prof: Dict[str, str]) -> None:
         info.setdefault("arch", "configured")
         CLUSTER_PARTITIONS[key] = info
 
+    # The allocation profile is a property of the SITE, not of a partition:
+    # whether the scheduler hands out whole nodes (A) or the cores a job asks
+    # for (B) is the same answer on every queue of one cluster.
+    global ALLOC_PROFILE
+    _ap = prof.get("WP_ALLOC_PROFILE", "").strip().lower()
+    if _ap in (WHOLE_NODES, BALANCED):
+        ALLOC_PROFILE = _ap
+
     _apply("main", "WP_MAIN_PARTITION",
            "WP_MAIN_CPUS_PER_NODE", "WP_MAIN_MEM_PER_NODE_MB")
     _apply("debug", "WP_DEBUG_PARTITION",
@@ -3873,7 +3963,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             picked, partition_info, args.mem_util, reserve_mb=_r,
             rss_overhead=args.rss_overhead,
             gw_node_frac=(args.gw_node_frac if is_gw else 0.0))
-        _cap_ok = _n_chk * cpus_per_node <= args.max_cores
+        # WHAT THE CAP COUNTS depends on the allocation profile, and getting
+        # it wrong in either direction writes a script the scheduler refuses.
+        #   profile A: the cluster hands out whole nodes and charges
+        #              cpus_per_node for each, so the cost is nodes * cpn --
+        #              a 24-core cap cannot pay for one 48-core node.
+        #   profile B: the cluster hands out the cores asked for, so the cost
+        #              is the rank count. A 24-core cap buys 24 ranks on one
+        #              node, which is a job it will happily run.
+        if ALLOC_PROFILE == BALANCED:
+            _cap_ok = picked.total_ranks <= args.max_cores
+        else:
+            _cap_ok = _n_chk * cpus_per_node <= args.max_cores
     if not _cap_ok:
         _cpn = cpus_per_node
         _need = _n_chk

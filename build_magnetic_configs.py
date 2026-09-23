@@ -157,6 +157,96 @@ def _magmom_magnitudes_from_incar(incar, structure):
     return {k: v for k, v in out.items() if v > 0} or None
 
 
+def parse_magmom_flag(spec, structure):
+    """Per-ELEMENT moment magnitudes from --magmom, in either notation.
+
+    Two forms, because both are things people already have in front of them:
+
+      "Ti:1.0,V:2.5"     per species, which is what pymatgen takes
+      "4*1.0 12*0.0"     the INCAR's own MAGMOM shorthand, pasted straight out
+                         of a file. The POSCAR's site order says which element
+                         each entry belongs to, exactly as VASP reads it.
+
+    Magnitudes only. The SIGNS are not read from here and could not be: the
+    whole point of enumerating orderings is that pymatgen decides which sites
+    are up and which are down, and a sign given here would be overwritten by
+    every ordering it generates. |value| is taken, and the largest one wins per
+    element.
+
+    Raises ValueError with a message that names the problem.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        raise ValueError("--magmom was given an empty value.")
+
+    symbols = [site.specie.symbol for site in structure]
+    known = set(symbols)
+
+    # --- form 1: EL:value ---------------------------------------------------
+    if ":" in spec:
+        out = {}
+        for chunk in spec.replace(",", " ").split():
+            if ":" not in chunk:
+                raise ValueError(
+                    f"--magmom: '{chunk}' is not EL:value. Mixing the two "
+                    "notations in one value is not supported -- use either "
+                    "\"Ti:1.0,V:2.5\" or the INCAR form \"4*1.0 12*0.0\".")
+            el, _, val = chunk.partition(":")
+            el = el.strip()
+            try:
+                m = abs(float(val))
+            except ValueError:
+                raise ValueError(f"--magmom: '{val}' after '{el}:' is not a number.")
+            if el not in known:
+                raise ValueError(
+                    f"--magmom: this cell has no {el}. It contains: "
+                    f"{', '.join(sorted(known))}.")
+            if m > 0:
+                out[el] = max(out.get(el, 0.0), m)
+        if not out:
+            raise ValueError(
+                "--magmom: every magnitude given is zero, so nothing is "
+                "magnetic and there are no orderings to enumerate.")
+        return out
+
+    # --- form 2: the INCAR MAGMOM shorthand ---------------------------------
+    values = []
+    for tok in spec.replace(",", " ").split():
+        if "*" in tok:
+            n_s, _, v_s = tok.partition("*")
+            try:
+                n, v = int(n_s), float(v_s)
+            except ValueError:
+                raise ValueError(
+                    f"--magmom: '{tok}' is not N*value (as in 4*1.0), and has "
+                    "no ':' so it is not EL:value either.")
+            if n < 0:
+                raise ValueError(f"--magmom: '{tok}' repeats a value {n} times.")
+            values.extend([v] * n)
+        else:
+            try:
+                values.append(float(tok))
+            except ValueError:
+                raise ValueError(
+                    f"--magmom: '{tok}' is neither a number, N*number, nor "
+                    "EL:number.")
+    if len(values) != len(symbols):
+        raise ValueError(
+            f"--magmom: {len(values)} value(s) for {len(symbols)} site(s).\n"
+            "       In the INCAR notation there is one entry per ION, in POSCAR\n"
+            f"       order ({' '.join(sorted(known))}). Expand N*value if you are\n"
+            "       counting by hand, or use the EL:value form instead.")
+    out = {}
+    for sym, v in zip(symbols, values):
+        if abs(v) > 0:
+            out[sym] = max(out.get(sym, 0.0), abs(v))
+    if not out:
+        raise ValueError(
+            "--magmom: every value is zero, so nothing is magnetic and there "
+            "are no orderings to enumerate.")
+    return out
+
+
 def _raw_title(poscar_path):
     """Line 1 of a POSCAR, exactly as written.
 
@@ -483,6 +573,18 @@ def enumerate_magnetic(args):
               f"-> {len(ref)} sites, {_space_group(ref, args.symprec)}")
 
     # ---- which atoms carry a moment -------------------------------------
+    # --magmom is read FIRST, because naming an element there is a statement
+    # that it is magnetic. Read later, a cell whose elements are all
+    # non-magnetic in pymatgen's default table would be refused below before
+    # the flag was ever looked at -- and that cell is precisely the one someone
+    # reaches for this flag to describe.
+    flag_magnitudes = None
+    if args.magmom is not None:
+        try:
+            flag_magnitudes = parse_magmom_flag(args.magmom, ref)
+        except ValueError as exc:
+            sys.exit(f"error: {exc}")
+
     if args.magnetic_species:
         mag_els = [s.strip() for s in args.magnetic_species.split(",") if s.strip()]
         present = {el.symbol for el in ref.composition.elements}
@@ -490,13 +592,17 @@ def enumerate_magnetic(args):
         if unknown:
             sys.exit(f"error: {', '.join(unknown)} not in this structure "
                      f"(it has {', '.join(sorted(present))})")
+    elif flag_magnitudes:
+        # The flag says which, and that is the whole answer.
+        mag_els = sorted(flag_magnitudes)
     else:
         mag_els = _magnetic_elements(ref)
         if not mag_els:
             sys.exit("error: no magnetic elements detected in "
                      f"{ref.composition.reduced_formula}.\n"
                      "       Detection uses pymatgen's default-moment table; if an element\n"
-                     "       here should be magnetic, name it: --magnetic-species Fe,Ni")
+                     "       here should be magnetic, name it: --magnetic-species Fe,Ni\n"
+                     "       or give it a moment directly: --magmom Fe:4.0")
 
     # ---- moment magnitudes ----------------------------------------------
     incar_path = root / "INCAR"
@@ -533,6 +639,23 @@ def enumerate_magnetic(args):
             magnitudes = None
         if magnitudes:
             mag_src = "MAGMOM in ./INCAR"
+    # --magmom OVERRIDES both. It is the explicit statement of which species
+    # you believe carry a moment and how large, and an explicit statement beats
+    # a file that happens to be in the directory and a table of defaults.
+    #
+    # This is the only thing it does. It becomes default_magmoms, which is what
+    # pymatgen's MagneticStructureEnumerator takes; the enumeration -- which
+    # orderings exist, which are symmetry-equivalent, which survive -- is
+    # entirely pymatgen's, and nothing here touches it.
+    if flag_magnitudes:
+        magnitudes = flag_magnitudes
+        mag_src = "--magmom"
+        # An element named in --magmom is an element the user says is magnetic,
+        # whatever the default table thinks. Saying "Ti:1.0" and being told Ti
+        # is not magnetic would be the tool overruling the person.
+        for _el in magnitudes:
+            if _el not in mag_els:
+                mag_els.append(_el)
     default_magmoms = {e: magnitudes[e] for e in mag_els if magnitudes and e in magnitudes} or None
 
     print(f"Structure : {ref.composition.reduced_formula}  ({len(ref)} sites)")
@@ -765,6 +888,14 @@ def main():
     p.add_argument("poscar", type=Path, nargs="?", default=Path("POSCAR"),
                    help="Structure to enumerate orderings of. Defaults to "
                         "./POSCAR.")
+    p.add_argument("--magmom", metavar="SPEC", default=None,
+                   help="initial moment MAGNITUDES, in either notation: "
+                        "\"Ti:1.0,V:2.5\" per species, or the INCAR's own "
+                        "\"4*1.0 12*0.0\" with one entry per ion in POSCAR "
+                        "order. Overrides the root INCAR's MAGMOM and "
+                        "pymatgen's defaults. Signs are NOT read from here -- "
+                        "which sites are up and which are down is what the "
+                        "enumeration decides.")
     p.add_argument("--magnetic-species", metavar="EL,EL",
                    help="Treat exactly these elements as magnetic, e.g. 'V,Fe'. "
                         "Default: every element pymatgen has a default moment "

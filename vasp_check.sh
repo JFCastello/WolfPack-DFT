@@ -541,10 +541,56 @@ fi
 # section says so and the rest of the report is unaffected.
 _wp_struct="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/wolfpack_structure.py"
 _wp_py="$(command -v python3 || command -v python || true)"
-if [[ -f "$_wp_struct" && -n "$_wp_py" && -s POSCAR ]]; then
+
+# WHICH "BEFORE" TO DIFF AGAINST.
+#
+# A chunked relaxation (vasp-relax-loop) restarts from its own CONTCAR: at the
+# end of every chunk the chain does `cp CONTCAR POSCAR` so the next chunk
+# resumes from the geometry reached so far. After five chunks the POSCAR in
+# this directory is the geometry chunk five STARTED from -- not the one the
+# relaxation started from.
+#
+# Diffing POSCAR against CONTCAR there answers a question nobody asked ("what
+# did the last chunk move?") under a heading that says something else, and the
+# answer is small and reassuring precisely when the whole relaxation has
+# wandered a long way. Nothing about the output reveals it.
+#
+# The chain already keeps the real thing. Every chunk archives the geometry it
+# began with, so chunk 001's copy IS the original input, and it is left
+# compressed exactly as the chain wrote it.
+_start_struct="POSCAR"; _start_label="POSCAR"
+_chunk0="$(ls -d wolfpack_chain/chunk-* 2>/dev/null | sort | head -1)"
+_wp_tmp_start=""
+if ((IS_RELAX)) && [[ -n "$_chunk0" ]]; then
+  for _c in "$_chunk0/POSCAR.in.gz" "$_chunk0/POSCAR.in"; do
+    [[ -s "$_c" ]] || continue
+    _wp_tmp_start="$(mktemp -t wpcheck_poscar0.XXXXXX)" || break
+    if [[ "$_c" == *.gz ]]; then gzip -dc "$_c" > "$_wp_tmp_start" 2>/dev/null
+    else cp -f "$_c" "$_wp_tmp_start" 2>/dev/null; fi
+    if [[ -s "$_wp_tmp_start" ]]; then
+      _start_struct="$_wp_tmp_start"
+      _start_label="${_chunk0}/$(basename "$_c")"
+      break
+    fi
+    rm -f "$_wp_tmp_start"; _wp_tmp_start=""
+  done
+fi
+trap '[[ -n "${_wp_tmp_start:-}" ]] && rm -f "$_wp_tmp_start"' EXIT
+
+if [[ -f "$_wp_struct" && -n "$_wp_py" && -s "$_start_struct" ]]; then
   if ((IS_RELAX)) && [[ -s CONTCAR ]]; then
-    hdr "What the relaxation changed (POSCAR -> CONTCAR)"
-    if ! "$_wp_py" "$_wp_struct" POSCAR CONTCAR 2>&1; then
+    if [[ "$_start_struct" == "POSCAR" ]]; then
+      hdr "What the relaxation changed (POSCAR -> CONTCAR)"
+    else
+      # Say which file the "before" came from. A report that silently swapped
+      # its own input would be as opaque as the bug it fixes.
+      hdr "What the relaxation changed (whole chain: $_start_label -> CONTCAR)"
+      _nch=$(ls -d wolfpack_chain/chunk-* 2>/dev/null | wc -l)
+      note "chunked run: comparing against the geometry the FIRST of $_nch chunk(s)"
+      note "started from, not the POSCAR in this folder -- the chain overwrites"
+      note "that one at every restart."
+    fi
+    if ! "$_wp_py" "$_wp_struct" "$_start_struct" CONTCAR 2>&1; then
       note "structure report unavailable (pymatgen missing? 'conda activate wolfpack-dft')"
     fi
   elif ((IS_RELAX)); then

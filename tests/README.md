@@ -1,6 +1,6 @@
 # WolfPack-DFT — test suite
 
-23 tests. They ship with the toolkit, so what is checked can be read rather
+27 tests. They ship with the toolkit, so what is checked can be read rather
 than taken on trust.
 
 **No POTCAR is here, or anywhere in this repository.** They carry
@@ -77,6 +77,10 @@ reads as a finding about the toolkit when it is not one.
 | `test_21_incar` | the INCAR editor's four rules, and its two-copy drift gate |
 | `test_22_geometry` | nodes × ranks: five invariants over 2025 layouts |
 | `test_23_scaling` | stage 3's extrapolation: measure small, run big |
+| `test_24_alloc_profiles` | whole-nodes vs balanced: n x m = ntasks, exactly |
+| `test_25_chain_structure` | what a CHUNKED relaxation changed, not its last chunk |
+| `test_26_queue_wait` | the queue statistics, against arithmetic we chose |
+| `test_27_magmom_flag` | --magmom: magnitudes change, orderings do not |
 
 ## Adding one
 

@@ -1,0 +1,9 @@
+  [32m[ OK ][0m vasp-check sees this is a chunked run and says which 'before' it used
+      reported max displacement: 0.1536 A
+  [32m[ OK ][0m the displacement is the WHOLE chain's (0.04 frac), not the last chunk's (0.01)  (0.1536 vs 0.1536 +/- 0.02)
+  [32m[ OK ][0m an unchained relaxation still diffs its own POSCAR, with the usual heading
+  [32m[ OK ][0m and it reports the same 0.04 when its POSCAR really is the original  (0.1536 vs 0.1536 +/- 0.02)
+  [32m[ OK ][0m a chunk directory with nothing archived falls back to ./POSCAR and still reports
+      last chunk alone would report: 0.0384 A
+  [32m[ OK ][0m the last-chunk answer is a different number (0.01 frac), so the check above discriminates  (0.0384 vs 0.0384 +/- 0.005)
+  [32m[ OK ][0m the decompressed original is cleaned up, not left in /tmp
