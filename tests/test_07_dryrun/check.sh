@@ -84,5 +84,53 @@ EOF
     grep -qiE "dry.run|ALGO *= *None" "$d/.wolfpack/dryrun_OUTCAR" "$d"/slurm_dryrun.sh 2>/dev/null \
         && pass "stage 1 really ran a dry run, not a calculation" \
         || fail "nothing marks this as a dry run -- did it compute?"
+
+    # --- THIRTY SECONDS, WHATEVER THE PROFILE SAYS -------------------------
+    # `vasp_std --dry-run` exits before it allocates: it reads the inputs,
+    # prints the dimensions and stops. The number that matters is not how long
+    # it RUNS but how long it ASKS FOR, because SLURM's backfill fits a pending
+    # job into a gap only if its REQUESTED walltime fits -- a probe asking for
+    # the debug partition's 20 minutes waits for a 20-minute gap while every
+    # 30-second gap goes by.
+    #
+    # The profile above says WP_TEST_WALLTIME_MIN=5, so a rendered time of
+    # 00:05:00 is exactly the regression this pins.
+    t=$(grep -oP '^#SBATCH --time=\K\S+' "$d/slurm_dryrun.sh" 2>/dev/null | head -1)
+    ok_if "[[ '$t' == '00:00:30' ]]" \
+          "the dry run asks for 30 s, not the profile's walltime (got '${t:-none}')"
 fi
+
+# The same, with the profile shouting the opposite: a 24-hour test walltime
+# must not reach the dry run's request. Rendering the script needs no scheduler,
+# so this runs even where the live checks above are skipped.
+d2="$W/flat30"; mkdir -p "$d2"
+for f in INCAR POSCAR KPOINTS POTCAR; do echo x > "$d2/$f"; done
+sed 's/^WP_TEST_WALLTIME_MIN=.*/WP_TEST_WALLTIME_MIN="1440"/' "$d/cluster.conf" > "$d2/cluster.conf" 2>/dev/null \
+    || cp "$d/cluster.conf" "$d2/cluster.conf" 2>/dev/null
+( cd "$d2" && WOLFPACK_CLUSTER_CONF="$d2/cluster.conf" timeout 120 bash "$DR" >dry.log 2>&1 ) || true
+t2=$(grep -oP '^#SBATCH --time=\K\S+' "$d2/slurm_dryrun.sh" 2>/dev/null | head -1)
+if [[ -z "$t2" ]]; then
+    skip "no slurm_dryrun.sh rendered without a scheduler -- the 24 h case goes unchecked"
+else
+    ok_if "[[ '$t2' == '00:00:30' ]]" \
+          "a 24 h WP_TEST_WALLTIME_MIN still renders a 30 s request (got '$t2')"
+fi
+
+# The escape hatch is an ENVIRONMENT variable, not a profile key: a site whose
+# module load alone takes longer than 30 s needs a way out that does not put
+# the profile back in charge.
+rm -f "$d2/slurm_dryrun.sh"
+( cd "$d2" && VASP_DRYRUN_WALLTIME="00:04:00" WOLFPACK_CLUSTER_CONF="$d2/cluster.conf" \
+    timeout 120 bash "$DR" >dry2.log 2>&1 ) || true
+t3=$(grep -oP '^#SBATCH --time=\K\S+' "$d2/slurm_dryrun.sh" 2>/dev/null | head -1)
+[[ -n "$t3" ]] && ok_if "[[ '$t3' == '00:04:00' ]]" \
+    "VASP_DRYRUN_WALLTIME overrides it when a site needs longer (got '$t3')"
+
+rm -f "$d2/slurm_dryrun.sh"
+( cd "$d2" && VASP_DRYRUN_WALLTIME="dos horas" WOLFPACK_CLUSTER_CONF="$d2/cluster.conf" \
+    timeout 120 bash "$DR" >dry3.log 2>&1 ) || true
+t4=$(grep -oP '^#SBATCH --time=\K\S+' "$d2/slurm_dryrun.sh" 2>/dev/null | head -1)
+[[ -n "$t4" ]] && ok_if "[[ '$t4' == '00:00:30' ]]" \
+    "a malformed override falls back to 30 s rather than to something SLURM rejects (got '$t4')"
+
 exit $(( FAIL_N > 0 ))

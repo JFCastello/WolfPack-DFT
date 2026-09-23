@@ -35,14 +35,12 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 1
 #SBATCH --mem-per-cpu=8000
-#SBATCH -t 00:10:00
+#SBATCH -t 00:00:30
 #SBATCH -o vasp_dryrun_%j.out
 #SBATCH -e vasp_dryrun_%j.err
-# (the normal entry point `vasp-dry-run` renders slurm_dryrun.sh instead, taking
-#  the walltime from WP_TEST_WALLTIME_MIN; these in-file directives apply only if
-#  you run `sbatch vasp-dry-run` directly. SLURM parses them before any shell
-#  runs, so they CANNOT read the profile -- hence a deliberately small 10 min,
-#  which fits under any site's debug cap. The probe itself exits in seconds.)
+# (the normal entry point `vasp-dry-run` renders slurm_dryrun.sh instead; these
+#  in-file directives apply only if you run `sbatch vasp-dry-run` directly.
+#  Both ask for the same 30 SECONDS -- see the note on _dr_time below.)
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '2,31p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'
@@ -93,7 +91,10 @@ _wp_require(){
     exit 2
 }
 
-_wp_require WP_DEBUG_PARTITION WP_TEST_WALLTIME_MIN WP_VASP_STD
+# WP_TEST_WALLTIME_MIN is NOT required: the dry run asks for a flat 30 s and
+# no longer reads it. Demanding it would refuse to run over a value this
+# stage does not use.
+_wp_require WP_DEBUG_PARTITION WP_VASP_STD
 
 
 # Emit the resolved module-load command lines (single source of truth: used both
@@ -165,16 +166,29 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     else
         exe="${WP_VASP_STD:-vasp_std}"
     fi
-    # Walltime and memory come from the cluster profile, like every other field
-    # in this header. They used to be hardcoded at 30 min / 8000 MB, so a site
-    # configured for a 20-minute debug cap had its dry run REJECTED by SLURM --
-    # vasp-configure asked the question and the answer was ignored.
-    # The dry run is a 1-rank probe that exits in seconds; it only needs to fit
-    # inside the debug partition's cap, so it shares WP_TEST_WALLTIME_MIN.
-    _dr_min="${VASP_DRYRUN_WALLTIME_MIN:-${WP_TEST_WALLTIME_MIN:-30}}"
-    _dr_min="${_dr_min%%.*}"; _dr_min="${_dr_min//[!0-9]/}"; _dr_min="${_dr_min:-30}"
-    (( _dr_min < 1 )) && _dr_min=1
-    _dr_time=$(printf '%02d:%02d:00' $((_dr_min/60)) $((_dr_min%60)))
+    # WALLTIME: 30 SECONDS, FLAT, WHATEVER THE PROFILE SAYS.
+    #
+    # `vasp_std --dry-run` exits before it allocates. It reads the inputs, sizes
+    # the problem, prints the dimensions and stops -- seconds of work, and that
+    # is the whole point of the stage being free.
+    #
+    # Asking for the debug partition's walltime instead was wrong in a way that
+    # costs real time. SLURM's backfill scheduler fits a pending job into a gap
+    # only if the job's REQUESTED walltime fits the gap, so a probe that asks
+    # for 20 minutes waits for a 20-minute gap to appear while the 30-second
+    # gaps it could have used go by. The request, not the run, is what the
+    # scheduler reads.
+    #
+    # It also settles the bug this line was written for: the old hardcoded 30
+    # MINUTES was rejected outright by a site whose debug cap was 20. Thirty
+    # seconds is under every cap there is, so the profile has nothing to say
+    # here any more.
+    #
+    # VASP_DRYRUN_WALLTIME is the escape hatch for a site where module loading
+    # and MPI startup alone take longer than that -- an explicit HH:MM:SS, set
+    # in the environment, deliberately NOT a profile key.
+    _dr_time="${VASP_DRYRUN_WALLTIME:-00:00:30}"
+    [[ "$_dr_time" =~ ^[0-9]{1,3}:[0-5][0-9]:[0-5][0-9]$ ]] || _dr_time="00:00:30"
     # The 1-rank probe asks for a flat 8 GB, which is generous for a job that
     # exits before it allocates -- but it has to be something the partition can
     # actually give. A node with less RAM than that refuses the job outright

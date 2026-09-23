@@ -9,3 +9,7 @@
   [32m[ OK ][0m the OUTCAR carries NKPTS, which stage 2 needs (29)
   [32m[ OK ][0m the OUTCAR carries NBANDS (8)
   [32m[ OK ][0m stage 1 really ran a dry run, not a calculation
+  [32m[ OK ][0m the dry run asks for 30 s, not the profile's walltime (got '00:00:30')
+  [32m[ OK ][0m a 24 h WP_TEST_WALLTIME_MIN still renders a 30 s request (got '00:00:30')
+  [32m[ OK ][0m VASP_DRYRUN_WALLTIME overrides it when a site needs longer (got '00:04:00')
+  [32m[ OK ][0m a malformed override falls back to 30 s rather than to something SLURM rejects (got '00:00:30')

@@ -1,5 +1,5 @@
   [32m[ OK ][0m the reference relaxation finished (E = -.10820773E+02 eV)
   [32m[ OK ][0m the relaxation really was split (6 then 1 ionic steps)
   [32m[ OK ][0m chunked and direct relaxation agree in energy (|dE| = 1.00e-06 eV)
-  [32m[ OK ][0m chunked and direct relaxation agree in structure (max |dr| = 6.45e-12 A)
+  [32m[ OK ][0m chunked and direct relaxation agree in structure (max |dr| = 1.62e-11 A)
   [32m[ OK ][0m chunked and direct SCF agree in energy (|dE| = 0.00e+00 eV)
