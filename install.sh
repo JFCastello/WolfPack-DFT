@@ -53,7 +53,6 @@ COMMAND_MAP=(
     "backfill-study|backfill_study.py"
     "vasp-check|vasp_check.sh"
     "vasp-slurm-report|vasp_slurm_report.sh"
-    "vasp-queue-wait|vasp_queue_wait.sh"
     "vasp-clean|vasp_clean.sh"
     "vasp-nuke|vasp_nuke.sh"
     "run-nscf-steps|run_nscf_steps.sh"
@@ -72,6 +71,7 @@ COMMAND_MAP=(
 # never leaves a dangling command behind in $BIN_DIR.
 RETIRED_COMMANDS=(
     "my-shortcuts"          # renamed 2026-08 -> wolfpack (wolfpack --help)
+    "vasp-queue-wait"       # removed 2026-09-24: backfill-study answers the same question
 )
 
 # Conda packages required by the Python scripts (channel: conda-forge).

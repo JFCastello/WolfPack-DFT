@@ -1,4 +1,4 @@
-  [32m[ OK ][0m all 23 advertised commands resolve to a file that exists
+  [32m[ OK ][0m all 22 advertised commands resolve to a file that exists
   [32m[ OK ][0m vasp_chain.sh --help works from an empty directory
   [32m[ OK ][0m vasp_check.sh --help works from an empty directory
   [32m[ OK ][0m vasp_clean.sh --help works from an empty directory
@@ -6,7 +6,6 @@
   [32m[ OK ][0m vasp_diagnose.sh --help works from an empty directory
   [32m[ OK ][0m vasp_dry_run.sh --help works from an empty directory
   [32m[ OK ][0m vasp_nuke.sh --help works from an empty directory
-  [32m[ OK ][0m vasp_queue_wait.sh --help works from an empty directory
   [32m[ OK ][0m vasp_quick_plots.sh --help works from an empty directory
   [32m[ OK ][0m vasp_slurm_report.sh --help works from an empty directory
   [32m[ OK ][0m vasp_test.sh --help works from an empty directory

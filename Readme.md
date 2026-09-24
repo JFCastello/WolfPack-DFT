@@ -122,7 +122,6 @@ pass `--purge-repo`.
 | `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM`. Picks the chunk walltime from a study of the queue, resizes each chunk's memory from what the last one used, and continues after an OOM kill with a plain `--resume` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
 | `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue, and what `--time` to ask for**: the expected wait of the job script as written (from the partition's `sacct` history of similar jobs; needs no timing data), the run time from the folder's measured `OUTCAR` or from `vasp-test`, and a concrete `--time` — one job or a chain, whichever finishes first. `vasp-relax-loop` runs it at launch; alone, it launches nothing |
-| `vasp-queue-wait` | `vasp_queue_wait.sh` | **How long jobs actually wait** in each partition, split by job size: median, mean, p90 and worst, from SLURM's own accounting. The median is the headline — queue waits have a long tail, and a mean is what makes people say "this queue takes a day" about one that usually starts in ten minutes |
 | `vasp-check` | `vasp_check.sh` | **What a run produced, as data** — parameters, convergence, forces, cell and stress, what the relaxation changed, moments, gap with the VBM/CBM band, spin and k-point, GW quasiparticle energies — plus checks against the run's own NELM/EDIFFG and VASP's rules. No physical interpretation. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — the dry-run, the benchmark, the production job and every chunk of a `vasp-relax-loop`/`vasp-scf-loop` chain (older chains too), each labelled with its stage — reads `sacct` for them and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
@@ -575,28 +574,6 @@ allocation, the memory measured, and how many OOM kills the chain has survived.
 
 ## 2. VASP run analysis
 
-### `vasp-queue-wait`
-
-What the queue has actually cost, per partition, from `sacct`:
-
-```bash
-vasp-queue-wait                  # last 7 days, every partition
-vasp-queue-wait --days 30        # a longer window
-vasp-queue-wait --mine           # only your own jobs
-vasp-queue-wait -p sequana_cpu   # one partition
-vasp-queue-wait --csv out.csv
-```
-
-It prints median, mean, p90 and worst wait, how many jobs are pending right
-now, and the same figures split by how many nodes a job asked for — a 1-node
-job and a 40-node job are not waiting in the same queue in any useful sense.
-
-Two things it deliberately does not do. It does not **predict** your wait: a
-queue depends on who else is submitting, on reservations and on fairshare, none
-of which are in the accounting database. And it does not count a job held by a
-dependency as queue wait — SLURM says so by making `Eligible` later than
-`Submit`, and blaming the partition for your own job graph would be wrong.
-
 ### `vasp-check`
 
 What a finished or killed VASP run produced, **as data**. It states numbers and
@@ -994,7 +971,7 @@ wolfpack --help | less # paginate
 
 ## 8. The test suite
 
-`tests/` holds 34 tests, and they ship with the toolkit so you can see what is
+`tests/` holds 33 tests, and they ship with the toolkit so you can see what is
 actually checked rather than take a claim on trust.
 
 ```bash

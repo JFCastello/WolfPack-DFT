@@ -70,7 +70,6 @@ WolfPack-DFT commands
 
   THE QUEUE
     vasp-slurm-report       What a finished job actually cost (CPU/mem/time efficiency)
-    vasp-queue-wait         How long jobs wait in each partition, by job size
 
   PLOTTING
     vasp-quick-plots        One-shot publication plots (bands / DOS / Wannier90)
