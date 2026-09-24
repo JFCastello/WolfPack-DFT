@@ -121,7 +121,7 @@ pass `--purge-repo`.
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
 | `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM`. Picks the chunk walltime from a study of the queue, resizes each chunk's memory from what the last one used, and continues after an OOM kill with a plain `--resume` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
-| `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue, and what `--time` to ask for**: the expected wait of the job script as written (from the partition's `sacct` history of similar jobs; needs no timing data), the run time from the folder's measured `OUTCAR` or from `vasp-test`, and a concrete `--time` — one job or a chain, whichever finishes first. `vasp-relax-loop` runs it at launch; alone, it launches nothing |
+| `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue**: the job script as written, and the same job at other walltimes, from the partition's `sacct` history of jobs shaped like it. `vasp-relax-loop` asks it at launch, with its own ionic-step estimate, for the chunk walltime. Estimates no run time; launches nothing |
 | `vasp-check` | `vasp_check.sh` | **What a run produced, as data** — parameters, convergence, forces, cell and stress, what the relaxation changed, moments, gap with the VBM/CBM band, spin and k-point, GW quasiparticle energies — plus checks against the run's own NELM/EDIFFG and VASP's rules. No physical interpretation. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — the dry-run, the benchmark, the production job and every chunk of a `vasp-relax-loop`/`vasp-scf-loop` chain (older chains too), each labelled with its stage — reads `sacct` for them and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
@@ -438,8 +438,8 @@ because a truncated electronic loop gives wrong forces. Everything above holds,
 plus four things specific to long relaxations on a real cluster.
 
 ```bash
-backfill-study                     # what chunk walltime it would pick, and why; launches nothing
-vasp-relax-loop                    # launch: walltime from backfill-study
+backfill-study                     # how long this job waits in the queue; launches nothing
+vasp-relax-loop                    # launch: chunk walltime from its step estimate + the queue
 vasp-relax-loop --walltime 120     # launch with a chunk walltime you choose
 vasp-relax-loop --resume           # after a stop, a crash, or an OOM kill
 vasp-relax-loop --fresh            # archive an unfinished chain, start a new one here
@@ -471,61 +471,42 @@ stops before submitting a chunk that cannot complete one. The geometry reached
 so far is kept in `POSCAR`, and the stop names the new chain that would fit:
 `vasp-relax-loop --fresh --walltime 83`.
 
-**`backfill-study`: the queue wait, and what `--time` to ask for.** A command of
-its own, run in the calculation folder; `vasp-relax-loop` also calls it at launch.
-It launches nothing. It reads the job from `slurm_vasptest.sh` (or `slurm.sh`),
-and the partition's own accounting history (`sacct`, last 30 days;
-`WP_CHAIN_QUEUE_DAYS` changes it). Then it reports in three parts:
+**`backfill-study`: how long a job waits in this queue.** A command of its
+own, and what `vasp-relax-loop` asks at launch. It reads the job from
+`slurm_vasptest.sh` (or `slurm.sh`) and the partition's accounting history
+(`sacct`, last 30 days; `WP_CHAIN_QUEUE_DAYS` changes it). It estimates no run
+time: that is the chain's job, from `vasp-test`'s measurements.
 
 ```
-QUEUE WAIT   slurm_vasptest.sh asks for --time=7-00:00:00
-  expected wait     ~36 min   median of 10 jobs of your size (nodes, cores and memory) that asked for 5 days to 7 days
-                    3 in 4 of them started within 37 min, 9 in 10 within 37 min
+YOUR JOB   slurm_vasptest.sh asks for --time=7-00:00:00
+  expected wait     ~36 min   (3 in 4 within 37 min, 9 in 10 within 37 min; 10 jobs)
+                    jobs of your size (nodes, cores and memory) that asked for 5 days to 7 days
   already here      job 13276000 asking 7-00:00:00 waited 12 min (RUNNING)
 
-RUN TIME
-  one ionic step    ~55 min   measured: 19 ionic step(s) in this folder's OUTCAR (job 13276000)
-  all of NSW=120    ~4.6 days   a ceiling: a relaxation stops when it converges
-
-RECOMMENDATION
-  one job           --time=5-07:00:00   waits ~36 min, runs up to 4.6 days: ~4.6 days in all
-  vasp-relax-loop   6 chunks of 96 h, each waiting ~36 min: ~4.8 days in all
-
-  => submit as one job with  #SBATCH --time=5-07:00:00
+WAIT BY WALLTIME ASKED         median    3 in 4   9 in 10   jobs
+  up to 30 min                  2 min     3 min     3 min   76, your node count
+  5 days to 7 days             36 min    37 min    37 min   10, your size
 ```
 
-- **Queue wait** needs no timing data. It works before `vasp-test`, from the
-  job script alone. It compares jobs like yours: the same node band (1, 2–4,
-  5–16, 17+), cores within ×2 and memory within ×3, that asked for a similar
-  walltime. When there are too few, it drops memory, then cores, then nodes,
-  then widens to half-to-twice the walltime, and says which comparison it used.
-  Below 8 jobs it marks the number as rough; with none, it says so.
-- **Run time** uses the best data in the folder. First, what a real run of
-  *this* calculation measured: the ionic steps in the folder's `OUTCAR`, or a
-  chain's own record. Failing that, it estimates from `vasp-test`'s short
-  benchmark, and says what in that estimate is assumed. The benchmark rarely
-  completes an ionic step, so the electronic steps per ionic step are then
-  taken as 12.
-- **Recommendation** is a concrete `--time`: all of `NSW` with 15 % margin,
-  rounded up to the hour, as one job. When the queue data can compare them, it
-  also shows the chunked alternative and picks whichever finishes first. It
-  also says if the script asks for too little, or for more than the run can use.
+It compares jobs like yours: the same node band (1, 2–4, 5–16, 17+), cores
+within ×2, memory within ×3. When there are too few, it drops memory, then
+cores, then nodes, and says which comparison it used. The table shows only the
+walltime ranges with jobs of their own; it never fills one from its neighbours.
+Outside a calculation folder, give the job: `--partition --nodes --cpus
+--mem-mb --time`.
 
-`--details` adds the per-walltime table and where every number came from.
-Outside a calculation folder, give the job yourself: `--partition --nodes
---cpus --mem-mb --time`, plus `--t-ion-s --steps` for a recommendation.
-
-It does not simulate the scheduler: it measures what the scheduler actually
+It does not simulate the scheduler. It measures what the scheduler actually
 did, backfill included, to jobs like yours. What it cannot see: jobs still
 waiting (only jobs that started have a wait to measure), and other users' jobs
-if the cluster's `sacct` shows you only your own. It assumes the relaxation
-needs all of `NSW`, a ceiling rather than a forecast.
+if the cluster's `sacct` shows you only your own.
 
-At launch, `vasp-relax-loop` uses it to choose the chunk walltime. For each
-candidate it counts the chunks the relaxation would need (the chain's own ramp)
-and picks the smallest `chunks × (median wait + start-up)`. The table is shown
-at launch and kept in `wolfpack_chain/backfill_study.txt`. With too little
-data it falls back to the profile's walltime; `--no-queue-study` skips it.
+**At launch**, `vasp-relax-loop` estimates the ionic-step time from
+`vasp-test`'s measurements and hands it to `backfill-study`. For each candidate
+walltime, `backfill-study` counts the chunks the relaxation would need (the
+chain's own ramp) and picks the smallest `chunks × (median wait + start-up)`.
+The table is shown at launch and kept in `wolfpack_chain/backfill_study.txt`.
+With too little data the chain uses the profile's walltime;
+`vasp-relax-loop --no-queue-study` skips it.
 
 **Memory is measured every chunk and the next one is resized.** After each chunk
 the chain reads what it used: `MaxRSS`/`AveRSS` from `sacct`, or, where the

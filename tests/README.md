@@ -84,7 +84,7 @@ reads as a finding about the toolkit when it is not one.
 | `test_29_chain_memory` | every chunk measures its memory and resizes the next |
 | `test_30_chain_oom_resume` | after an OOM, `--resume` alone continues, with more memory |
 | `test_31_chain_step_fit` | a fixed chunk walltime; refusing when one step cannot fit |
-| `test_32_queue_study` | `backfill-study`: the chunk walltime from the queue's history |
+| `test_32_queue_study` | `backfill-study`: the queue wait, and the chain's chunk walltime from it |
 | `test_33_chain_live_e2e` | a real chunked relaxation: VASP, SLURM, memory per chunk |
 | `test_34_chain_nsw_only` | a chunked relaxation's only limit is the user's NSW |
 

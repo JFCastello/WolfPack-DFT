@@ -34,8 +34,9 @@
 # THE CHUNK WALLTIME is chosen once, at launch, and then fixed for the whole
 # chain: from --walltime if given, else from `backfill-study` -- what this
 # partition's queue has done to jobs shaped like this one -- else from
-# WP_CHUNK_WALLTIME_MIN. Run `backfill-study` on its own to see that analysis
-# without launching anything. If not even ONE ionic step fits in the chunk,
+# WP_CHUNK_WALLTIME_MIN. The ionic-step time it weighs is THIS script's estimate,
+# from vasp-test's measurements; `backfill-study` on its own shows the queue
+# waits the choice rests on. If not even ONE ionic step fits in the chunk,
 # the chain refuses to start -- and stops, rather than submit a chunk that
 # cannot progress, if a step later grows past it.
 #
