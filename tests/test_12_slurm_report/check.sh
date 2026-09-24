@@ -87,6 +87,77 @@ grep -qiE "sacct|accounting" <<<"$out" \
     && pass "without sacct it says so instead of failing obscurely" \
     || fail "no sacct: the message does not mention accounting"
 
+# --- EVERY job that ran in the folder, not only the pipeline's --------------
+# The usual sequence is vasp-dry-run, vasp-test, then the real run -- the
+# production job, or a chain of chunks. The report used to read .wolfpack/
+# only, so it showed the two preparatory jobs and never the run they were
+# preparing. Here a folder holds all of it: a dry-run, a benchmark, a
+# production job (slurm.sh names its log <jobname>-<id>.out), a chain whose
+# chunks 1 and 2 are logged and whose third (2006) is only in chain.env and
+# next to the inputs, and an older chain archived by --fresh.
+b="$W/bin_perjob"; mkdir -p "$b"
+cat > "$b/sacct" <<'EOF'
+#!/usr/bin/env bash
+jid=""; while (( $# )); do [[ $1 == -j ]] && jid=$2; shift; done
+[[ -z $jid ]] && exit 0
+printf '%s|job%s|COMPLETED|0:0|01:00:00|02:00:00|4|1|03:00:00|||8000M\n' "$jid" "$jid"
+printf '%s.0|x|COMPLETED|0:0|01:00:00||4|1|03:00:00|1500M|1000M|\n' "$jid"
+EOF
+chmod 755 "$b/sacct"
+t="$W/tree"; c="$t/calc"
+mkdir -p "$c/.wolfpack" "$c/wolfpack_chain/chunk-001" "$c/wolfpack_chain.prev-20260901-000000"
+touch "$c/.wolfpack/dryrun-2001.out" "$c/.wolfpack/dryrun-2001.err" "$c/.wolfpack/benchmark-2002.out" \
+      "$c/vasp-2003.out" "$c/vasp-2003.err" "$c/report.out" \
+      "$c/wolfpack_chain/chunk-001/VASP-chain-2004.out" "$c/VASP-chain-2006.out"
+printf '# idx jobid kind\n  1    2004   RELAX  3 3\n  2    2005   RELAX  6 6\n' > "$c/wolfpack_chain/chain.log"
+printf 'chain_state="running"\njobids=" 2004 2005 2006"\n' > "$c/wolfpack_chain/chain.env"
+printf '  1    1990   RELAX  3 3\n' > "$c/wolfpack_chain.prev-20260901-000000/chain.log"
+printf 'jobids=" 1990 1991"\n' > "$c/wolfpack_chain.prev-20260901-000000/chain.env"
+out=$( cd "$c" && PATH="$b:$PATH" timeout 120 bash "$SR" --csv "$W/tree.csv" 2>&1 )
+ids=$(awk '$1=="calc" && $2 ~ /^[0-9]+$/ {printf "%s ", $2}' <<<"$out")
+ok_if "[[ '$ids' == '1990 1991 2001 2002 2003 2004 2005 2006 ' ]]" \
+      "every job in the folder is reported, in job order: $ids"
+_stage(){ awk -v j="$1" '$2==j { sub(/.*s  /, ""); print; exit }' <<<"$out"; }
+ok_if "[[ '$(_stage 2001)' == dry-run && '$(_stage 2002)' == vasp-test ]]" \
+      "the pipeline's jobs are named: dry-run, vasp-test"
+ok_if "[[ '$(_stage 2003)' == production ]]" \
+      "the production job, found by its log next to the inputs, is reported ($(_stage 2003))"
+ok_if "[[ '$(_stage 2004)' == 'chunk 1' && '$(_stage 2005)' == 'chunk 2' && '$(_stage 2006)' == chunk ]]" \
+      "every chunk of a chain, the logged ones numbered (2004 $(_stage 2004), 2005 $(_stage 2005), 2006 $(_stage 2006))"
+ok_if "[[ '$(_stage 1990)' == 'chunk 1 (old chain)' && '$(_stage 1991)' == 'chunk (old chain)' ]]" \
+      "and an older chain archived by --fresh, marked as such"
+ok_if "grep -q '^8 job(s)' <<<\"\$out\"" "the count is 8"
+ok_if "head -1 '$W/tree.csv' | grep -q ',stage\$' && grep -q ',production\$' '$W/tree.csv'" \
+      "the CSV carries the stage, as its last column"
+
+# After vasp-clean, which removes .wolfpack/, the folder still holds jobs. The
+# report used to stop finding it at all.
+rm -rf "$c/.wolfpack"
+out=$( cd "$t" && PATH="$b:$PATH" timeout 120 bash "$SR" 2>&1 )
+ok_if "grep -qE '^calc +2003 .*production' <<<\"\$out\" && grep -q '^6 job(s)' <<<\"\$out\"" \
+      "after vasp-clean removes .wolfpack/, run from the parent, the folder and its 6 remaining jobs are still found"
+
+# --- accounting that gathered no usage ---------------------------------------
+# Some clusters record the job and its steps but no usage at all (no MaxRSS,
+# TotalCPU of a second) -- this suite's own testbed does. The ratios cannot be
+# computed then, and "0%" would describe a job that did nothing.
+b="$W/bin_nousage"; mkdir -p "$b"
+cat > "$b/sacct" <<'EOF'
+#!/usr/bin/env bash
+jid=""; while (( $# )); do [[ $1 == -j ]] && jid=$2; shift; done
+[[ -z $jid ]] && exit 0
+printf '%s|vasp|COMPLETED|0:0|01:00:00|02:00:00|4|1|00:00:01|||8000M\n' "$jid"
+printf '%s.0|x|COMPLETED|0:0|01:00:00||4|1|00:00:01|||\n' "$jid"
+EOF
+chmod 755 "$b/sacct"
+n="$W/nousage"; mkdir -p "$n/.wolfpack"; touch "$n/.wolfpack/benchmark-3001.out"
+out=$( cd "$n" && PATH="$b:$PATH" timeout 120 bash "$SR" 2>&1 )
+row=$(awk '$2=="3001"' <<<"$out")
+ok_if "[[ \$(awk '{print \$5, \$6}' <<<\"\$row\") == '-- --' ]] && grep -q 'recorded no usage' <<<\"\$out\"" \
+      "with no usage recorded, cpu% and mem% read -- and say why, not 0% ($(awk '{print $5, $6}' <<<"$row"))"
+ok_if "grep -q '0 below 50% CPU efficiency' <<<\"\$out\" && ! grep -q 'CPU efficiency below 50' <<<\"\$out\"" \
+      "and such a job is not flagged for low CPU efficiency"
+
 # --- a directory with no pipeline state ------------------------------------
 mkdir -p "$W/bare"
 out=$( cd "$W/bare" && timeout 120 bash "$SR" 2>&1 ) || true

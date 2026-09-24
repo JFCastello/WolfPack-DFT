@@ -28,8 +28,21 @@
 #       Near 100 % means you were probably killed; near 0 % means you are
 #       holding a queue slot you do not need.
 #
-# It reads nothing but sacct and the job ids the pipeline recorded. It does not
-# submit, cancel or modify anything.
+# Every job that ran in the folder, whichever command launched it:
+#
+#   dry-run, vasp-test   .wolfpack/dryrun-<id>.out, .wolfpack/benchmark-<id>.out
+#   production           <jobname>-<id>.out next to the inputs (slurm.sh,
+#                        slurm_vasptest.sh, or any job you submitted there)
+#   chunks               wolfpack_chain/: chain.log maps each chunk to its job,
+#                        chain.env lists every job the chain submitted, and the
+#                        archived VASP-chain-<id>.out; older chains archived by
+#                        --fresh as wolfpack_chain.prev-*/ too
+#
+# It used to read .wolfpack/ only, so it showed the dry-run and the benchmark
+# and never the run they were preparing -- and after vasp-clean, which removes
+# .wolfpack/, not even those.
+#
+# It reads sacct and those files. It does not submit, cancel or modify anything.
 #
 # ============================================================================
 # THE --units=M TRAP
@@ -47,7 +60,7 @@ while (( $# )); do
     case "$1" in
         --csv) CSV="${2:-}"; shift 2 ;;
         --csv=*) CSV="${1#*=}"; shift ;;
-        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) DIRS+=("$1"); shift ;;
     esac
@@ -56,54 +69,82 @@ done
 command -v sacct >/dev/null 2>&1 || {
     echo "ERROR: sacct not found. This needs SLURM job accounting." >&2; exit 1; }
 
-# No folders given: this one, plus any sub-folder the pipeline has touched.
+# No folders given: this one, plus any sub-folder the toolkit has run in. The
+# marks: .wolfpack/ (the pipeline), wolfpack_chain/ (a chunked run) and
+# report.out (which every stage appends to). .wolfpack/ alone is not enough:
+# vasp-clean removes it, and the folder has not stopped holding jobs.
+is_calc() { [[ -d $1/.wolfpack || -d $1/wolfpack_chain || -f $1/report.out ]]; }
 if (( ${#DIRS[@]} == 0 )); then
-    [[ -d .wolfpack ]] && DIRS+=(".")
-    while IFS= read -r d; do DIRS+=("$d"); done < <(
-        find . -mindepth 2 -maxdepth 3 -type d -name .wolfpack \
-             -printf '%h\n' 2>/dev/null | sort)
+    is_calc . && DIRS+=(".")
+    while IFS= read -r d; do is_calc "$d" && DIRS+=("$d"); done < <(
+        find . -mindepth 1 -maxdepth 2 -type d ! -name '.*' ! -name 'wolfpack_chain*' \
+             ! -path '*/wolfpack_chain*' 2>/dev/null | sort)
 fi
-(( ${#DIRS[@]} )) || { echo "No folder with a .wolfpack/ directory here." >&2; exit 1; }
+(( ${#DIRS[@]} )) || { echo "No calculation folder here (no .wolfpack/, wolfpack_chain/ or report.out)." >&2; exit 1; }
 
 # --------------------------------------------------------------------------- #
-# Collect the job ids the pipeline recorded for a folder.
+# Every job that ran in a folder, and what it was:  "<jobid> <stage>" per line,
+# in job-id order. When one id is found in several places, the most specific
+# name wins (priority, lowest first).
 # --------------------------------------------------------------------------- #
-job_ids_for() {
-    local d="$1"
-    # Every stage names its SLURM logs after its own job id
-    # (.wolfpack/dryrun-11071693.out, benchmark-11071727.out, ...), so the
-    # folder carries the id list without anything having to record one.
-    find "$d/.wolfpack" -maxdepth 1 \( -name '*-[0-9]*.out' -o -name '*-[0-9]*.err' \) \
-         2>/dev/null \
-      | sed -nE 's/.*-([0-9]+)\.(out|err)$/\1/p' \
-      | grep -E '^[0-9]+$' | sort -un
+jobs_for() {
+    local d="$1" c old tag
+    {
+        # 1. The pipeline's own stages name their logs after the stage.
+        find "$d/.wolfpack" -maxdepth 1 -type f \( -name '*-[0-9]*.out' -o -name '*-[0-9]*.err' \) \
+             2>/dev/null \
+          | sed -nE 's#.*/([^/]+)-([0-9]+)\.(out|err)$#\2 1 \1#p' \
+          | sed -E 's/ 1 dryrun$/ 1 dry-run/; s/ 1 benchmark$/ 1 vasp-test/'
+        # 2. Chunked runs, the live one and any archived by --fresh.
+        for c in "$d/wolfpack_chain" "$d"/wolfpack_chain.prev-*; do
+            [[ -d $c ]] || continue
+            old=0; [[ $c == *.prev-* ]] && old=1
+            tag=""; (( old )) && tag=" (old chain)"
+            # chain.log: "  idx  jobid  kind ..." -- the chunk number is known
+            awk -v t="$tag" '/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]/ { print $2, 2, "chunk " $1 t }' \
+                "$c/chain.log" 2>/dev/null
+            # chain.env: every job the chain submitted, including one still
+            # running and one that died before it could log itself
+            sed -n 's/^jobids="\(.*\)"$/\1/p' "$c/chain.env" 2>/dev/null | tr -s ' ' '\n' \
+              | grep -E '^[0-9]+$' | sed "s/\$/ 3 chunk${tag}/"
+            find "$c" -maxdepth 2 -type f -name 'VASP-chain-[0-9]*.out' 2>/dev/null \
+              | sed -nE "s#.*VASP-chain-([0-9]+)\\.out\$#\\1 3 chunk${tag}#p"
+        done
+        # 3. Whatever else ran here: SLURM logs next to the inputs, named
+        #    <jobname>-<jobid> by slurm.sh and slurm_vasptest.sh.
+        find "$d" -maxdepth 1 -type f \( -name '*-[0-9]*.out' -o -name '*-[0-9]*.err' \) \
+             2>/dev/null \
+          | sed -nE 's#.*/([^/]+)-([0-9]+)\.(out|err)$#\2 4 \1#p' \
+          | awk '{ s = ($3 == "VASP-chain") ? "chunk" : ($3 == "vasp_test" ? "vasp-test" : "production")
+                   print $1, 4, s }'
+    } | sort -k1,1n -k2,2n | awk '!seen[$1]++ { id = $1; $1 = ""; $2 = ""; sub(/^ +/, ""); print id, $0 }'
 }
 
 fmt_pct() { awk -v n="${1:-0}" -v d="${2:-0}" 'BEGIN{
     if (d+0 <= 0) { print "  --"; exit } printf "%4.0f%%", 100.0*n/d }'; }
 
-[[ -n "$CSV" ]] && echo "folder,jobid,jobname,state,exit,elapsed_s,timelimit_s,ncpus,nnodes,totalcpu_s,cputime_s,cpu_eff,maxrss_mb,averss_mb,reqmem_mb,mem_eff,time_use" > "$CSV"
+[[ -n "$CSV" ]] && echo "folder,jobid,jobname,state,exit,elapsed_s,timelimit_s,ncpus,nnodes,totalcpu_s,cputime_s,cpu_eff,maxrss_mb,averss_mb,reqmem_mb,mem_eff,time_use,stage" > "$CSV"
 
-printf '%-14s %-11s %-13s %-9s %6s %6s %6s  %9s %9s\n' \
-    "folder" "jobid" "job" "state" "cpu%" "mem%" "time%" "maxRSS/rk" "elapsed"
-printf '%s\n' "--------------------------------------------------------------------------------------"
+printf '%-14s %-11s %-13s %-9s %6s %6s %6s  %9s %9s  %s\n' \
+    "folder" "jobid" "job" "state" "cpu%" "mem%" "time%" "maxRSS/rk" "elapsed" "stage"
+printf '%s\n' "------------------------------------------------------------------------------------------------------"
 
 n_seen=0; n_bad=0
 for d in "${DIRS[@]}"; do
     label="$(basename "$(readlink -f "$d")")"
-    ids="$(job_ids_for "$d")"
-    if [[ -z "$ids" ]]; then
-        printf '%-14s %s\n' "$label" "(no job ids recorded in .wolfpack/)"
+    jobs="$(jobs_for "$d")"
+    if [[ -z "$jobs" ]]; then
+        printf '%-14s %s\n' "$label" "(no job found: no SLURM log here, in .wolfpack/ or in wolfpack_chain/)"
         continue
     fi
-    for jid in $ids; do
+    while read -r jid stage; do
         RAW=$(sacct -j "$jid" -n -P --units=M \
               -o JobID,JobName,State,ExitCode,Elapsed,Timelimit,NCPUS,NNodes,TotalCPU,MaxRSS,AveRSS,ReqMem 2>/dev/null)
         [[ -z "$RAW" ]] && RAW=$(sacct -j "$jid" -n -P \
               -o JobID,JobName,State,ExitCode,Elapsed,Timelimit,NCPUS,NNodes,TotalCPU,MaxRSS,AveRSS,ReqMem 2>/dev/null)
         if [[ -z "$RAW" ]]; then
             # Accounting lags a freshly finished job; say so rather than print zeros.
-            printf '%-14s %-11s %s\n' "$label" "$jid" "(no accounting data yet -- try again shortly)"
+            printf '%-14s %-11s %s\n' "$label" "$jid" "(no accounting data yet -- try again shortly)  [$stage]"
             continue
         fi
         # Fold the job and its steps into one row: the parent carries the
@@ -154,27 +195,37 @@ for d in "${DIRS[@]}"; do
             m = (av>0 && av<=mx) ? av : mx; printf "%.1f", m*c }')
         cpu_eff=$(fmt_pct "$tcpu" "$cputime")
         mem_eff=$(fmt_pct "$used_total" "$req_total")
+        # No RSS on any step means the cluster's accounting gathered no usage
+        # for this job. Where that happens TotalCPU is not usable either: this
+        # suite's testbed reports 1-2 s for a 4-rank job that computed for a
+        # minute. Neither ratio can be computed then -- and printing 0% would
+        # read as a job that did nothing.
+        no_usage=0
+        awk -v m="$maxrss" -v a="$averss" 'BEGIN{ exit !(m+0 <= 0 && a+0 <= 0) }' && no_usage=1
+        (( no_usage )) && { cpu_eff="  --"; mem_eff="  --"; }
         time_use=$(fmt_pct "$el" "$tl")
-        printf '%-14s %-11s %-13s %-9s %6s %6s %6s  %7.0f MB %6ds\n' \
+        printf '%-14s %-11s %-13s %-9s %6s %6s %6s  %7.0f MB %6ds  %s\n' \
             "$label" "$jid" "${name:0:13}" "${state:0:9}" \
-            "$cpu_eff" "$mem_eff" "$time_use" "$maxrss" "$el"
+            "$cpu_eff" "$mem_eff" "$time_use" "$maxrss" "$el" "$stage"
         n_seen=$((n_seen+1))
         # Flag what is worth acting on. The thresholds are stated, not hidden.
-        awk -v e="$tcpu" -v c="$cputime" -v t="$el" -v l="$tl" -v s="$state" 'BEGIN{
-            if (c>0 && 100.0*e/c < 50)
+        (( no_usage )) && \
+            echo "               ^ sacct recorded no usage (no MaxRSS) for this job: cpu% and mem% cannot be computed."
+        awk -v e="$tcpu" -v c="$cputime" -v t="$el" -v l="$tl" -v s="$state" -v nu="$no_usage" 'BEGIN{
+            if (!nu && c>0 && 100.0*e/c < 50)
                 printf "               ^ CPU efficiency below 50%%: the job reserved %d core-seconds and used %d.\n", c, e
             if (l>0 && 100.0*t/l > 98)
                 print  "               ^ ran to the walltime limit -- check whether it was cut off."
             if (s ~ /TIMEOUT|CANCELLED|FAILED|OUT_OF_MEMORY/)
                 printf "               ^ state %s -- this job did not finish cleanly.\n", s }'
-        awk -v e="$tcpu" -v c="$cputime" 'BEGIN{ exit !(c>0 && 100.0*e/c < 50) }' && n_bad=$((n_bad+1))
-        [[ -n "$CSV" ]] && printf '%s,%s,%s,%s,%s,%d,%d,%d,%d,%.1f,%d,%s,%.1f,%.1f,%.1f,%s,%s\n' \
+        (( ! no_usage )) && awk -v e="$tcpu" -v c="$cputime" 'BEGIN{ exit !(c>0 && 100.0*e/c < 50) }' && n_bad=$((n_bad+1))
+        [[ -n "$CSV" ]] && printf '%s,%s,%s,%s,%s,%d,%d,%d,%d,%.1f,%d,%s,%.1f,%.1f,%.1f,%s,%s,%s\n' \
             "$label" "$jid" "$name" "$state" "$ecode" "$el" "$tl" "$ncpus" "$nnodes" \
             "$tcpu" "$cputime" "${cpu_eff// /}" "$maxrss" "$averss" "$req_total" \
-            "${mem_eff// /}" "${time_use// /}" >> "$CSV"
-    done
+            "${mem_eff// /}" "${time_use// /}" "$stage" >> "$CSV"
+    done <<<"$jobs"
 done
-printf '%s\n' "--------------------------------------------------------------------------------------"
+printf '%s\n' "------------------------------------------------------------------------------------------------------"
 echo "$n_seen job(s); $n_bad below 50% CPU efficiency."
 echo
 echo "cpu%   = TotalCPU / (Elapsed x NCPUS)  -- how much of the reservation computed"

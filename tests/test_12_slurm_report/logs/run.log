@@ -4,4 +4,14 @@
   [32m[ OK ][0m CPU efficiency is TotalCPU/CPUTime (120h of 240h = 50%)  (50 vs 50 +/- 3)
   [32m[ OK ][0m a job with no accounting data yet is reported as such, not as zeros
   [32m[ OK ][0m without sacct it says so instead of failing obscurely
+  [32m[ OK ][0m every job in the folder is reported, in job order: 1990 1991 2001 2002 2003 2004 2005 2006 
+  [32m[ OK ][0m the pipeline's jobs are named: dry-run, vasp-test
+  [32m[ OK ][0m the production job, found by its log next to the inputs, is reported (production)
+  [32m[ OK ][0m every chunk of a chain, the logged ones numbered (2004 chunk 1, 2005 chunk 2, 2006 chunk)
+  [32m[ OK ][0m and an older chain archived by --fresh, marked as such
+  [32m[ OK ][0m the count is 8
+  [32m[ OK ][0m the CSV carries the stage, as its last column
+  [32m[ OK ][0m after vasp-clean removes .wolfpack/, run from the parent, the folder and its 6 remaining jobs are still found
+  [32m[ OK ][0m with no usage recorded, cpu% and mem% read -- and say why, not 0% (-- --)
+  [32m[ OK ][0m and such a job is not flagged for low CPU efficiency
   [32m[ OK ][0m a directory with no recorded jobs says so
