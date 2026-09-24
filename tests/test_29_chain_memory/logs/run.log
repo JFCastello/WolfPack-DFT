@@ -11,7 +11,7 @@
   [32m[ OK ][0m the largest peak is kept in the state (5000)
   [32m[ OK ][0m with no sacct data, OUTCAR's peak sizes the request: 2600 (expected 2560 -> 2600)
   [32m[ OK ][0m and the chunk says the number came from OUTCAR, not accounting
-  [32m[ OK ][0m it does not sit out a 45-s sacct poll for RSS that will never come (1 s)
+  [32m[ OK ][0m it does not sit out a 45-s sacct poll for RSS that will never come (2 s)
   [32m[ OK ][0m a cell that grew 9.3 % in volume is given 9.3 % more (2750, expected 2750; 2500 without the growth)
   [32m[ OK ][0m a rank larger than a node stops the chain (reason: memory_does_not_fit)
   [32m[ OK ][0m and no successor is submitted

@@ -1436,7 +1436,7 @@ elif [[ $MODE == relax ]] && (( ! OPT_NOSTUDY )) && command -v python3 >/dev/nul
     # backfill-study: its own command, called here with THIS chain's numbers
     # rather than letting it re-derive them, so the walltime it proposes is
     # judged by the same arithmetic the chain then runs on. See backfill_study.py.
-    STUDY_REPORT=$(python3 "$_wp_dir/backfill_study.py" --partition "$PART" \
+    STUDY_REPORT=$(python3 "$_wp_dir/backfill_study.py" --machine --partition "$PART" \
             --nodes "$NODES" --cpus "$RANKS" --mem-mb "$(( MEMCPU * RANKS ))" \
             --t-ion-s "$T_ION" --startup-s "$STARTUP" --margin-min "$MARGIN_CFG" \
             --steps "$_nsw_left" --max-time-min "${MAXT:-0}" \

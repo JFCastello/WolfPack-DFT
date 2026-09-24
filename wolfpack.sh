@@ -61,8 +61,8 @@ WolfPack-DFT commands
   CHUNKED RUNS  (for queues that punish a long walltime)
     vasp-scf-loop           Converge an SCF as a chain of short, self-resubmitting jobs
     vasp-relax-loop         Same for a relaxation: chunks NSW, never NELM
-    backfill-study          Which chunk walltime this queue rewards, for this job
-                            (vasp-relax-loop runs it at launch; this shows it alone)
+    backfill-study          How long this job waits in the queue, and what --time to ask for
+                            (vasp-relax-loop runs it at launch to size its chunks)
 
   DIAGNOSIS
     vasp-diagnose           Why did a run die?  (OOM/TIME/CRASH) + data salvage

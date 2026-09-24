@@ -1,14 +1,17 @@
 # test_32_queue_study
 
-> backfill-study: the chunk walltime from what the queue did to jobs like this one
+> backfill-study: the queue wait, the run time, and a concrete --time
 
 ## 1. Definition
 
 Feeds `backfill-study` (`backfill_study.py`) accounting histories whose best
 answer is known in advance, and checks the parsing, the decision and its
 fallbacks. Then it checks that `vasp-relax-loop` uses the result at launch, and
-ignores it when told to. Finally it runs `backfill-study` standing alone, and
-checks that it reads a calculation folder exactly as the chain does.
+ignores it when told to. It runs `backfill-study` standing alone, and checks
+that it reads a calculation folder exactly as the chain does. Finally it
+replays a real case, a cell relaxation, before and while it runs: the queue
+wait of the job as written, the step time (estimated, then measured), and the
+`--time` to submit with.
 
 ## 2. Purpose
 
@@ -72,10 +75,20 @@ double, up to what fits in *W* (`⌊T_work / (t_ionic × 1.15)⌋`).
 | 6 | no accounting data | profile default `01:00:00`; the state says why the study could not decide |
 | 6 | `--no-queue-study` | profile default, no study file |
 | 6 | `vasp-relax-loop --study` | refused, naming `backfill-study` |
-| 7 | `backfill-study` in the folder, no option | proposes **2 h**; says where each input came from; creates nothing, submits nothing |
+| 7 | `backfill-study` in the folder, no option | the job as written (`--time=04:00:00`) waits **~4 h**; recommends the chain of **3 × 2-h chunks** (24 min in all), with the one-job alternative `--time=01:00:00` next to it |
+| 7 | `--details` | adds the per-walltime table (`PROPOSED CHUNK : 2 h`) and where each input came from |
 | 7 | the same folder through both programs, with `test_startup_s="10.4"` | backfill-study and the chain agree on the ionic step (25.6 s), steps, ranks, nodes, memory and walltime (120 min); the start-up is read as **10 s** |
 | 7 | no folder, the job on the command line | the same 2 h |
-| 7 | no folder and no options | exit 2, naming what is missing and `vasp-test` as the way to get it |
+| 7 | no folder and no options | exit 2: "not a calculation folder", and the options that describe the job instead |
+| 7 | run in the toolkit's own directory, as it was first run on a real cluster | **one** message, not four; no false `NSW=0 in INCAR`; names `--nodes --cpus --mem-mb` (the partition comes from the profile) |
+| 7 | a calculation folder with everything but its INCAR | the queue wait, a note that the INCAR is missing, no recommendation |
+| 7 | a folder that does not exist | "no such folder" |
+| 7 | by hand, no `--partition` | the profile's partition, and the output says so |
+| 7 | by hand, all six given, too little data to decide | the fallback is the profile's 60 min, not a built-in 600 |
+| 8a | a LaMnO3-shaped relaxation **before** launching (vasp-test only) | the job as written (7 days) waits **~36 min** (median of 10 similar week-long jobs); the step is labelled estimated, its 12 electronic steps per ionic step assumed; `--time=5-20:00:00`; the whole report in at most 25 lines |
+| 8b | the same **while it runs** (19 ionic steps in its OUTCAR) | the step is **measured**, 55 min; `--time=5-07:00:00`, and 7 days is "more than the run can use"; the folder's job waited 12 min; 19 steps done |
+| 8c | the script asks for 2 days | flagged: too little for all of NSW |
+| 8d | no vasp-test and no run | the queue wait, and no recommendation |
 
 **Why "similar" matters.** A 1-node job and a 20-node job at the same walltime
 wait very differently. The study first compares jobs that match on nodes (the
@@ -86,7 +99,7 @@ walltimes, and reports the level it used.
 
 ## 5. Obtained results
 
-All twenty-eight as expected. The study as the chain shows it at launch (section 6):
+All forty-five as expected. The study as the chain shows it at launch (section 6):
 
 ```
   walltime   fits?  steps/chunk  chunks   jobs   median    p75      p90     expected total
@@ -102,7 +115,7 @@ All twenty-eight as expected. The study as the chain shows it at launch (section
 
 (rows with no jobs omitted here). 24.0 min = 3 × (5 min + 10 s) + 20 × 25.6 s.
 
-`backfill-study` is its own command since 2026-09-24; the chain calls it
+`backfill-study` has been its own command since 2026-09-24; the chain calls it
 with its own numbers rather than letting it re-derive them, and section 7 is
 what keeps the two readings of a folder identical.
 
@@ -110,7 +123,28 @@ One package bug was found by section 7 and fixed in `vasp_chain.sh`: vasp-test
 writes its start-up time with a decimal (`test_startup_s="58.3"`), and the
 chain's `int()` kept only the digits, reading **583 s**. Every chunk budget
 lost ten times its start-up; the tests never saw it because their state files
-held whole numbers. A negative control with the fix removed reads 104 for 10.4. `wolfpack_queue.py` is standard-library only and Python 3.6+
+held whole numbers. A negative control with the fix removed reads 104 for 10.4.
+
+Three defects in `backfill-study`'s own messages were found when it was first
+run by hand on a real cluster, in the toolkit's directory instead of a
+calculation folder:
+
+1. It printed four complaints for one cause. One of them was false: an absent
+   INCAR was read as an empty one and reported as `NSW=0 in INCAR`.
+2. The options it suggested were incomplete: `--steps` and `--partition` were
+   missing from the list.
+3. Given all six options by hand, it replaced the profile's chunk settings with
+   built-in defaults (a 600-min fallback where the profile said 60).
+
+Against the previous `backfill_study.py`, the six new cases fail on all but
+one: the partition was already read from the profile when it was not given.
+
+Then the same first real run showed what the command was missing. It printed
+a 17-row table that was mostly empty. It labelled vasp-test's assumption in a
+way that read as a claim about the user's 20-hour job, while ignoring that
+job's OUTCAR, which held the real step time. And with too little queue data it
+recommended nothing, not even the walltime the run needs. Section 8 is that
+case. Against the version before this change, 25 of the 45 assertions fail. `wolfpack_queue.py` is standard-library only and Python 3.6+
 (checked with `vermin`, not run: there is no 3.6 here). It runs on a login node,
 inside the launcher, where the toolkit's conda environment may not be active.
 
@@ -123,7 +157,7 @@ coincide and no percentile convention can change the answer.
 
 ## 7. Verdict
 
-**PASSED** — 28 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 45 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

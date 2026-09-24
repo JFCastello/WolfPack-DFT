@@ -171,13 +171,22 @@ must_refuse "vasp-relax-loop --study points at the command that does it now" "ba
 # ===========================================================================
 # 7. backfill-study, STANDING ALONE
 # ===========================================================================
-# In a calculation folder, with no option, it reads what the chain would read
-# -- and says where each number came from.
+# In a calculation folder, with no option, it reads what the chain would read.
+# This folder's job (4 ranks, 8 GB, --time=04:00:00), its 25.6-s steps and
+# NSW = 20, against the history above:
+#   the job as written, 4 h: the 12 four-hour jobs waited 4 h
+#   one job: (10 + 20 x 25.6 x 1.15) s -> 1 h; 1-h jobs wait 2 h -> ~2.1 h in all
+#   the chain: 3 chunks of 2 h waiting 5 min each -> 24 min in all  => the chain
 out=$(ch_backfill "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
-      "backfill-study alone, in the folder, proposes the same 2 h (rc=$rc)"
-ok_if "grep -q 'NSW in INCAR' <<<\"\$out\" && grep -q 'slurm_vasptest.sh --ntasks' <<<\"\$out\"" \
-      "and says where each input came from"
+ok_if "(( rc == 0 )) && grep -q 'asks for --time=04:00:00' <<<\"\$out\" && grep -qE 'expected wait +~4.0 h' <<<\"\$out\"" \
+      "it estimates the queue wait of the job as written: 4 h asked, ~4 h wait (rc=$rc)"
+ok_if "grep -q 'vasp-relax-loop   3 chunks of 2 h, each waiting ~5 min: ~24 min in all' <<<\"\$out\" && grep -q '=> use vasp-relax-loop' <<<\"\$out\"" \
+      "and recommends the chain of 2-h chunks, which finishes first here"
+ok_if "grep -q 'one job           --time=01:00:00' <<<\"\$out\"" \
+      "with the one-job alternative next to it, as a concrete --time (01:00:00)"
+out=$(ch_backfill "$d" --details 2>&1)
+ok_if "grep -q 'NSW in INCAR' <<<\"\$out\" && grep -q 'slurm_vasptest.sh --ntasks' <<<\"\$out\" && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
+      "--details adds the per-walltime table and where each input came from"
 ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "it creates nothing and submits nothing"
 
 # One folder, both programs, the same numbers. If the two ever read a folder
@@ -186,7 +195,7 @@ ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "it creates not
 # decimal: the chain used to strip the point and read "10.4" as 104 s.
 d=$(ch_setup twins); cp "$H" "$W/twins.fake/history"
 sed -i 's/test_startup_s="10"/test_startup_s="10.4"/' "$d/.wolfpack/state.env"
-line=$(ch_backfill "$d" 2>/dev/null | grep '^WP_BACKFILL_STUDY ')
+line=$(ch_backfill "$d" --machine 2>/dev/null | grep '^WP_BACKFILL_STUDY ')
 ch_run "$d" >/dev/null 2>&1
 _f(){ sed -n "s/.* $1=\([^ ]*\).*/\1/p" <<<"$line"; }
 ok_if "[[ -n '$(_f t_ion_s)' && '$(_f t_ion_s)' == '$(ch_state "$d" t_ionic_s)' ]]" \
@@ -205,12 +214,133 @@ e="$W/nofolder"; mkdir -p "$e"
 out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twins.fake" \
         FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF=/nonexistent HOME="$e" \
         "$WP_PY" "$Q" --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192 --t-ion-s 25.6 \
-        --steps 20 --startup-s 10 --margin-min 5 --default-wall-min 60 2>&1 ); rc=$?
+        --steps 20 --startup-s 10 --margin-min 5 --default-wall-min 60 --machine 2>&1 ); rc=$?
 ok_if "(( rc == 0 )) && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
       "with no folder, given the job on the command line, it answers the same (rc=$rc)"
 out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" WOLFPACK_CLUSTER_CONF=/nonexistent \
         HOME="$e" "$WP_PY" "$Q" 2>&1 ); rc=$?
-ok_if "(( rc == 2 )) && grep -q 'cannot study without' <<<\"\$out\" && grep -q 'vasp-test' <<<\"\$out\"" \
-      "with neither, it refuses and says what is missing and how to get it (rc=$rc)"
+ok_if "(( rc == 2 )) && grep -q 'is not a calculation folder' <<<\"\$out\" && grep -q -- '--time' <<<\"\$out\"" \
+      "with neither, it refuses: not a calculation folder, and how to give the job instead (rc=$rc)"
+
+# Run where it was first run by hand on a real cluster: in the toolkit's own
+# directory. That used to print four complaints for one cause, one of them
+# false -- "NSW=0 in INCAR" where there is no INCAR at all.
+out=$( cd "$TK_DIR" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" \
+        WOLFPACK_CLUSTER_CONF="$W/twins.fake/cluster.conf" HOME="$e" "$WP_PY" "$Q" 2>&1 ); rc=$?
+ok_if "(( rc == 2 )) && [[ \$(grep -c '^backfill-study:' <<<\"\$out\") == 1 ]] && ! grep -q 'NSW=0' <<<\"\$out\"" \
+      "in the toolkit's own folder: one message, not four, and no false 'NSW=0 in INCAR' (rc=$rc)"
+ok_if "grep -q 'still missing: --nodes --cpus --mem-mb\$' <<<\"\$out\"" \
+      "it names what the queue estimate cannot do without, less --partition, which the profile gives"
+
+# A calculation folder with no INCAR: the queue wait still, and says what the
+# recommendation lacks -- not NSW=0.
+f="$W/noincar"; rm -rf "$f"; cp -r "$W/twins" "$f"; rm -f "$f/INCAR" "$f/INCAR.chain.bak"
+out=$( cd "$f" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twins.fake" \
+        FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF="$W/twins.fake/cluster.conf" HOME="$e" \
+        "$WP_PY" "$Q" 2>&1 ); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'no INCAR here' <<<\"\$out\" && ! grep -q 'NSW=0' <<<\"\$out\" && grep -q 'QUEUE WAIT' <<<\"\$out\" && ! grep -q 'RECOMMENDATION' <<<\"\$out\"" \
+      "a folder with no INCAR gives the queue wait, says the INCAR is missing, recommends nothing (rc=$rc)"
+
+out=$( "$WP_PY" "$Q" "$W/does-not-exist" 2>&1 ); rc=$?
+ok_if "(( rc == 2 )) && grep -q 'no such folder' <<<\"\$out\"" "a folder that does not exist is named as such"
+
+# By hand, outside any calculation folder, the profile still counts: its
+# partition, and its chunk settings.
+out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twins.fake" \
+        FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF="$W/twins.fake/cluster.conf" HOME="$e" \
+        "$WP_PY" "$Q" --nodes 1 --cpus 4 --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10 \
+        --details 2>&1 ); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'partition        profile WP_MAIN_PARTITION' <<<\"\$out\" && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
+      "by hand with no --partition, the profile's is used and said so (rc=$rc)"
+# All six given: the profile's chunk settings still count. They used to be
+# replaced by built-in defaults (a 600-min fallback walltime, where this
+# profile says 60).
+out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twins.fake" \
+        FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF="$W/twins.fake/cluster.conf" HOME="$e" \
+        "$WP_PY" "$Q" --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192 --t-ion-s 25.6 \
+        --steps 20 --startup-s 10 --min-jobs 1000 --machine 2>&1 ); rc=$?
+ok_if "(( rc == 0 )) && grep -q '^WP_BACKFILL_STUDY wall_min=60 source=fallback' <<<\"\$out\"" \
+      "all six given by hand, the fallback is still the profile's walltime (60 min), not a built-in 600"
+
+# ===========================================================================
+# 8. A REAL CASE: a cell relaxation, before and while it runs
+# ===========================================================================
+# Shaped on a LaMnO3 relaxation run on a real cluster: 1 node x 56 ranks,
+# 46 GB, --time=7-00:00:00, NSW = 120. vasp-test's benchmark measured 263.377 s
+# per electronic step but stopped before completing an ionic step, and
+# recorded an 889-s start-up. The queue: 76 short jobs, and 10 week-long jobs
+# of this size that waited 35-37 min (median 36).
+L="$W/lamno3"; d=$(ch_setup lamno3); fk="$d.fake"
+cat > "$d/slurm_vasptest.sh" <<'EOF'
+#!/bin/bash
+#SBATCH --job-name=VASP
+#SBATCH --partition=fakepart
+#SBATCH --nodes=1
+#SBATCH --ntasks=56
+#SBATCH --mem-per-cpu=850
+#SBATCH --time=7-00:00:00
+EOF
+sed -i -e 's/WP_CHUNK_WALLTIME_MIN="60"/WP_CHUNK_WALLTIME_MIN="600"/' "$fk/cluster.conf"
+printf 'stage="test"\ntest_avg_loop="263.377"\ntest_ranks="56"\ntest_cpu_eff="100"\ntest_startup_s="889"\ntest_scf_per_ionic="0"\n' \
+    > "$d/.wolfpack/state.env"
+sed -i 's/^NSW .*/NSW    = 120/' "$d/INCAR"
+"$WP_PY" - "$fk/history" <<'PY'
+import sys, datetime as dt
+with open(sys.argv[1], "w") as fh:
+    i = 0
+    for lim, wait, n, cpus in ((30, 1, 76, 4), (10080, 35, 10, 48)):
+        for k in range(n):
+            sub = dt.datetime(2026, 9, 1) + dt.timedelta(minutes=53 * i); i += 1
+            sta = sub + dt.timedelta(minutes=wait + (k % 3))
+            fh.write(f"{i}|fakepart|{sub.isoformat()}|{sub.isoformat()}|{sta.isoformat()}|"
+                     f"COMPLETED|x|{lim}|1|{cpus}|cpu={cpus},mem=40G,node=1|\n")
+PY
+
+# (a) BEFORE launching: vasp-test is all there is. One ionic step is estimated
+#     263.377 x 12 (assumed) x 1.15 = 3634.6 s; one job needs
+#     (889 + 120 x 3634.6 x 1.15) s = 139.6 h -> 140 h = 5-20:00:00.
+out=$(ch_backfill "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -qE 'expected wait +~36 min +median of 10 jobs of your size' <<<\"\$out\"" \
+      "before launching, the job as written (7 days) waits ~36 min: the median of the 10 similar week-long jobs"
+ok_if "grep -q 'estimated from vasp-test' <<<\"\$out\" && grep -q 'the 12 is ASSUMED' <<<\"\$out\"" \
+      "the step time is labelled an estimate from vasp-test, and what in it is assumed"
+ok_if "grep -q 'one job           --time=5-20:00:00' <<<\"\$out\" && grep -q '=> submit as one job with  #SBATCH --time=5-20:00:00' <<<\"\$out\"" \
+      "and a concrete walltime to submit with: --time=5-20:00:00"
+ok_if "(( \$(wc -l <<<\"\$out\") <= 25 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\" && ! grep -q 'fits?' <<<\"\$out\"" \
+      "in $(wc -l <<<"$out") lines, with no machine line and no 17-row table"
+
+# (b) WHILE it runs: its OUTCAR has 19 ionic steps (5400 s, then 3300 s each).
+#     Measured beats estimated: max(mean without the cold first, last) = 3300 s;
+#     one job then needs (889 + 120 x 3300 x 1.15) s = 126.8 h -> 5-07:00:00.
+"$WP_PY" - "$d/OUTCAR" <<'PY'
+import sys
+with open(sys.argv[1], "w") as fh:
+    for k in range(19):
+        t = 5400 if k == 0 else 3300
+        fh.write("     LOOP+:  cpu time   %.1f: real time   %.1f\n" % (t, t))
+PY
+touch "$d/VASP-13276000.out" "$d/VASP-13276000.err"
+printf '13276000|2026-09-23T18:00:00|2026-09-23T18:00:00|2026-09-23T18:12:00|RUNNING|10080|7-00:00:00\n' \
+    > "$fk/sacct.13276000"
+out=$(ch_backfill "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -qE 'one ionic step +~55 min +measured: 19 ionic step' <<<\"\$out\" && ! grep -q 'ASSUMED' <<<\"\$out\"" \
+      "with a run in the folder, the step is MEASURED from its OUTCAR (55 min), not assumed"
+ok_if "grep -q 'one job           --time=5-07:00:00' <<<\"\$out\" && grep -q 'more than the run can use' <<<\"\$out\"" \
+      "the recommendation follows the measurement (5-07:00:00), and says 7 days is more than it can use"
+ok_if "grep -q 'job 13276000 asking 7-00:00:00 waited 12 min' <<<\"\$out\" && grep -q '19 step(s) already done here' <<<\"\$out\"" \
+      "and it reports what the folder's own job waited, and how far it got"
+
+# (c) Too little asked for: 2 days where the run can need 5-07:00:00.
+sed -i 's/--time=7-00:00:00/--time=2-00:00:00/' "$d/slurm_vasptest.sh"
+out=$(ch_backfill "$d" 2>&1)
+ok_if "grep -q 'asks for 2-00:00:00 now: too little' <<<\"\$out\"" "a walltime too short for all of NSW is flagged"
+
+# (d) No timing at all -- no vasp-test, no run: the queue wait, and nothing
+#     invented. This is the case the command must still serve.
+rm -f "$d/.wolfpack/state.env" "$d/OUTCAR" "$d"/VASP-13276000.*
+sed -i 's/--time=2-00:00:00/--time=7-00:00:00/' "$d/slurm_vasptest.sh"
+out=$(ch_backfill "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -qE 'expected wait +~36 min' <<<\"\$out\" && ! grep -q 'RECOMMENDATION' <<<\"\$out\" && grep -q 'no timing here yet' <<<\"\$out\"" \
+      "with no timing data, it still gives the queue wait -- and recommends no walltime it could not know (rc=$rc)"
 
 exit $(( FAIL_N > 0 ))

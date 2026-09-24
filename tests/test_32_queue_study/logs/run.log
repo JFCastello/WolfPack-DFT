@@ -16,8 +16,10 @@
   [32m[ OK ][0m and the state says why the study could not decide
   [32m[ OK ][0m --no-queue-study uses the profile's walltime and runs no study
   [32m[ OK ][0m vasp-relax-loop --study points at the command that does it now
-  [32m[ OK ][0m backfill-study alone, in the folder, proposes the same 2 h (rc=0)
-  [32m[ OK ][0m and says where each input came from
+  [32m[ OK ][0m it estimates the queue wait of the job as written: 4 h asked, ~4 h wait (rc=0)
+  [32m[ OK ][0m and recommends the chain of 2-h chunks, which finishes first here
+  [32m[ OK ][0m with the one-job alternative next to it, as a concrete --time (01:00:00)
+  [32m[ OK ][0m --details adds the per-walltime table and where each input came from
   [32m[ OK ][0m it creates nothing and submits nothing
   [32m[ OK ][0m the same ionic step: backfill-study 25.6 s, the chain 25.6 s
   [32m[ OK ][0m the same steps, ranks and nodes (20, 4, 1)
@@ -25,4 +27,19 @@
   [32m[ OK ][0m and the same proposal: 120 min, which is what the chain then runs with
   [32m[ OK ][0m a start-up written as 10.4 s is read as 10 s, not 104 (the chain read 10)
   [32m[ OK ][0m with no folder, given the job on the command line, it answers the same (rc=0)
-  [32m[ OK ][0m with neither, it refuses and says what is missing and how to get it (rc=2)
+  [32m[ OK ][0m with neither, it refuses: not a calculation folder, and how to give the job instead (rc=2)
+  [32m[ OK ][0m in the toolkit's own folder: one message, not four, and no false 'NSW=0 in INCAR' (rc=2)
+  [32m[ OK ][0m it names what the queue estimate cannot do without, less --partition, which the profile gives
+  [32m[ OK ][0m a folder with no INCAR gives the queue wait, says the INCAR is missing, recommends nothing (rc=0)
+  [32m[ OK ][0m a folder that does not exist is named as such
+  [32m[ OK ][0m by hand with no --partition, the profile's is used and said so (rc=0)
+  [32m[ OK ][0m all six given by hand, the fallback is still the profile's walltime (60 min), not a built-in 600
+  [32m[ OK ][0m before launching, the job as written (7 days) waits ~36 min: the median of the 10 similar week-long jobs
+  [32m[ OK ][0m the step time is labelled an estimate from vasp-test, and what in it is assumed
+  [32m[ OK ][0m and a concrete walltime to submit with: --time=5-20:00:00
+  [32m[ OK ][0m in 20 lines, with no machine line and no 17-row table
+  [32m[ OK ][0m with a run in the folder, the step is MEASURED from its OUTCAR (55 min), not assumed
+  [32m[ OK ][0m the recommendation follows the measurement (5-07:00:00), and says 7 days is more than it can use
+  [32m[ OK ][0m and it reports what the folder's own job waited, and how far it got
+  [32m[ OK ][0m a walltime too short for all of NSW is flagged
+  [32m[ OK ][0m with no timing data, it still gives the queue wait -- and recommends no walltime it could not know (rc=0)
