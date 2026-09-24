@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# vasp-check: the post-mortem. It reads a finished run and says what it was and
-# whether it converged.
+# vasp-check: the post-mortem. It reads a finished run and tabulates what it
+# holds -- data only, no physical labels -- plus checks against the run's own
+# criteria.
 #
-# The point of testing it is that it makes CLAIMS about a calculation, and a
-# post-mortem that mislabels a metal as an insulator -- or calls an unconverged
-# run converged -- is worse than no post-mortem, because it is believed.
+# The point of testing it is that its numbers are acted on. A gap, a moment or
+# a count of partially occupied states that misreads the run -- or a check that
+# calls an unconverged run converged -- is worse than no post-mortem, because
+# it is believed.
 #
 # Every case below is a real VASP run of a cell whose answer is known from
 # ../test_01_cases (which checks those answers against published values).
@@ -50,11 +52,13 @@ EOF
 )
 if [[ "$d" == NOPOT ]]; then skip "no Si POTCAR"; else
     out=$(cd "$d" && timeout 300 bash "$VC" 2>&1); echo "$out" > "$d/check.log"
-    grep -qiE "insulator|semiconductor" <<<"$out" \
-        && pass "Si: reported as a semiconductor/insulator" \
-        || fail "Si: not identified as gapped -- $(grep -iE 'metal|gap' <<<"$out" | head -1)"
+    # Gapped, as data: no state partially occupied. The report no longer says
+    # "insulator" -- the reader does; the data that decides it must be right.
+    grep -qE "partially-occupied states +0\$" <<<"$out" \
+        && pass "Si: no partially occupied state -- the data of a gapped system" \
+        || fail "Si: partially occupied states reported for a semiconductor -- $(grep -E 'partially-occupied' <<<"$out")"
     # The gap it prints must be the gap the run has: ~0.6 eV for Si in PBE.
-    g=$(grep -oiP 'gap[^0-9]{0,24}\K[0-9]+\.[0-9]+' <<<"$out" | head -1)
+    g=$(grep -oP 'gap \(eV\)\s+\K[0-9]+\.[0-9]+' <<<"$out" | head -1)
     near "${g:-}" 0.6 0.25 "Si: the gap vasp-check prints matches the published PBE value"
     grep -qiE "converged|reached required accuracy|OK" <<<"$out" \
         && pass "Si: a converged run is reported as converged" \
@@ -74,28 +78,22 @@ EOF
 )
 if [[ "$d" == NOPOT ]]; then skip "no Al POTCAR"; else
     out=$(cd "$d" && timeout 300 bash "$VC" 2>&1); echo "$out" > "$d/check.log"
-    # It must SAY the system is metallic. The word "insulator" also appears in
-    # an unrelated tip about ISMEAR ("for an insulator/DOS use ISMEAR=-5"), so
-    # a bare grep for it fails a correct report -- this test did exactly that
-    # at first.
-    grep -qiE "metallic|partially-occupied" <<<"$out" \
-        && pass "Al: the report says the system is metallic" \
-        || fail "Al: a free-electron metal was not identified as one"
+    # The data of a metal: states partially occupied at E_F.
+    np_al=$(grep -oP 'partially-occupied states\s+\K[0-9]+' <<<"$out" | head -1)
+    ok_if "(( ${np_al:-0} > 0 ))" "Al: the report shows the partially occupied states of a metal (${np_al:-none})"
 
     # THE assertion. vasp-check reports a "fundamental gap" of about 0.03 eV
     # for aluminium -- which is the k-mesh, not a gap; pymatgen reads the same
     # run as 0.000 eV. The number is not wrong to print, but a reader who sees
     # only that line is misled, so the gap must not be reported WITHOUT the
     # metallic warning alongside it.
-    gap_al=$(grep -oP 'fundamental gap \(VASP\):\s*\K[0-9.]+' <<<"$out" | head -1)
+    gap_al=$(grep -oP 'gap \(eV\)\s+\K[0-9.]+' <<<"$out" | head -1)
     if [[ -n "$gap_al" ]]; then
         info "    Al: vasp-check prints a gap of ${gap_al} eV (pymatgen reads 0.000)"
         awk -v g="$gap_al" 'BEGIN{exit !(g < 0.2)}' \
             && pass "Al: any gap it prints is below the smearing width, not a real gap" \
             || fail "Al: a gap of ${gap_al} eV was reported for a free-electron metal"
-        grep -qiE "metallic|partially-occupied|fuzzy" <<<"$out" \
-            && pass "Al: the metallic warning accompanies the gap number" \
-            || fail "Al: a gap was reported for a metal with nothing saying it is metallic"
+        ok_if "(( ${np_al:-0} > 0 ))" "Al: the gap number stands next to the partially-occupied count that qualifies it"
     else
         pass "Al: no fundamental gap is reported at all"
     fi
@@ -120,7 +118,7 @@ if [[ "$d" == NOPOT ]]; then skip "no Fe POTCAR"; else
     grep -qiE "magneti[sz]ation|net cell moment|ferromagnet" <<<"$out" \
         && pass "Fe: the report has a magnetization section" \
         || fail "Fe: a ferromagnet produced no magnetization report"
-    m=$(grep -oP 'Net cell moment \(uB\)\s*\K-?[0-9.]+' <<<"$out" | head -1)
+    m=$(grep -oP 'net moment \(uB\)\s+\K-?[0-9.]+' <<<"$out" | head -1)
     near "${m:-}" 2.2 0.4 "Fe: the moment vasp-check prints matches the published 2.2 muB"
 fi
 
@@ -138,8 +136,20 @@ EOF
 )
 if [[ "$d" == NOPOT ]]; then skip "no Si POTCAR"; else
     out=$(cd "$d" && timeout 300 bash "$VC" 2>&1); echo "$out" > "$d/check.log"
-    grep -qiE "NELM|not converge|unconverged|did not reach|exhaust" <<<"$out" \
-        && pass "an SCF that ran out of NELM is reported as unconverged" \
+    grep -qE "\[FAIL\] SCF reached NELM=2" <<<"$out" \
+        && pass "an SCF that ran out of NELM is a failed check" \
         || fail "an SCF that hit NELM=2 was not flagged: this is what vasp-check is for"
+    (cd "$d" && timeout 300 bash "$VC" >/dev/null 2>&1); rc=$?
+    ok_if "(( rc == 1 ))" "and vasp-check exits 1 on it (rc=$rc)"
+fi
+
+# --- 5. data, not interpretation --------------------------------------------
+# The report states numbers and checks; the physics is the reader's. It used
+# to add "-> antiferromagnetic ordering (physical)", "-> clean insulator",
+# "physically consistent" and a page of GW advice.
+all_logs=$(cat "$W"/*/check.log 2>/dev/null)
+if [[ -n "$all_logs" ]]; then
+    hits=$(grep -oiE "antiferromagnet|ferromagnetic|insulat|semiconduct|metallic|physically|non-?magnetic|>>" <<<"$all_logs" | sort -u | tr '\n' ' ')
+    ok_if "[[ -z '$hits' ]]" "no report carries a physical label or advice${hits:+ (found: $hits)}"
 fi
 exit $(( FAIL_N > 0 ))

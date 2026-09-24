@@ -1,18 +1,23 @@
 # test_18_vasp_check
 
-> vasp-check: does it identify what a finished run actually was
+> vasp-check: does it report what a finished run actually holds
 
 ## 1. Definition
 
 Runs four real VASP calculations whose answers are known and verified against
-published values, hands each to `vasp-check`, and checks the verdict it gives.
+published values, hands each to `vasp-check`, and checks the numbers it reports
+and the checks it raises.
 
 ## 2. Purpose
 
-`vasp-check` makes **claims** about a calculation: metal or insulator,
-converged or not, magnetic or not, and what the gap is. A post-mortem that
-mislabels a metal as an insulator is worse than no post-mortem, because by the
-time you run it you are already looking for a verdict and you will take it.
+`vasp-check` reports data: the gap, the partially occupied states, the
+moment, the SCF iterations. It checks those against the run's own criteria.
+Since 2026-09-24 it draws no physical conclusions: no "metallic", no
+"insulator", no "antiferromagnetic", no advice. The reader draws them.
+
+That makes the data the thing to test. A gap, a count of partially occupied
+states or a moment that misreads the run is worse than no post-mortem, because
+it is acted on. So is a check that calls an unconverged run converged.
 
 ## 3. How it is executed
 
@@ -24,10 +29,11 @@ Four runs on 4 ranks, a few minutes in total, plus an empty directory.
 
 | case | must say | why this one |
 |---|---|---|
-| **Si** | semiconductor/insulator, gap ≈ 0.6 eV, converged | the ordinary healthy run |
-| **Al** | **metallic**, and any gap it prints below the smearing width | a checker that finds a gap everywhere passes Si and fails here |
-| **Fe** | magnetic, moment ≈ 2.2 μB | a checker that ignores `ISPIN` reports a non-magnetic metal |
-| **Si, `NELM = 2`, `EDIFF = 1E-8`** | **unconverged** | the run completes and writes a perfectly normal OUTCAR |
+| **Si** | 0 partially occupied states, gap ≈ 0.6 eV, converged | the ordinary healthy run |
+| **Al** | partially occupied states > 0, printed next to any gap, and that gap below the smearing width | a checker that finds a gap everywhere passes Si and fails here |
+| **Fe** | a magnetization section, net moment ≈ 2.2 μB | a checker that ignores `ISPIN` reports no moment |
+| **Si, `NELM = 2`, `EDIFF = 1E-8`** | `[FAIL] SCF reached NELM=2`, exit code 1 | the run completes and writes a perfectly normal OUTCAR |
+| all four reports | no physical label and no advice | the report is data; the conclusions are the reader's |
 
 Al and Si are the pair that matters: same code path, same 2-atom-scale cell,
 **opposite answers**. Neither can be got right by accident.
@@ -51,17 +57,23 @@ nothing to check.
 ## 5. Obtained results
 
 ```
-Si: reported as a semiconductor/insulator; gap 0.5975 eV; converged
-Al: the report says the system is metallic
-Al: vasp-check prints a gap of 0.03 eV (pymatgen reads 0.000) -- below
-    the 0.2 eV smearing width, with the metallic warning alongside it
-Fe: magnetization section present; net cell moment 2.2410 uB
-Si with NELM=2: reported as unconverged
+Si: no partially occupied state; gap 0.5975 eV; converged
+Al: 177 partially occupied states; a gap of 0.03 eV (pymatgen reads 0.000),
+    below the 0.2 eV smearing width, printed next to that count
+Fe: magnetization section present; net moment 2.2410 uB
+Si with NELM=2: [FAIL] SCF reached NELM=2 ...; exit code 1
+no report carries a physical label or advice
 an empty directory: no crash, reported as having nothing to check
 ```
 
-No package bug was found here. Two assertions failed on the first run; both
-were **my own**.
+Two package defects came out of the rewrite, both older than it. The shortest
+nearest-neighbour distance of a one-atom cell (Al, Fe) printed as `inf`: it was
+computed between distinct sites only, missing the atom's own periodic images.
+And the check "occupied bands match NELECT" fired a warning on every metal,
+where that count is a threshold rather than a number of electrons. It now
+applies only when no band is partially occupied.
+
+On the first run of this test, two assertions failed; both were **my own**.
 
 
 ## 6. Pass / fail criterion
@@ -73,8 +85,8 @@ were **my own**.
 | Al gap | < 0.2 eV (the smearing width) | any invented gap |
 
 A gap printed for aluminium is not by itself a failure — 0.03 eV is the k-mesh,
-not a gap — but printing it **without the metallic warning alongside** is,
-because a reader who sees only that line is misled.
+not a gap — but printing it **without the partially-occupied count next to it**
+is, because a reader who sees only that line is misled.
 
 **What is not asserted:** whether the numbers are good physics. PBE
 underestimates semiconductor gaps by roughly a factor of two; that is a
@@ -83,7 +95,7 @@ property of the functional, not a defect in the checker. The test asserts that
 
 ## 7. Verdict
 
-**PASSED** — 11 assertions, 0 failed. See `logs/run.log`; each case keeps its
+**PASSED** — 13 assertions, 0 failed. See `logs/run.log`; each case keeps its
 own `check.log` beside its OUTCAR under the work directory.
 
 ## Sources

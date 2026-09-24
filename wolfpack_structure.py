@@ -59,10 +59,16 @@ def _spacegroups(struct):
 
 
 def _nn_distances(struct):
-    """Shortest distance from each site to any other, in site order."""
-    d = struct.distance_matrix.copy()
-    np.fill_diagonal(d, np.inf)
-    return d.min(axis=1)
+    """Shortest distance from each site to any other atom, in site order --
+    periodic images included, its OWN images too. The distance matrix between
+    distinct sites misses those, and gave 'inf' for a one-atom cell."""
+    r = 1.5 * (struct.volume / max(len(struct), 1)) ** (1.0 / 3.0)
+    for _ in range(5):
+        nbrs = struct.get_all_neighbors(r)
+        if all(len(n) for n in nbrs):
+            return np.array([min(x.nn_distance for x in n) for n in nbrs])
+        r *= 2.0
+    return np.array([min((x.nn_distance for x in n), default=np.inf) for n in nbrs])
 
 
 def _cell_rows(struct):

@@ -123,7 +123,7 @@ pass `--purge-repo`.
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
 | `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue, and what `--time` to ask for**: the expected wait of the job script as written (from the partition's `sacct` history of similar jobs; needs no timing data), the run time from the folder's measured `OUTCAR` or from `vasp-test`, and a concrete `--time` — one job or a chain, whichever finishes first. `vasp-relax-loop` runs it at launch; alone, it launches nothing |
 | `vasp-queue-wait` | `vasp_queue_wait.sh` | **How long jobs actually wait** in each partition, split by job size: median, mean, p90 and worst, from SLURM's own accounting. The median is the headline — queue waits have a long tail, and a mean is what makes people say "this queue takes a day" about one that usually starts in ten minutes |
-| `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
+| `vasp-check` | `vasp_check.sh` | **What a run produced, as data** — parameters, convergence, forces, cell and stress, what the relaxation changed, moments, gap with the VBM/CBM band, spin and k-point, GW quasiparticle energies — plus checks against the run's own NELM/EDIFFG and VASP's rules. No physical interpretation. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — the dry-run, the benchmark, the production job and every chunk of a `vasp-relax-loop`/`vasp-scf-loop` chain (older chains too), each labelled with its stage — reads `sacct` for them and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
 | `vasp-nuke` | `vasp_nuke.sh` | Fast no-questions-asked delete of all VASP output files |
@@ -599,40 +599,40 @@ dependency as queue wait — SLURM says so by making `Eligible` later than
 
 ### `vasp-check`
 
-Post-mortem analysis of a finished or killed VASP run. Detects the calculation
-type automatically and runs 10 diagnostic sections:
-
-1. File inventory
-2. Run metadata (calc type, XC layer, INCAR tags)
-3. Termination (normal / OOM / walltime / crash)
-4. Data completeness / plottability verdict
-5. Electronic SCF convergence
-6. Ionic convergence and forces (relaxations)
-7. Cell, volume and stress
-8. Magnetization
-9. Eigenvalues, gap, VBM/CBM, occupied bands, GW QP table
-10. Pitfalls and recommendations
+What a finished or killed VASP run produced, **as data**. It states numbers and
+draws no physical conclusions: no "metallic", no "antiferromagnetic", no
+advice. The only verdicts are checks against the run's own criteria (NELM,
+EDIFFG) and against explicit VASP requirements (NCORE=1 for GW, LASPH with a
+meta-GGA, NTAUPAR dividing NOMEGA, ...). All of them are listed together at
+the end, one line each.
 
 ```bash
-vasp-check              # analyse the current directory
-vasp-check path/to/calc # analyse a specific directory
-vasp-check --help
+vasp-check              # the current directory
+vasp-check path/to/calc # a specific directory
 ```
 
-It also reports **what the relaxation did to the structure** — the POSCAR it
-started from against the CONTCAR it ended on, with the strain, the per-atom
-displacements and the space group either side.
+Sections, each only when the run has the data:
 
-After a **chunked** run (`vasp-relax-loop`) it takes the "before" from the
-chain's own archive, `wolfpack_chain/chunk-001/POSCAR.in.gz`, and says so in the
-heading. The POSCAR in the folder is not the one the relaxation started from:
-the chain overwrites it at every restart, so diffing it would report what the
-last chunk moved — a small, reassuring number, and smallest exactly when the
-relaxation has wandered furthest.
+| section | what it shows |
+|---|---|
+| Run | calculation type, VASP version, completion, files present |
+| Parameters | the tags that matter, as VASP applied them, five to a line |
+| Electronic convergence | ionic steps, SCF iterations, steps that reached NELM, \|T·S\| per atom |
+| Ionic convergence | max and RMS \|F\| (against \|EDIFFG\|), drift, max \|F\| per step, energy per step |
+| Forces and stress at this geometry | for a static run: max \|F\|, stress components |
+| Cell and stress | volume, lattice lengths, external pressure |
+| What the relaxation changed | POSCAR vs CONTCAR, side by side (below) |
+| Magnetization | net moment, moment per ion |
+| Band edges and gap | E-fermi, gap, VBM/CBM with band, spin and k-point, partially occupied states |
+| Occupations | NELECT, occupied bands, NBANDS, plane waves per k-point |
+| GW quasiparticles | KS and QP gap, band edges KS → QP, mean Z |
+| meta-GGA | POTCAR kinetic-energy density, ICHARG, LASPH, first k-point vs the sibling Scf |
+| Checks | `[ OK ]` / `[WARN]` / `[FAIL]` |
+| Energy | TOTEN, energy(sigma→0), per atom; the result |
 
-Exit codes: `0` = PASS, `1` = at least one FAIL, `2` = usage error.
+Why a run died and whether its data is usable: `vasp-diagnose`.
 
----
+Exit codes: `0` = no failed check, `1` = at least one `[FAIL]`, `2` = usage error.
 
 ### What the relaxation changed
 

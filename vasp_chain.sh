@@ -1122,7 +1122,7 @@ if [[ $ACTION == chunk ]]; then
         if [[ $MODE == relax ]] && (( $(int "${chain_isif:-2}") >= 3 )); then
             note "ISIF>=3: the plane-wave basis was rebuilt at every chunk boundary, so"
             note "follow this with a fresh static run at the final geometry before"
-            note "quoting energies. vasp-check's structure-equilibrium section audits it."
+            note "quoting energies. vasp-check's 'Forces and stress at this geometry' shows it."
         fi
         # The physics verdict, so it is waiting when the user wakes up.
         command -v vasp-check >/dev/null 2>&1 && { echo; vasp-check 2>&1 | tail -40; }

@@ -66,7 +66,7 @@ WolfPack-DFT commands
 
   DIAGNOSIS
     vasp-diagnose           Why did a run die?  (OOM/TIME/CRASH) + data salvage
-    vasp-check              Physics sanity: gap, metal/insulator, magnetism, CBM/VBM
+    vasp-check              What a run produced, as data: convergence, forces, gap, moments + checks
 
   THE QUEUE
     vasp-slurm-report       What a finished job actually cost (CPU/mem/time efficiency)
