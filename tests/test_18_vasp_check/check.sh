@@ -25,6 +25,34 @@ grep -qiE "no |not found|missing|OUTCAR" <<<"$out" \
     && pass "an empty directory is reported as having nothing to check" \
     || fail "an empty directory produced a report anyway"
 
+# --- a RUNNING relaxation: the energies of one and the same ionic step ------
+# VASP prints the ionic-step summary ("free  energy   TOTEN", "energy  without
+# entropy=", two spaces) once per COMPLETED step, and a look-alike line with
+# one space at every SCF iteration. On a real running job the report took
+# TOTEN from step 5 and energy(sigma->0) from the unfinished step 6 -- 0.95 eV
+# apart. This OUTCAR stops mid-step-3 on purpose.
+mkdir -p "$W/running"
+cat > "$W/running/OUTCAR" <<'EOF'
+ vasp.6.5.1 (fixture)
+   NIONS =      2
+   NSW    =     20
+   IBRION =      2
+  FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
+  free  energy   TOTEN  =       -10.50000000 eV
+  energy  without entropy=      -10.50000000  energy(sigma->0) =      -10.50000000
+  free energy    TOTEN  =       -10.60000000 eV
+  energy without entropy =      -10.60000000  energy(sigma->0) =      -10.60000000
+  FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
+  free  energy   TOTEN  =       -10.66000000 eV
+  energy  without entropy=      -10.66000000  energy(sigma->0) =      -10.66000000
+  free energy    TOTEN  =        -9.70000000 eV
+  energy without entropy =       -9.70000000  energy(sigma->0) =       -9.70000000
+EOF
+out=$(cd "$W/running" && timeout 120 bash "$VC" 2>&1)
+e0=$(grep -oP 'energy\(sigma->0\) \(eV\)\s+\K-?[0-9.]+' <<<"$out")
+ok_if "[[ '$e0' == '-10.66000000' ]] && grep -q 'TOTEN (eV) *-10.66000000 *(ionic step 2, the last completed)' <<<\"\$out\"" \
+      "a running relaxation: TOTEN and energy(sigma->0) both of the last completed step (got $e0)"
+
 have_vasp || { skip "no VASP -- the post-mortem goes unchecked against real runs"; exit $(( FAIL_N > 0 )); }
 
 _run(){ # _run NAME CASE POTS MESH <<INCAR

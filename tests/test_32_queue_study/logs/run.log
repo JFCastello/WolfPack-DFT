@@ -43,3 +43,6 @@
   [32m[ OK ][0m and it reports what the folder's own job waited, and how far it got
   [32m[ OK ][0m a walltime too short for all of NSW is flagged
   [32m[ OK ][0m with no timing data, it still gives the queue wait -- and recommends no walltime it could not know (rc=0)
+  [32m[ OK ][0m with 3.6-h measured steps and no queue data for a 497-h job, the chain of 120-h chunks is recommended
+  [32m[ OK ][0m and it says what vasp-relax-loop would pick at launch (96 h, from vasp-test's estimate) instead of promising 120 h
+  [32m[ OK ][0m and that is what vasp-relax-loop really picks when launched there: 5760 min (96 h)

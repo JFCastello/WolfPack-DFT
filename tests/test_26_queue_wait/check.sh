@@ -26,6 +26,8 @@ QW="$TK_DIR/vasp_queue_wait.sh"
 #
 # Plus two rows that must NOT become a wait:
 #   a PENDING job     -- no Start. It is counted as pending, not as a wait of 0.
+#   a CANCELLED job   -- no Start either, but it is not pending: it never will
+#                        run. Counting it made "pending now" disagree with squeue.
 #   a HELD job        -- Eligible later than Submit, so it was waiting on its
 #                        own dependency, not on the queue.
 # ---------------------------------------------------------------------------
@@ -44,6 +46,7 @@ cat <<'ROWS'
 204|slow|2026-09-20T10:00:00|2026-09-20T10:00:00|2026-09-20T10:01:00|COMPLETED|1
 205|slow|2026-09-20T10:00:00|2026-09-20T10:00:00|2026-09-21T10:00:00|COMPLETED|32
 301|slow|2026-09-20T12:00:00|2026-09-20T12:00:00|Unknown|PENDING|1
+302|slow|2026-09-20T12:00:00|2026-09-20T12:00:00|None|CANCELLED by 1000|1
 401|fast|2026-09-20T09:00:00|2026-09-20T23:00:00|2026-09-20T23:00:30|COMPLETED|1
 ROWS
 FAKE
@@ -72,7 +75,7 @@ near "$(_csv slow 5)" 86400 1 "slow: p90 is the day-long wait"
 # 23:00 and then started in 30 s. Counting Submit->Start there would report a
 # 14-hour queue wait that nobody experienced.
 near "$(_csv fast 2)" 5 0.5 "a job held by a dependency is left out of the queue statistics"
-near "$(_csv slow 7)" 1 0.5 "a pending job is counted as pending, not as a wait of zero"
+near "$(_csv slow 7)" 1 0.5 "a pending job is counted as pending -- and one cancelled before it started is not"
 
 # --- 3. the size split -----------------------------------------------------
 # A 1-node job and a 32-node job are not waiting in the same queue. slow's

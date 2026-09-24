@@ -343,4 +343,32 @@ out=$(ch_backfill "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && grep -qE 'expected wait +~36 min' <<<\"\$out\" && ! grep -q 'RECOMMENDATION' <<<\"\$out\" && grep -q 'no timing here yet' <<<\"\$out\"" \
       "with no timing data, it still gives the queue wait -- and recommends no walltime it could not know (rc=$rc)"
 
+# (e) The real run, as it was on the cluster: 3.6-h ionic steps. All of NSW
+#     would need (889 + 120 x 12960 x 1.15) s = 497 h as one job, beyond the
+#     week-long jobs the queue has data for -- so the chain is recommended.
+#     With the MEASURED step, 120-h chunks (7 chunks; 96 h needs 8); but
+#     vasp-relax-loop sizes at launch from vasp-test's 61-min estimate, where
+#     96, 120 and 168 h all need 6 chunks and the shortest, 96 h, wins. The
+#     report used to promise "it picks the 120 h chunks itself at launch".
+printf 'stage="test"\ntest_avg_loop="263.377"\ntest_ranks="56"\ntest_cpu_eff="100"\ntest_startup_s="889"\ntest_scf_per_ionic="0"\n' \
+    > "$d/.wolfpack/state.env"
+"$WP_PY" - "$d/OUTCAR" <<'PY'
+import sys
+with open(sys.argv[1], "w") as fh:
+    for k in range(5):
+        t = 26000 if k == 0 else 12960
+        fh.write("     LOOP+:  cpu time   %.1f: real time   %.1f\n" % (t, t))
+PY
+out=$(ch_backfill "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'vasp-relax-loop   7 chunks of 120 h' <<<\"\$out\" && grep -q '=> use vasp-relax-loop' <<<\"\$out\"" \
+      "with 3.6-h measured steps and no queue data for a 497-h job, the chain of 120-h chunks is recommended"
+ok_if "grep -q 'it would pick 96 h chunks' <<<\"\$out\" && ! grep -q 'picks the 120 h chunks itself' <<<\"\$out\"" \
+      "and it says what vasp-relax-loop would pick at launch (96 h, from vasp-test's estimate) instead of promising 120 h"
+d2=$(ch_setup lamno3_launch); cp "$d/slurm_vasptest.sh" "$d2/"; cp "$d/.wolfpack/state.env" "$d2/.wolfpack/"
+cp "$d/INCAR" "$d2/INCAR"; cp "$fk/history" "$d2.fake/history"
+sed -i -e 's/WP_CHUNK_WALLTIME_MIN="60"/WP_CHUNK_WALLTIME_MIN="600"/' "$d2.fake/cluster.conf"
+ch_run "$d2" >/dev/null 2>&1
+ok_if "[[ '$(ch_state "$d2" chain_wall_min)' == 5760 ]]" \
+      "and that is what vasp-relax-loop really picks when launched there: $(ch_state "$d2" chain_wall_min) min (96 h)"
+
 exit $(( FAIL_N > 0 ))

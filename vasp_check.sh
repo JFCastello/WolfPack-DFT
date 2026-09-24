@@ -553,7 +553,7 @@ if [[ ${ISPIN%.*} == 2 || $LSORBIT == T ]]; then
     END{ for(i=1;i<=n;i++) printf "%d:%.3f ", i, v[i] }' "$OUT")
   if [[ -n $PERAT ]]; then
     printf '  %s\n' "per ion (uB)"
-    printf '%s\n' "$PERAT" | tr ' ' '\n' | awk -F: 'NF==2{printf "    %3s %7.3f", $1, $2; if(++c%6==0)printf "\n"} END{if(c%6)printf "\n"}'
+    printf '%s\n' "$PERAT" | tr ' ' '\n' | awk -F: 'NF==2{v=$2+0; if(v>-0.0005 && v<0.0005)v=0; printf "    %3s %7.3f", $1, v; if(++c%6==0)printf "\n"} END{if(c%6)printf "\n"}'
     kv "sum, max |m|, |m| > 0.2" "$(awk -v s="$PERAT" 'BEGIN{
       n=split(s,a," "); sum=0; mx=0; nb=0
       for(i=1;i<=n;i++){ split(a[i],b,":"); m=b[2]+0; sum+=m; am=(m<0?-m:m); if(am>mx)mx=am; if(am>0.2)nb++ }
@@ -847,9 +847,15 @@ for c in "${CHK[@]}"; do printf '%s\n' "$c"; done
 
 #================================== ENERGY ===================================
 hdr "Energy"
+# Both from the summary VASP prints once per COMPLETED ionic step ("free  energy
+# TOTEN" and "energy  without entropy=", two spaces each). Every SCF iteration
+# prints a look-alike line with one space; taking the last of those gave, for a
+# running job, an energy(sigma->0) from the unfinished next step beside the
+# TOTEN of the last finished one -- 0.95 eV apart on a real run.
 ETOT=$(grep 'free  energy   TOTEN' "$OUT" | tail -n1 | awk '{print $(NF-1)}')
-ESIG0=$(grep 'energy(sigma->0)' "$OUT" | tail -n1 | awk '{print $NF}')
-[[ -n ${ETOT:-} ]]  && kv "TOTEN (eV)"            "$ETOT"
+ESIG0=$(grep 'energy  without entropy=' "$OUT" | tail -n1 | awk '{print $NF}')
+NSTEP_E=$(grep -c 'free  energy   TOTEN' "$OUT")
+[[ -n ${ETOT:-} ]]  && kv "TOTEN (eV)"            "$ETOT   (ionic step ${NSTEP_E}, the last completed)"
 [[ -n ${ESIG0:-} ]] && kv "energy(sigma->0) (eV)" "$ESIG0"
 if [[ -n ${ETOT:-} && ${NIONS%.*} -gt 0 ]]; then
   kv "TOTEN per atom (eV)" "$(awk -v e="$ETOT" -v n="${NIONS%.*}" 'BEGIN{printf "%.6f", e/n}')"

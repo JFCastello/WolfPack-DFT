@@ -1074,7 +1074,8 @@ def _wait_phrase(est: Optional[Dict], days: int, least: int = MIN_JOBS) -> List[
 
 def human_report(where: str, val: Dict, src: Dict[str, str], notes: List[str],
                  script_est: Optional[Dict], past: List[Dict], rec: Optional[Dict],
-                 max_time_min: Optional[float], days: int, n_jobs: int) -> str:
+                 max_time_min: Optional[float], days: int, n_jobs: int,
+                 chain_launch_min: Optional[float] = None) -> str:
     L: List[str] = []
     L.append(f"backfill-study -- {os.path.basename(where) or where}   partition "
              f"{val['partition']}: {val['nodes']} node(s) x {val['cpus']} cores, "
@@ -1142,8 +1143,15 @@ def human_report(where: str, val: Dict, src: Dict[str, str], notes: List[str],
                 L.append(f"     {val.get('script')} asks for {fmt_slurm_time(sw)} now: more than "
                          f"the run can use")
         else:
-            L.append(f"  => use vasp-relax-loop (it picks the {fmt_wall(c['wall_min'])} chunks "
-                     f"itself at launch)")
+            L.append("  => use vasp-relax-loop")
+            # The chain sizes its chunks at launch from vasp-test's estimate,
+            # not from a run's measurement. Say what it would pick when the
+            # two disagree, instead of promising the chunks shown above.
+            if (chain_launch_min is not None and val.get("t_ion_kind") == "measured"
+                    and chain_launch_min != c["wall_min"]):
+                L.append(f"     At launch it sizes from vasp-test's estimate (~"
+                         f"{fmt_h(val.get('t_ion_estimate_s'))} per ionic step), not this "
+                         f"measurement: it would pick {fmt_wall(chain_launch_min)} chunks.")
         if val.get("t_ion_kind") == "estimated" and val.get("spi_assumed"):
             L.append("     The step time is an ESTIMATE: run it, and this command re-measures from "
                      "the OUTCAR the run writes.")
@@ -1290,9 +1298,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   if val.get("script_wall_min") else None)
     past = folder_job_waits(where) if is_calc_folder(where) else []
     rec = recommend(jobs, val, res, mt, cands) if has_run else None
+    # What vasp-relax-loop itself would choose, when the step used above is a
+    # measurement it does not see (it sizes from vasp-test at launch).
+    chain_launch = None
+    if rec and val.get("t_ion_kind") == "measured" and val.get("t_ion_estimate_s"):
+        r2 = study(jobs, nodes=nodes, cpus=cpus, mem_mb=mem,
+                   t_ion_s=float(val["t_ion_estimate_s"]), startup_s=float(val["startup_s"]),
+                   margin_cfg_min=float(val["margin_min"]), steps=int(val["steps"]),
+                   max_time_min=mt, default_wall_min=float(val["default_wall_min"]),
+                   min_jobs=a.min_jobs)
+        chain_launch = r2["chosen_min"] if r2["source"] == "study" else fb
     if err:
         notes.insert(0, err)
-    print(human_report(where, val, sources, notes, script_est, past, rec, mt, days, len(jobs)))
+    print(human_report(where, val, sources, notes, script_est, past, rec, mt, days, len(jobs),
+                       chain_launch))
     if a.details:
         print()
         if res is not None:

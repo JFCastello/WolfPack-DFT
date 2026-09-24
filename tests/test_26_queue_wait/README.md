@@ -44,6 +44,7 @@ Plus the rows that must **not** become a wait:
 | row | expected |
 |---|---|
 | a pending job (no `Start`) | counted as pending, **not** as a wait of zero |
+| a job cancelled before it started (no `Start`, state `CANCELLED`) | **not** counted as pending: it will never run |
 | a job held by a dependency (`Eligible` after `Submit`) | excluded — it was waiting on its own job graph, not on the queue |
 
 And: the by-size table separates the 1-node jobs from the 32-node one that
@@ -55,7 +56,14 @@ refused; without `sacct` the command says so; an empty window is reported as
 
 All eighteen as expected: `fast` 180 / 180 / 300 s, `slow` 60 / 17328 / 86400 s,
 the held job absent from the five counted in `fast`, one pending job counted as
-pending, and the 1-node band holding exactly the four fast `slow` jobs.
+pending (and the cancelled one not), and the 1-node band holding exactly the
+four fast `slow` jobs.
+
+One package bug was found by a real run and fixed. The "pending now" column
+counted every record of the window with no `Start`, including jobs cancelled
+while they waited. On a real cluster it said 7 where `squeue`, in the section
+below it, showed 4. It now counts only `PENDING`. Against the previous version,
+the fixture gives 2 for `slow` instead of 1.
 
 No package bug was found here. One assertion failed on the first run and it was
 mine.

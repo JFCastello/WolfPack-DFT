@@ -89,6 +89,7 @@ double, up to what fits in *W* (`⌊T_work / (t_ionic × 1.15)⌋`).
 | 8b | the same **while it runs** (19 ionic steps in its OUTCAR) | the step is **measured**, 55 min; `--time=5-07:00:00`, and 7 days is "more than the run can use"; the folder's job waited 12 min; 19 steps done |
 | 8c | the script asks for 2 days | flagged: too little for all of NSW |
 | 8d | no vasp-test and no run | the queue wait, and no recommendation |
+| 8e | the real run as it was: 3.6-h measured steps, NSW 120 (497 h as one job, beyond the queue data) | the chain of **120-h** chunks recommended; and, since vasp-relax-loop sizes from vasp-test's 61-min estimate, the report says it would pick **96 h** — which launching it there confirms |
 
 **Why "similar" matters.** A 1-node job and a 20-node job at the same walltime
 wait very differently. The study first compares jobs that match on nodes (the
@@ -157,7 +158,7 @@ coincide and no percentile convention can change the answer.
 
 ## 7. Verdict
 
-**PASSED** — 45 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 48 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

@@ -34,6 +34,7 @@ Four runs on 4 ranks, a few minutes in total, plus an empty directory.
 | **Fe** | a magnetization section, net moment ≈ 2.2 μB | a checker that ignores `ISPIN` reports no moment |
 | **Si, `NELM = 2`, `EDIFF = 1E-8`** | `[FAIL] SCF reached NELM=2`, exit code 1 | the run completes and writes a perfectly normal OUTCAR |
 | all four reports | no physical label and no advice | the report is data; the conclusions are the reader's |
+| a **running** relaxation (fixture OUTCAR, stopped mid-step 3) | TOTEN and energy(sigma->0) both from step 2, the last completed | on a real running job they came from different steps, 0.95 eV apart |
 
 Al and Si are the pair that matters: same code path, same 2-atom-scale cell,
 **opposite answers**. Neither can be got right by accident.
@@ -73,6 +74,12 @@ And the check "occupied bands match NELECT" fired a warning on every metal,
 where that count is a threshold rather than a number of electrons. It now
 applies only when no band is partially occupied.
 
+A third came from a real running job, and was fixed. `energy(sigma->0)` was the
+last such line anywhere in the OUTCAR: on a running job, an SCF iteration of
+the unfinished step, next to the TOTEN of the last completed one. Both are now
+read from the same ionic-step summary, and the step is named. Against the
+previous version, the fixture gives -9.70 where -10.66 is right.
+
 On the first run of this test, two assertions failed; both were **my own**.
 
 
@@ -95,7 +102,7 @@ property of the functional, not a defect in the checker. The test asserts that
 
 ## 7. Verdict
 
-**PASSED** — 13 assertions, 0 failed. See `logs/run.log`; each case keeps its
+**PASSED** — 14 assertions, 0 failed. See `logs/run.log`; each case keeps its
 own `check.log` beside its OUTCAR under the work directory.
 
 ## Sources

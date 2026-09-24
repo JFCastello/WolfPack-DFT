@@ -1,5 +1,6 @@
   [32m[ OK ][0m an empty directory does not crash vasp-check
   [32m[ OK ][0m an empty directory is reported as having nothing to check
+  [32m[ OK ][0m a running relaxation: TOTEN and energy(sigma->0) both of the last completed step (got -10.66000000)
   [32m[ OK ][0m Si: no partially occupied state -- the data of a gapped system
   [32m[ OK ][0m Si: the gap vasp-check prints matches the published PBE value  (0.5975 vs 0.6 +/- 0.25)
   [32m[ OK ][0m Si: a converged run is reported as converged

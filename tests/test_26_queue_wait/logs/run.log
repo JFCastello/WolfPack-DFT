@@ -6,7 +6,7 @@
   [32m[ OK ][0m slow: mean is dragged to ~4.8 h by that one job  (17328 vs 17328 +/- 5)
   [32m[ OK ][0m slow: p90 is the day-long wait  (86400 vs 86400 +/- 1)
   [32m[ OK ][0m a job held by a dependency is left out of the queue statistics  (5 vs 5 +/- 0.5)
-  [32m[ OK ][0m a pending job is counted as pending, not as a wait of zero  (1 vs 1 +/- 0.5)
+  [32m[ OK ][0m a pending job is counted as pending -- and one cancelled before it started is not  (1 vs 1 +/- 0.5)
   [32m[ OK ][0m the by-size table lists the 1-node band
   [32m[ OK ][0m and the 17+ node band the outlier belongs to
   [32m[ OK ][0m slow's four fast jobs are the 1-node ones (4)

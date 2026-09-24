@@ -138,7 +138,10 @@ function secs(t,   d, tp, h) {
     # making Eligible later than Submit; counting that as queue wait would
     # blame the partition for the user`s own job graph.
     if (elig > 0 && elig > sub_t + 1) next
-    if (start < 0) { pend[part]++; next }
+    # No Start: still PENDING, or cancelled before it ever ran. Only the first
+    # is "pending now"; counting both put 7 in this column where squeue, in
+    # the section below, showed 4.
+    if (start < 0) { if ($6 ~ /^PENDING/) pend[part]++; next }
     w = start - sub_t
     if (w < 0) next
     band = (nn <= 1 ? "1 node" : (nn <= 4 ? "2-4" : (nn <= 16 ? "5-16" : "17+")))
