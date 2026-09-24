@@ -29,8 +29,10 @@ out=$("$WP_PY" "$S" POSCAR CONTCAR 2>&1)
 # the lattice-parameter change (+1.000 %), which for a uniform stretch is a
 # DIFFERENT number from the Green-Lagrange strain (1.005 %) -- close enough to
 # look right and wrong enough to hide a broken strain tensor.
-got=$(grep -oP 'max \|strain\|\s*:\s*\K[0-9.]+' <<<"$out" | head -1)
-near "${got:-}" "$want" 0.02 "a 1% uniform stretch is reported as Green-Lagrange strain"
+got=$(grep -oP 'max \|strain\| \(%\)\s+\K[0-9.]+' <<<"$out" | head -1)
+# 0.002, not 0.02: the engineering answer (1.000 %) must fall OUTSIDE the band,
+# and 1.005 +/- 0.02 would have let it in.
+near "${got:-}" "$want" 0.002 "a 1% uniform stretch is reported as Green-Lagrange strain"
 
 # --- 2. a pure ROTATION is not a strain ------------------------------------
 # The single most common way a strain measure is wrong: it picks up rigid
@@ -49,7 +51,7 @@ rot = Structure(Lattice(s.lattice.matrix @ R.T), s.species, s.frac_coords)
 Poscar(rot).write_file("CONTCAR_rot")
 PY
 out=$("$WP_PY" "$S" POSCAR CONTCAR_rot 2>&1)
-got=$(grep -oP 'max \|strain\|\s*:\s*\K[0-9.]+' <<<"$out" | head -1)
+got=$(grep -oP 'max \|strain\| \(%\)\s+\K[0-9.]+' <<<"$out" | head -1)
 near "${got:-0}" 0.0 0.01 "a pure 30-degree rotation registers as ZERO strain"
 
 # --- 3. a displaced atom is seen -------------------------------------------
@@ -66,6 +68,17 @@ out=$("$WP_PY" "$S" POSCAR CONTCAR_disp 2>&1)
 grep -qiE "displac" <<<"$out" \
     && pass "a displaced atom is reported" \
     || fail "a 0.02-fractional displacement went unreported"
+
+# --- 3b. data only, side by side ------------------------------------------
+# The report states numbers; what they mean is the reader's call. It used to
+# add verdicts ("<-- contracted", "symmetry FELL", notes on tolerances and on
+# ISYM) that read as findings about the calculation.
+ok_if "! grep -qiE 'contract|expand|fell|rose|note|warning|<--|approximately|probably' <<<\"\$out\"" \
+      "the comparison is data only: no verdicts or interpretation in it"
+ok_if "grep -qE '^  CELL +POSCAR +CONTCAR_disp +change +%\$' <<<\"\$out\" && [[ \$(grep -c 'a (A)' <<<\"\$out\") == 1 ]]" \
+      "one side-by-side table (before, after, change, %), each quantity once"
+out=$("$WP_PY" "$S" POSCAR CONTCAR_disp --labels=start,end 2>&1)
+ok_if "grep -qE '^  CELL +start +end +change' <<<\"\$out\"" "--labels names the two columns"
 
 # --- 4. the adversarial half ------------------------------------------------
 must_refuse "a missing file is refused, not assumed empty" "no such|not found|cannot|missing" \

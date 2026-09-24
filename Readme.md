@@ -636,32 +636,56 @@ Exit codes: `0` = PASS, `1` = at least one FAIL, `2` = usage error.
 
 ### What the relaxation changed
 
-For any run with ionic steps, `vasp-check` diffs the starting `POSCAR` against
-the final `CONTCAR` and reports what the relaxation actually did — because
-*"reached required accuracy"* only says the forces are small, not that the
-structure is the one you meant to study:
+For any run with ionic steps, `vasp-check` puts the starting `POSCAR` and the
+final `CONTCAR` side by side. It reports data only, with no verdicts: one
+table per quantity, each value once, with its change.
 
-- **Cell** — a, b, c, the three angles and the volume, each with its absolute
-  and percent change, plus the Green–Lagrange strain tensor (rotation-free, so a
-  cell that was merely re-oriented shows zero strain instead of a false shear).
-- **Symmetry** — the space group before and after at four tolerances, including
-  the 1e-5 that VASP itself uses for `ISYM`. It says whether the symmetry rose
-  or fell, which is how you catch a relaxation that `ISYM` never let out of a
-  saddle point.
-- **Displacements** — max, mean and RMS overall and per species, how many atoms
-  moved at all, and the biggest movers named by index with their direction.
-  Measured as fractional differences with periodic images resolved, so a uniform
-  cell expansion does not masquerade as every atom having moved.
-- **Bonds** — the shortest and mean nearest-neighbour distance before and after,
-  with a warning if the shortest bond collapsed by more than 20 %.
+```
+  CELL                          POSCAR       CONTCAR        change        %
+    a (A)                     5.624058      5.626850     +0.002792  +0.050%
+    ...
+    volume (A^3)              241.4820      241.3221       -0.1599  -0.066%
+    density (g/cm^3)            6.5421        6.5465       +0.0044  +0.067%
+    max |strain| (%)                                        0.1043   Green-Lagrange
 
-For a static run there is nothing to diff, so it just describes the geometry
-that was computed: formula, cell, density, space group at each tolerance and the
-shortest bond. The same report is available on its own:
+  SPACE GROUP                   POSCAR       CONTCAR
+    symprec 1e-5          P2_1/c (14)        P1 (1)
+    ...
+
+  NEAREST NEIGHBOUR (A)         POSCAR       CONTCAR        change
+    shortest                    1.9651        1.9624       -0.0028
+    mean over sites             2.0686        2.0675       -0.0011
+
+  ATOMIC DISPLACEMENTS (A)           max          mean           RMS   cell change excluded
+    all  (20)                   0.0017        0.0010        0.0012
+    La   (4)                    0.0016        0.0013        0.0013
+    ...
+    moved > 0.0001 A : 16 of 20      largest: #15 O 0.0017, #11 O 0.0017, #12 O 0.0017
+```
+
+- **Cell**: a, b, c, the angles, the volume and the density, then the largest
+  Green–Lagrange strain. That strain is rotation-free, so a cell that was only
+  re-oriented reads zero.
+- **Space group** at four tolerances, 1e-5 being the one VASP itself uses for
+  `ISYM`.
+- **Nearest neighbour**: the shortest distance in the cell, and the mean over
+  sites.
+- **Displacements**: max, mean and RMS, overall and per species, and the three
+  largest by atom index. They are measured as fractional differences with
+  periodic images resolved, so the cell's own change is not counted as atoms
+  moving.
+
+After a chunked relaxation the "before" column is the geometry chunk 1 started
+from (`chunk-001`), not the POSCAR the chain has been overwriting.
+
+For a static run there is nothing to diff, so it tabulates the geometry that
+was computed: cell, density, space group at each tolerance and the nearest
+neighbour. The same report is available on its own:
 
 ```bash
-wolfpack_structure.py POSCAR CONTCAR    # before -> after
-wolfpack_structure.py POSCAR            # one structure
+wolfpack_structure.py POSCAR CONTCAR                  # before -> after
+wolfpack_structure.py POSCAR CONTCAR --labels=A,B     # name the two columns
+wolfpack_structure.py POSCAR                          # one structure
 ```
 
 ---

@@ -99,16 +99,22 @@ grep -qiE "chunk|whole chain" <<<"$out" \
 # this cell is 0.04 * 5.43 * sqrt(0.5) = 0.1536 A; the last chunk alone would
 # be a quarter of that, 0.0384 A. The two are far enough apart that no
 # tolerance can confuse them.
-# Anchored on the ATOMIC DISPLACEMENTS block, not on the first "max:" in the
-# report -- the strain section prints one too, and reading that instead is the
-# mistake this suite has made twice before.
-dmax=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*max[[:space:]]*:/{print $3; exit}' <<<"$out")
+# Anchored on the "all" row of the ATOMIC DISPLACEMENTS table (its first
+# column is the max), not on the first number in the report -- the cell table
+# prints several, and reading one of those instead is the mistake this suite
+# has made twice before.
+dmax=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*all[[:space:]]/{print $3; exit}' <<<"$out")
 if [[ -z "$dmax" ]]; then
     fail "no displacement was reported at all -- cannot tell which 'before' was used"
 else
     info "    reported max displacement: ${dmax} A"
     near "$dmax" 0.1536 0.02 "the displacement is the WHOLE chain's (0.04 frac), not the last chunk's (0.01)"
 fi
+
+# The "before" column is named after the chunk it came from -- not after the
+# temporary file the archive is unpacked into.
+ok_if "grep -qE '^  CELL +chunk-001 +CONTCAR' <<<\"\$out\" && ! grep -q 'wpcheck_poscar' <<<\"\$out\"" \
+      "the table's 'before' column reads chunk-001, not a temporary file name"
 
 # --- 3. an UNCHAINED relaxation is untouched ------------------------------
 # The mirror image. A folder with no wolfpack_chain/ must still diff its own
@@ -120,7 +126,7 @@ out2=$(cd "$d2" && timeout 300 bash "$VC" 2>&1); echo "$out2" > "$d2/check.log"
 grep -qE "POSCAR -> CONTCAR" <<<"$out2" \
     && pass "an unchained relaxation still diffs its own POSCAR, with the usual heading" \
     || fail "the unchained path changed heading or stopped reporting"
-d2max=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*max[[:space:]]*:/{print $3; exit}' <<<"$out2")
+d2max=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*all[[:space:]]/{print $3; exit}' <<<"$out2")
 [[ -n "$d2max" ]] && near "$d2max" 0.1536 0.02 \
     "and it reports the same 0.04 when its POSCAR really is the original" \
     || info "    (no displacement line to cross-check on the unchained path)"
@@ -148,7 +154,7 @@ d4="$W/lastchunk"; mkdir -p "$d4"
 for f in INCAR KPOINTS OSZICAR OUTCAR CONTCAR; do cp "$d/$f" "$d4/"; done
 _poscar 0.2800000000000000 > "$d4/POSCAR"
 out4=$(cd "$d4" && timeout 300 bash "$VC" 2>&1)
-d4max=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*max[[:space:]]*:/{print $3; exit}' <<<"$out4")
+d4max=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*all[[:space:]]/{print $3; exit}' <<<"$out4")
 if [[ -z "$d4max" ]]; then
     fail "the control folder reported no displacement"
 else

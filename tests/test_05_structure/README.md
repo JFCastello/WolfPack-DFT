@@ -39,6 +39,7 @@ Four injected cases plus three malformed ones. Seconds; no VASP.
 | every lattice vector × 1.01 | **1.005 %** | `E = (FᵀF − I)/2`, `F = 1.01·I` → `(1.01² − 1)/2` |
 | 30° rotation about z, nothing else | **0.000 %** | `FᵀF = I` for any rotation, by construction |
 | one atom displaced | reported | |
+| the same pair, rendered | data only: no verdicts ("contracted", "symmetry fell", notes, warnings); one side-by-side table with each quantity once; `--labels` names the columns | the report states numbers, the reader interprets them |
 | different site counts | says so, reports no displacements | a site-by-site comparison is meaningless |
 
 The expected 1.005 % is **computed in the test**, not typed, so the test cannot
@@ -50,28 +51,36 @@ drift into agreeing with a wrong convention.
 a 1% uniform stretch is reported as Green-Lagrange strain   1.0050 %
 a pure 30-degree rotation registers as ZERO strain          0.0000 %
 a displaced atom is reported
+the comparison is data only: no verdicts or interpretation in it
+one side-by-side table (before, after, change, %), each quantity once
+--labels names the two columns
 a missing file is refused, not assumed empty
 a file that is not a structure is refused
 cells with different site counts: says so, reports no displacements
 ```
 
-No package bug was found here.
+The report was rewritten on 2026-09-24 after a user found it unreadable. Each
+structure used to be described in full, and then everything was repeated as a
+diff. Verdicts were mixed into the data: "<-- contracted", "symmetry FELL", a
+paragraph about ISYM, a note on tolerances. Now it is side-by-side tables of
+numbers only. The strain, displacement and refusal checks above are unchanged.
 
 ## 6. Pass / fail criterion
 
 | quantity | tolerance | why |
 |---|---|---|
-| uniform strain | 1.005 ± 0.02 % | excludes 1.000 %, the engineering-strain answer |
+| uniform strain | 1.005 ± 0.002 % | excludes 1.000 %, the engineering-strain answer |
 | rotation | 0.000 ± 0.01 % | excludes any rotation leaking in |
 
-The first tolerance is chosen precisely so the wrong convention fails: the gap
-between the two conventions is 0.005 %, and ±0.02 % on a measure that would
-read 1.000 % still separates them because the check is on the *reported* value,
-not on their difference.
+The first tolerance is chosen so the wrong convention fails. The two answers
+differ by 0.005 %, so the band must be narrower than that. It used to be
+±0.02 %, which **included** 1.000 %: the test could not tell the two
+conventions apart, and this README claimed it could. The report prints four
+decimals, so ±0.002 % is comfortably wider than rounding.
 
 ## 7. Verdict
 
-**PASSED** — 6 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 9 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

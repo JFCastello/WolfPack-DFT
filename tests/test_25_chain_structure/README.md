@@ -82,7 +82,7 @@ pass for a tool that reported the same number either way.
 
 ## 7. Verdict
 
-**PASSED** — 7 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 8 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

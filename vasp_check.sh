@@ -586,11 +586,12 @@ if [[ -f "$_wp_struct" && -n "$_wp_py" && -s "$_start_struct" ]]; then
       # its own input would be as opaque as the bug it fixes.
       hdr "What the relaxation changed (whole chain: $_start_label -> CONTCAR)"
       _nch=$(ls -d wolfpack_chain/chunk-* 2>/dev/null | wc -l)
-      note "chunked run: comparing against the geometry the FIRST of $_nch chunk(s)"
-      note "started from, not the POSCAR in this folder -- the chain overwrites"
-      note "that one at every restart."
+      # The chain overwrites ./POSCAR at every restart, so the "before" is the
+      # geometry chunk 1 started from. One line says which file that is.
+      note "chunked run ($_nch chunks): before = the geometry chunk 1 started from"
     fi
-    if ! "$_wp_py" "$_wp_struct" "$_start_struct" CONTCAR 2>&1; then
+    _lbl="POSCAR"; [[ "$_start_struct" != "POSCAR" ]] && _lbl="$(basename "$_chunk0")"
+    if ! "$_wp_py" "$_wp_struct" "$_start_struct" CONTCAR --labels="$_lbl,CONTCAR" 2>&1; then
       note "structure report unavailable (pymatgen missing? 'conda activate wolfpack-dft')"
     fi
   elif ((IS_RELAX)); then

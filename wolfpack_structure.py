@@ -40,6 +40,11 @@ import sys
 import numpy as np
 
 SYMPRECS = (1e-5, 1e-3, 1e-2, 0.1)   # 1e-5 is what VASP itself uses for ISYM
+_SP = {1e-5: "1e-5", 1e-3: "1e-3", 1e-2: "1e-2", 0.1: "1e-1"}
+
+# The report is data only: numbers, side by side, with the change. What they
+# mean for the calculation is the reader's call, not this script's.
+W_NAME, W_VAL = 22, 14
 
 
 def _sg(struct, symprec):
@@ -60,30 +65,48 @@ def _nn_distances(struct):
     return d.min(axis=1)
 
 
-def _fmt_sg(sgs):
-    return "   ".join(f"{p:g}: {n} ({i})" for p, (n, i) in sgs.items())
+def _cell_rows(struct):
+    lat = struct.lattice
+    return [("a", "A", lat.a, 6), ("b", "A", lat.b, 6), ("c", "A", lat.c, 6),
+            ("alpha", "deg", lat.alpha, 4), ("beta", "deg", lat.beta, 4),
+            ("gamma", "deg", lat.gamma, 4), ("volume", "A^3", lat.volume, 4),
+            ("density", "g/cm^3", float(struct.density), 4)]
+
+
+def _z(v, dp):
+    """No "-0.0000": a value that rounds to zero prints as zero."""
+    return 0.0 if abs(v) < 0.5 * 10.0 ** (-dp) else v
+
+
+def _sg_text(sg):
+    return f"{sg[0]} ({sg[1]})"
+
+
+def _title(struct):
+    c = struct.composition
+    return f"{c.reduced_formula}, {len(struct)} sites ({c.formula})"
 
 
 def describe(struct, label="structure", out=print):
-    """Everything worth saying about ONE structure."""
-    lat = struct.lattice
-    out(f"  {label}")
-    out(f"    formula        : {struct.composition.reduced_formula}"
-        f"   ({len(struct)} sites, {struct.composition.formula})")
-    out(f"    a b c   (A)    : {lat.a:.6f}  {lat.b:.6f}  {lat.c:.6f}")
-    out(f"    alpha beta gam : {lat.alpha:.4f}  {lat.beta:.4f}  {lat.gamma:.4f}")
-    out(f"    volume  (A^3)  : {lat.volume:.6f}       density: {struct.density:.4f} g/cm^3")
-    sgs = _spacegroups(struct)
-    out(f"    space group    : {_fmt_sg(sgs)}")
-    if sgs[1e-5][1] != sgs[1e-2][1]:
-        out(f"    NOTE           : the space group depends on the tolerance -- this cell is"
-            f" only APPROXIMATELY at the higher symmetry.")
+    """ONE structure, as a table."""
+    out(f"  {label}   {_title(struct)}")
+    out("")
+    out("  CELL")
+    for name, unit, v, dp in _cell_rows(struct):
+        out(f"    {name + ' (' + unit + ')':<{W_NAME - 2}}{v:>{W_VAL}.{dp}f}")
+    out("")
+    out("  SPACE GROUP")
+    for p, sg in _spacegroups(struct).items():
+        out(f"    {'symprec ' + _SP[p]:<{W_NAME - 2}}{_sg_text(sg):>{W_VAL}}")
+    out("")
     nn = _nn_distances(struct)
-    out(f"    nearest bond   : {nn.min():.4f} A (shortest in the cell)"
-        f"   mean over sites: {nn.mean():.4f} A")
+    out("  NEAREST NEIGHBOUR (A)")
+    out(f"    {'shortest':<{W_NAME - 2}}{nn.min():>{W_VAL}.4f}")
+    out(f"    {'mean over sites':<{W_NAME - 2}}{nn.mean():>{W_VAL}.4f}")
 
 
-def compare(before, after, out=print, top=8, moved_threshold=1e-4):
+def compare(before, after, out=print, top=3, moved_threshold=1e-4,
+            names=("POSCAR", "CONTCAR")):
     """What changed between two structures with the SAME site order."""
     if len(before) != len(after):
         out(f"  cannot compare: {len(before)} sites before, {len(after)} after.")
@@ -91,48 +114,43 @@ def compare(before, after, out=print, top=8, moved_threshold=1e-4):
     if [s.specie.symbol for s in before] != [s.specie.symbol for s in after]:
         out("  cannot compare: the species order differs between the two files.")
         return
-
-    la, lb = before.lattice, after.lattice
+    # A column header wider than its column would shear the whole table.
+    nb, na_ = (n if len(n) <= W_VAL - 2 else n[:W_VAL - 3] + "~" for n in names)
+    head = f"{nb:>{W_VAL}}{na_:>{W_VAL}}{'change':>{W_VAL}}{'%':>9}"
 
     # ---- the cell ---------------------------------------------------------
-    out("  CELL")
-    for name, x, y, unit in (
-        ("a", la.a, lb.a, "A"), ("b", la.b, lb.b, "A"), ("c", la.c, lb.c, "A"),
-        ("alpha", la.alpha, lb.alpha, "deg"), ("beta", la.beta, lb.beta, "deg"),
-        ("gamma", la.gamma, lb.gamma, "deg"),
-        ("volume", la.volume, lb.volume, "A^3"),
-    ):
-        pct = 100.0 * (y - x) / x if abs(x) > 1e-12 else 0.0
-        flag = "" if abs(pct) < 0.05 else ("   <-- " + ("expanded" if pct > 0 else "contracted"))
-        out(f"    {name:<8s} {x:14.6f} -> {y:14.6f} {unit:<4s} "
-            f"({y - x:+.6f}, {pct:+.3f} %){flag}")
-
+    out(f"  {'CELL':<{W_NAME}}{head}")
+    for (name, unit, x, dp), (_, _, y, _) in zip(_cell_rows(before), _cell_rows(after)):
+        pct = _z(100.0 * (y - x) / x if abs(x) > 1e-12 else 0.0, 3)
+        out(f"    {name + ' (' + unit + ')':<{W_NAME - 2}}{x:>{W_VAL}.{dp}f}{y:>{W_VAL}.{dp}f}"
+            f"{_z(y - x, dp):>+{W_VAL}.{dp}f}{pct:>+8.3f}%")
     # Green-Lagrange strain: F = L_after . L_before^-1, E = (F^T F - I)/2.
     # Symmetric and rotation-free, so a cell that was merely re-oriented shows
     # zero strain instead of a spurious shear.
+    la, lb = before.lattice, after.lattice
     try:
         F = np.linalg.inv(la.matrix) @ lb.matrix
         E = 0.5 * (F.T @ F - np.eye(3))
-        out("    strain (Green-Lagrange, %):")
-        for row in E:
-            out("      " + "  ".join(f"{100 * v:+9.4f}" for v in row))
-        out(f"    max |strain|   : {100 * np.abs(E).max():.4f} %")
+        out(f"    {'max |strain| (%)':<{W_NAME - 2}}{'':>{W_VAL}}{'':>{W_VAL}}"
+            f"{100 * np.abs(E).max():>{W_VAL}.4f}   Green-Lagrange")
     except np.linalg.LinAlgError:
         pass
+    out("")
 
     # ---- symmetry ---------------------------------------------------------
     sa, sb = _spacegroups(before), _spacegroups(after)
-    out("  SYMMETRY")
+    out(f"  {'SPACE GROUP':<{W_NAME}}{nb:>{W_VAL}}{na_:>{W_VAL}}")
     for p in SYMPRECS:
-        arrow = "->" if sa[p][1] == sb[p][1] else "=>"
-        change = "" if sa[p][1] == sb[p][1] else (
-            "   CHANGED, symmetry " + ("ROSE" if sb[p][1] > sa[p][1] else "FELL"))
-        out(f"    symprec {p:<7g}: {sa[p][0]:>10s} ({sa[p][1]:3d}) {arrow} "
-            f"{sb[p][0]:>10s} ({sb[p][1]:3d}){change}")
-    if sa[1e-5][1] != sb[1e-5][1]:
-        out("    ^ at 1e-5, which is the tolerance VASP itself uses for ISYM. A rise means")
-        out("      the relaxation found a more symmetric structure; with ISYM>0 it can also")
-        out("      mean it was never allowed to leave one.")
+        out(f"    {'symprec ' + _SP[p]:<{W_NAME - 2}}{_sg_text(sa[p]):>{W_VAL}}{_sg_text(sb[p]):>{W_VAL}}")
+    out("")
+
+    # ---- nearest neighbours -------------------------------------------------
+    na, nbb = _nn_distances(before), _nn_distances(after)
+    out(f"  {'NEAREST NEIGHBOUR (A)':<{W_NAME}}{nb:>{W_VAL}}{na_:>{W_VAL}}{'change':>{W_VAL}}")
+    for name, x, y in (("shortest", na.min(), nbb.min()),
+                       ("mean over sites", na.mean(), nbb.mean())):
+        out(f"    {name:<{W_NAME - 2}}{x:>{W_VAL}.4f}{y:>{W_VAL}.4f}{_z(y - x, 4):>+{W_VAL}.4f}")
+    out("")
 
     # ---- displacements ----------------------------------------------------
     # Fractional difference, minimum image, then into Angstrom with the FINAL
@@ -142,49 +160,33 @@ def compare(before, after, out=print, top=8, moved_threshold=1e-4):
     disp = df @ lb.matrix
     dist = np.linalg.norm(disp, axis=1)
 
-    out("  ATOMIC DISPLACEMENTS  (periodic images resolved; cell change excluded)")
-    out(f"    max            : {dist.max():.4f} A        "
-        f"mean: {dist.mean():.4f} A        RMS: {np.sqrt((dist ** 2).mean()):.4f} A")
+    out(f"  {'ATOMIC DISPLACEMENTS (A)':<{W_NAME}}{'max':>{W_VAL}}{'mean':>{W_VAL}}{'RMS':>{W_VAL}}"
+        f"   cell change excluded")
+
+    def _stat_row(label, v):
+        v = np.asarray(v)
+        out(f"    {label:<{W_NAME - 2}}{v.max():>{W_VAL}.4f}{v.mean():>{W_VAL}.4f}"
+            f"{np.sqrt((v ** 2).mean()):>{W_VAL}.4f}")
+    _stat_row(f"all  ({len(dist)})", dist)
     per = {}
     for site, d in zip(before, dist):
         per.setdefault(site.specie.symbol, []).append(d)
     for el, v in sorted(per.items()):
-        v = np.array(v)
-        out(f"    {el:<4s} n={len(v):<4d} max {v.max():.4f}   mean {v.mean():.4f}   "
-            f"RMS {np.sqrt((v ** 2).mean()):.4f} A")
-
-    order = np.argsort(-dist)
+        _stat_row(f"{el:<4s} ({len(v)})", v)
     n_moved = int((dist > moved_threshold).sum())
-    out(f"    {n_moved} of {len(dist)} atoms moved more than {moved_threshold} A")
-    if n_moved:
-        out(f"    biggest movers (index, species, distance, direction in fractional coords):")
-        for i in order[:top]:
-            if dist[i] <= moved_threshold:
-                break
-            out(f"      #{i + 1:<4d} {before[i].specie.symbol:<3s} {dist[i]:8.4f} A"
-                f"   d(frac) = [{df[i][0]:+.5f} {df[i][1]:+.5f} {df[i][2]:+.5f}]")
-
-    # A uniform shift of every atom is a change of origin, not of structure.
+    order = [i for i in np.argsort(-dist)[:top] if dist[i] > moved_threshold]
+    largest = ", ".join(f"#{i + 1} {before[i].specie.symbol} {dist[i]:.4f}" for i in order)
+    out(f"    moved > {moved_threshold:g} A : {n_moved} of {len(dist)}"
+        + (f"      largest: {largest}" if largest else ""))
     drift = disp.mean(axis=0)
     if np.linalg.norm(drift) > 1e-4:
-        out(f"    centre-of-coordinates drift: {np.linalg.norm(drift):.4f} A "
-            f"[{drift[0]:+.4f} {drift[1]:+.4f} {drift[2]:+.4f}]  "
-            f"(a rigid shift is a change of origin, not of geometry)")
-
-    # ---- bonds ------------------------------------------------------------
-    na, nb = _nn_distances(before), _nn_distances(after)
-    out("  NEAREST-NEIGHBOUR BONDS")
-    out(f"    shortest in cell : {na.min():.4f} -> {nb.min():.4f} A "
-        f"({nb.min() - na.min():+.4f})")
-    out(f"    mean over sites  : {na.mean():.4f} -> {nb.mean():.4f} A "
-        f"({nb.mean() - na.mean():+.4f})")
-    if nb.min() < 0.8 * na.min():
-        out("    WARNING: the shortest bond collapsed by more than 20 % -- check the geometry")
-        out("             before trusting anything else in this run.")
+        out(f"    mean shift (all atoms): {np.linalg.norm(drift):.4f} A  "
+            f"[{drift[0]:+.4f} {drift[1]:+.4f} {drift[2]:+.4f}]")
 
 
-def report(before_path, after_path=None, out=print):
-    """Print the whole report. `after_path` None -> describe one structure."""
+def report(before_path, after_path=None, out=print, labels=None):
+    """Print the whole report. `after_path` None -> describe one structure.
+    `labels` names the two columns; the file names by default."""
     from pymatgen.core import Structure
 
     before = Structure.from_file(before_path)
@@ -192,23 +194,35 @@ def report(before_path, after_path=None, out=print):
         describe(before, f"{before_path}", out=out)
         return
     after = Structure.from_file(after_path)
-    describe(before, f"BEFORE  ({before_path})", out=out)
+    import os
+    names = tuple(labels) if labels else (os.path.basename(before_path),
+                                          os.path.basename(after_path))
+    if len(before) != len(after) or \
+            [x.specie.symbol for x in before] != [x.specie.symbol for x in after]:
+        describe(before, f"{names[0]}", out=out)
+        out("")
+        describe(after, f"{names[1]}", out=out)
+        out("")
+        compare(before, after, out=out, names=names)
+        return
+    out(f"  {_title(before)}")
     out("")
-    describe(after, f"AFTER   ({after_path})", out=out)
-    out("")
-    out("  " + "-" * 72)
-    out(f"  WHAT CHANGED  ({before_path} -> {after_path})")
-    out("  " + "-" * 72)
-    compare(before, after, out=out)
+    compare(before, after, out=out, names=names)
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    labels = None
+    for a in sys.argv[1:]:
+        if a.startswith("--labels="):                # --labels=BEFORE,AFTER
+            labels = a.split("=", 1)[1].split(",")[:2]
+            if len(labels) != 2:
+                labels = None
     if not args:
         print(__doc__.strip(), file=sys.stderr)
         return 2
     try:
-        report(args[0], args[1] if len(args) > 1 else None)
+        report(args[0], args[1] if len(args) > 1 else None, labels=labels)
     except Exception as exc:                      # a report is never worth a crash
         print(f"  structure report unavailable: {type(exc).__name__}: {exc}",
               file=sys.stderr)

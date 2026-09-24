@@ -1,6 +1,9 @@
-  [32m[ OK ][0m a 1% uniform stretch is reported as Green-Lagrange strain  (1.0050 vs 1.005 +/- 0.02)
+  [32m[ OK ][0m a 1% uniform stretch is reported as Green-Lagrange strain  (1.0050 vs 1.005 +/- 0.002)
   [32m[ OK ][0m a pure 30-degree rotation registers as ZERO strain  (0.0000 vs 0.0 +/- 0.01)
   [32m[ OK ][0m a displaced atom is reported
+  [32m[ OK ][0m the comparison is data only: no verdicts or interpretation in it
+  [32m[ OK ][0m one side-by-side table (before, after, change, %), each quantity once
+  [32m[ OK ][0m --labels names the two columns
   [32m[ OK ][0m a missing file is refused, not assumed empty
   [32m[ OK ][0m a file that is not a structure is refused
   [32m[ OK ][0m cells with different site counts: says so, reports no displacements
