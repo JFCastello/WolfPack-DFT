@@ -27,18 +27,21 @@
 #   ... --stop                  # finish the current chunk, then stop cleanly
 #   ... --resume                # continue a stopped OR DEAD chain -- after an
 #                               # OOM kill it raises the memory by itself
-#   ... --study                 # show the queue study and the chunk walltime
-#                               # it would choose, without launching anything
 #   ... --fresh                 # archive an unfinished chain and start over
 #   ... --walltime MIN          # force the chunk walltime (skips the study)
 #   ... --no-queue-study        # use the profile's chunk walltime as is
 #
 # THE CHUNK WALLTIME is chosen once, at launch, and then fixed for the whole
-# chain: from --walltime if given, else from a study of what this partition's
-# queue has done to jobs shaped like this one (wolfpack_queue.py), else from
-# WP_CHUNK_WALLTIME_MIN. If not even ONE ionic step fits in it, the chain
-# refuses to start -- and stops, rather than submit a chunk that cannot
-# progress, if a step later grows past it.
+# chain: from --walltime if given, else from `backfill-study` -- what this
+# partition's queue has done to jobs shaped like this one -- else from
+# WP_CHUNK_WALLTIME_MIN. Run `backfill-study` on its own to see that analysis
+# without launching anything. If not even ONE ionic step fits in the chunk,
+# the chain refuses to start -- and stops, rather than submit a chunk that
+# cannot progress, if a step later grows past it.
+#
+# THE ONLY LIMIT is your own NSW (NELM for vasp-scf-loop): the whole chain
+# spends at most that many steps. There is no cap on the number of chunks, on
+# the compute accumulated, or on the days the chain has been running.
 #
 # MEMORY is measured after every chunk (sacct, or VASP's own OUTCAR footer)
 # and the next chunk's --mem-per-cpu is rewritten from it. When the ranks no
@@ -96,12 +99,11 @@ while [[ $# -gt 0 ]]; do
         --status)      ACTION="status"; shift ;;
         --stop)        ACTION="stop"; shift ;;
         --resume)      ACTION="resume"; shift ;;
-        --study)       ACTION="study"; shift ;;
+        --study)       die "the queue study is its own command now: run  backfill-study  here." 2 ;;
         --fresh)       OPT_FRESH=1; shift ;;
         --no-queue-study) OPT_NOSTUDY=1; shift ;;
         --now)         STOP_NOW=1; shift ;;
         --walltime)    OPT_WALLTIME="${2:?}"; shift 2 ;;
-        --max-chunks)  OPT_MAXCHUNKS="${2:?}"; shift 2 ;;
         --force)       OPT_FORCE=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         *)             die "unknown option: $1  (try --help)" 2 ;;
@@ -177,9 +179,6 @@ CH_DEAD="$CHDIR/STOPPED"
 # Defaults; every one overridable from the profile or the command line.
 DEF_WALLTIME_MIN=600          # 10 h -- short enough to backfill on most sites
 DEF_MARGIN_MIN=5
-DEF_MAX_CHUNKS=50
-DEF_MAX_WALL_MIN=2880         # 48 h of accumulated compute
-DEF_DEADLINE_DAYS=7
 NELM_FLOOR=8                  # a chunk holding fewer steps than this is pointless
 NELM_CEIL=500
 SAFETY=1.15                   # per-step time is a prediction; leave room
@@ -260,6 +259,9 @@ outcar_tag(){ grep -m1 -aoE "$1[[:space:]]*=[[:space:]]*-?[0-9]+" "${2:-OUTCAR}"
       | grep -oE -- '-?[0-9]+$'; }
 
 int(){ local v="${1//[^0-9-]/}"; echo "${v:-0}"; }
+# Seconds that may carry a decimal, rounded. int() would strip the point:
+# vasp-test writes its start-up time as "58.3", which int() reads as 583.
+secs(){ awk -v v="$1" 'BEGIN{ v += 0; if (v < 0) v = 0; printf "%d", v + 0.5 }'; }
 fnum(){ local v="$1"; [[ $v =~ ^-?[0-9]*\.?[0-9]+([eEdD][-+]?[0-9]+)?$ ]] && echo "$v" || echo 0; }
 
 # --------------------------------------------------------------------------- #
@@ -503,7 +505,7 @@ if [[ $ACTION == status ]]; then
     state_load
     hdr "Chunked run -- ${chain_kind:-?}"
     kv "state"           "${chain_state:-?}${stop_reason:+  (${stop_reason})}"
-    kv "chunks done"     "${chunk_index:-0} of max ${max_chunks:-?}"
+    kv "chunks done"     "${chunk_index:-0}"
     if [[ "${chain_kind:-}" == relax ]]; then
         kv "per-ionic-step time" "${t_ionic_s:-?} s"
         kv "last cap"        "${last_nsw_cap:-?} ionic steps"
@@ -990,13 +992,10 @@ if [[ $ACTION == chunk ]]; then
         fi
     fi
     if [[ $verdict == CONTINUE ]]; then
-        if (( idx >= $(int "${max_chunks:-$DEF_MAX_CHUNKS}") )); then
-            verdict="STOP"; reason="budget"; detail="reached max_chunks=${max_chunks}"
-        elif (( wall_used > $(int "${max_wall_min:-$DEF_MAX_WALL_MIN}") * 60 )); then
-            verdict="STOP"; reason="budget"; detail="accumulated compute exceeded the limit"
-        elif (( $(date +%s) > $(int "${deadline_epoch:-0}") )); then
-            verdict="STOP"; reason="budget"; detail="past the wall-clock deadline"
-        elif [[ $MODE == scf ]] && (( steps == 0 )); then
+        # The ONLY budget is the user's own NSW (NELM for an SCF chain): no cap
+        # on chunks, accumulated compute or calendar days. Those used to stop a
+        # long relaxation part-way, and --resume could not renew them.
+        if [[ $MODE == scf ]] && (( steps == 0 )); then
             verdict="STOP"; reason="no_progress"; detail="the chunk produced no electronic step"
         elif (( target > 0 && remain <= 0 )); then
             # The same outcome a single job with this cap would have had.
@@ -1062,7 +1061,7 @@ if [[ $ACTION == chunk ]]; then
     _adv=0
     [[ $verdict == CONTINUE || $verdict == CONVERGED ]] && _adv=1
     [[ $verdict == STOP ]] && case $reason in
-        step_exceeds_chunk|memory_does_not_fit|budget|budget_drift|nsw_budget) _adv=1 ;;
+        step_exceeds_chunk|memory_does_not_fit|budget_drift|nsw_budget) _adv=1 ;;
     esac
     if [[ $MODE == relax ]] && (( _adv )); then
         if _why=$(contcar_ok CONTCAR POSCAR); then
@@ -1167,7 +1166,7 @@ if [[ $ACTION == chunk ]]; then
         # Named by MODE: this used to map the script name to vasp-scf-loop, so a
         # stopped RELAXATION told the user to resume it with the SCF command.
         if [[ $reason == step_exceeds_chunk ]]; then
-            _wn=$(walltime_for_step "$t_ionic" "$SAFETY" "$(int "${t_startup_s:-120}")" \
+            _wn=$(walltime_for_step "$t_ionic" "$SAFETY" "$(secs "${t_startup_s:-120}")" \
                                     "$(int "${chain_margin_cfg_min:-$DEF_MARGIN_MIN}")")
             echo "--resume cannot continue this chain: its chunk walltime (${chain_wall_min:-?} min) is"
             echo "fixed, and one step no longer fits in it. POSCAR holds the geometry reached."
@@ -1222,8 +1221,7 @@ if [[ -f "$CH_ENV" ]]; then
     _prev_state="${chain_state:-}"
     _prev_jid=$(tr -dc '0-9' 2>/dev/null < "$CH_RUN")
     if [[ -n $_prev_jid ]] && [[ -n "$(squeue -h -j "$_prev_jid" 2>/dev/null)" ]]; then
-        [[ $ACTION == study ]] || \
-            die "a chunk of this chain is still queued or running (job ${_prev_jid}). Use --status, or --stop first." 3
+        die "a chunk of this chain is still queued or running (job ${_prev_jid}). Use --status, or --stop first." 3
     fi
 fi
 if [[ $ACTION == resume ]] && [[ ! -f "$CH_ENV" ]]; then
@@ -1419,7 +1417,7 @@ fi
 
 # ---- the chunk walltime: chosen ONCE, then fixed for the whole chain ---------
 MARGIN_CFG=$(int "${WP_CHUNK_MARGIN_MIN:-$DEF_MARGIN_MIN}")
-STARTUP=$(int "${test_startup_s:-120}")
+STARTUP=$(secs "${test_startup_s:-120}")
 DEFAULT_WALL=$(int "${WP_CHUNK_WALLTIME_MIN:-$DEF_WALLTIME_MIN}")
 _wp_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 STUDY_REPORT=""; WALL_SRC=""
@@ -1429,26 +1427,30 @@ if [[ $ACTION == resume ]] && [[ -n ${chain_wall_min:-} ]]; then
     [[ -n ${OPT_WALLTIME:-} ]] && warn "--walltime is ignored on --resume: a chain keeps the chunk walltime it
      started with (${WALL} min). Use --fresh to start a new chain with a different one."
 elif [[ -n ${OPT_WALLTIME:-} ]]; then
+    # Whole minutes only: int() would read "1:30" as 130 and "90.5" as 905.
+    [[ $OPT_WALLTIME =~ ^[0-9]+$ ]] && (( OPT_WALLTIME > 0 )) || \
+        die "--walltime takes whole minutes (e.g. --walltime 90), not '${OPT_WALLTIME}'." 2
     WALL=$(int "$OPT_WALLTIME"); WALL_SRC="--walltime"
 elif [[ $MODE == relax ]] && (( ! OPT_NOSTUDY )) && command -v python3 >/dev/null 2>&1 \
-     && [[ -f "$_wp_dir/wolfpack_queue.py" ]]; then
-    # The study replays this chain's own arithmetic against what the queue has
-    # done to jobs shaped like this one. See wolfpack_queue.py.
-    STUDY_REPORT=$(python3 "$_wp_dir/wolfpack_queue.py" --partition "$PART" \
+     && [[ -f "$_wp_dir/backfill_study.py" ]]; then
+    # backfill-study: its own command, called here with THIS chain's numbers
+    # rather than letting it re-derive them, so the walltime it proposes is
+    # judged by the same arithmetic the chain then runs on. See backfill_study.py.
+    STUDY_REPORT=$(python3 "$_wp_dir/backfill_study.py" --partition "$PART" \
             --nodes "$NODES" --cpus "$RANKS" --mem-mb "$(( MEMCPU * RANKS ))" \
             --t-ion-s "$T_ION" --startup-s "$STARTUP" --margin-min "$MARGIN_CFG" \
             --steps "$_nsw_left" --max-time-min "${MAXT:-0}" \
             --default-wall-min "$DEFAULT_WALL" --days "$QUEUE_DAYS" 2>&1)
-    _sline=$(printf '%s\n' "$STUDY_REPORT" | grep '^WP_QUEUE_STUDY ' | tail -1)
-    STUDY_REPORT=$(printf '%s\n' "$STUDY_REPORT" | grep -v '^WP_QUEUE_STUDY ')
+    _sline=$(printf '%s\n' "$STUDY_REPORT" | grep '^WP_BACKFILL_STUDY ' | tail -1)
+    STUDY_REPORT=$(printf '%s\n' "$STUDY_REPORT" | grep -v '^WP_BACKFILL_STUDY ')
     _swall=$(sed -n 's/.* wall_min=\([0-9][0-9]*\).*/\1/p' <<<"$_sline")
     _ssrc=$(sed -n 's/.* source=\([a-z]*\).*/\1/p' <<<"$_sline")
     _sreason=$(sed -n 's/.* reason="\(.*\)"$/\1/p' <<<"$_sline")
     if [[ -n $_swall ]] && [[ $_ssrc == study ]]; then
-        WALL=$_swall; WALL_SRC="queue study"
+        WALL=$_swall; WALL_SRC="backfill-study"
     else
         WALL=$DEFAULT_WALL
-        WALL_SRC="profile default (WP_CHUNK_WALLTIME_MIN) -- the study could not decide: ${_sreason:-no output}"
+        WALL_SRC="profile default (WP_CHUNK_WALLTIME_MIN) -- backfill-study could not decide: ${_sreason:-no output}"
     fi
 else
     WALL=$DEFAULT_WALL; WALL_SRC="profile default (WP_CHUNK_WALLTIME_MIN)"
@@ -1518,18 +1520,6 @@ else
                if(t<=0){print 1; exit} n=int(b/(t*f)); if(n>3)n=3; if(n>r)n=r
                if(n<1)n=1; print n }')
     CAP_UNIT="ionic steps"
-fi
-
-# ---- the study, on its own ----------------------------------------------------
-if [[ $ACTION == study ]]; then
-    hdr "Queue study -- '${PART}', jobs shaped like this one"
-    if [[ -n $STUDY_REPORT ]]; then printf '%s\n' "$STUDY_REPORT"
-    else note "no study was run (${WALL_SRC})."; fi
-    echo
-    kv "chunk walltime"  "${WALL} min  (${WALL_SRC})"
-    [[ $MODE == relax ]] && kv "one ionic step" "~${T_FIT}s (${FIT_SRC}) -- fits: yes"
-    note "Nothing was launched. Run ${CMD} without --study to start the chain."
-    exit 0
 fi
 
 # ---- --resume: settle whatever the last chunk left behind -------------------
@@ -1750,7 +1740,7 @@ kv "memory"             "measured after every chunk; the next one's --mem-per-cp
 # The study, where the user can read it: the chosen walltime is only as good
 # as the data behind it, so the data is shown rather than summarised.
 if [[ -n $STUDY_REPORT ]]; then
-    hdr "Queue study -- why this chunk walltime"
+    hdr "backfill-study -- why this chunk walltime"
     printf '%s\n' "$STUDY_REPORT"
 fi
 if (( NTPN * NODES > NODE_CPN )) && [[ $ACTION != resume ]]; then
@@ -1823,7 +1813,7 @@ tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
 } > "$CH_JOB"
 chmod +x "$CH_JOB"
 [[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" "$CHDIR/cluster.conf"
-[[ -n $STUDY_REPORT ]] && printf '%s\n' "$STUDY_REPORT" > "$CHDIR/queue_study.txt"
+[[ -n $STUDY_REPORT ]] && printf '%s\n' "$STUDY_REPORT" > "$CHDIR/backfill_study.txt"
 
 # ---- state ----------------------------------------------------------------
 # The allocation and the layout context go into the state on every launch and
@@ -1847,9 +1837,6 @@ else
               next_cap "$CAP1" t_elec_s "$CAL" t_startup_s "$STARTUP" \
               t_work_s "$T_WORK" t_vasp_budget_s "$T_VASP" \
               chain_wall_min "$WALL" chain_wall_source "$WALL_SRC" chain_margin_cfg_min "$MARGIN_CFG" \
-              max_chunks "$(int "${OPT_MAXCHUNKS:-${WP_CHAIN_MAX_CHUNKS:-$DEF_MAX_CHUNKS}}")" \
-              max_wall_min "$DEF_MAX_WALL_MIN" \
-              deadline_epoch "$(date -d "+${DEF_DEADLINE_DAYS} days" +%s)" \
               stall_streak 0 tight_streak 0 mem_peak_max_mb 0 mem_ave_max_mb 0 \
               oom_count 0 next_cold_start 0 \
               "${_alloc_keys[@]}"

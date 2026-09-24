@@ -8,7 +8,7 @@ set -uo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 W="$WORK/qstudy"; rm -rf "$W"; mkdir -p "$W"
 source "$SUITE_DIR/chain_harness.sh"
-Q="$TK_DIR/wolfpack_queue.py"
+Q="$TK_DIR/backfill_study.py"
 
 # _hist FILE LIMIT_MIN WAIT_MIN N [NODES CPUS MEM]  -- N started jobs
 _hist(){
@@ -32,7 +32,7 @@ PY
 # ===========================================================================
 got=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 print(Q.parse_mem_mb('', '1000Mc', 48, 1), Q.parse_mem_mb('', '48000Mn', 48, 1),
       Q.parse_mem_mb('', '48000M', 48, 1), Q.parse_mem_mb('cpu=48,mem=46.875G,node=1', '', 48, 1))
 print(Q.parse_timelimit_min('600', ''), Q.parse_timelimit_min('', '1-00:00:00'),
@@ -46,7 +46,7 @@ ok_if "[[ '$(sed -n 2p <<<"$got")' == '600.0 1440.0 270.0 None' ]]" \
 # its wait is counted from Eligible, not from Submit.
 held=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 j = Q.load_jobs(['1|p|2026-09-01T00:00:00|2026-09-01T10:00:00|2026-09-01T10:01:00|COMPLETED|x|60|1|4|mem=8G|'])
 print(int(j[0].wait_s))")
 ok_if "[[ '$held' == 60 ]]" "a job held 10 h by a dependency and started 1 min after is a 60 s wait (got ${held} s)"
@@ -65,7 +65,7 @@ _hist "$H" 120 5 12
 _hist "$H" 240 240 12
 res=$("$WP_PY" -c "
 import sys, json; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 jobs = Q.load_jobs(open('$H').read().splitlines())
 r = Q.study(jobs, nodes=1, cpus=4, mem_mb=8192, t_ion_s=25.6, startup_s=10,
             margin_cfg_min=5, steps=20, max_time_min=None, default_wall_min=60)
@@ -86,7 +86,7 @@ _hist "$H2" 60 120 12 1 64 8G
 _hist "$H2" 120 5 12 1 64 8G
 lvl=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 r = Q.study(Q.load_jobs(open('$H2').read().splitlines()), nodes=1, cpus=4, mem_mb=8192,
             t_ion_s=25.6, startup_s=10, margin_cfg_min=5, steps=20, max_time_min=None,
             default_wall_min=60)
@@ -101,7 +101,7 @@ _hist "$H3" 60 120 3
 _hist "$H3" 120 5 3
 fb=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 r = Q.study(Q.load_jobs(open('$H3').read().splitlines()), nodes=1, cpus=4, mem_mb=8192,
             t_ion_s=25.6, startup_s=10, margin_cfg_min=5, steps=20, max_time_min=None,
             default_wall_min=60)
@@ -112,7 +112,7 @@ ok_if "grep -q '^fallback | fewer than two' <<<\"\$fb\"" \
 # MaxTime bounds the candidates, and is itself one.
 mt=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 r = Q.study([], nodes=1, cpus=4, mem_mb=8192, t_ion_s=25.6, startup_s=10, margin_cfg_min=5,
             steps=20, max_time_min=150, default_wall_min=60)
 print(max(x['wall_min'] for x in r['rows']), 150.0 in [x['wall_min'] for x in r['rows']])")
@@ -128,12 +128,12 @@ ch_run "$d" --walltime 120 >/dev/null 2>&1
 tw_chain=$(ch_state "$d" t_work_s)
 tw_study=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 print(int(Q.chunk_budget(120, 5, 10)))")
 ok_if "[[ '$tw_chain' == '$tw_study' ]]" "the study's time budget per chunk equals the chain's (${tw_study} s vs ${tw_chain} s)"
 ramp=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
-import wolfpack_queue as Q
+import backfill_study as Q
 print(Q.replay_chunks(60, 30, 10, 5, 20))")
 ok_if "[[ '$ramp' == '(True, 95, 3)' ]]" \
       "the study's ramp is the chain's: a calibration chunk of 3, then doubling, capped by what remains -- 3, 6, 11 -> 3 chunks for 20 steps ($ramp)"
@@ -146,9 +146,9 @@ cp "$H" "$W/chosen.fake/history"
 out=$(ch_run "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && [[ '$(ch_job "$d" time)' == 02:00:00 ]]" \
       "launched with no --walltime, the chain uses the study's choice ($(ch_job "$d" time))"
-ok_if "[[ '$(ch_state "$d" chain_wall_source)' == 'queue study' ]]" "and records that it was the study's"
-ok_if "grep -q 'PROPOSED CHUNK' <<<\"\$out\" && [[ -s '$d/wolfpack_chain/queue_study.txt' ]]" \
-      "the study is shown at launch and kept in wolfpack_chain/queue_study.txt"
+ok_if "[[ '$(ch_state "$d" chain_wall_source)' == 'backfill-study' ]]" "and records that it was backfill-study's"
+ok_if "grep -q 'PROPOSED CHUNK' <<<\"\$out\" && [[ -s '$d/wolfpack_chain/backfill_study.txt' ]]" \
+      "the study is shown at launch and kept in wolfpack_chain/backfill_study.txt"
 
 # No accounting data: the profile's default, and the reason.
 d=$(ch_setup nodata)
@@ -160,13 +160,57 @@ ok_if "grep -q 'could not decide' <<<\"\$(ch_state '$d' chain_wall_source)\"" "a
 # --no-queue-study skips it.
 d=$(ch_setup nostudy); cp "$H" "$W/nostudy.fake/history"
 ch_run "$d" --no-queue-study >/dev/null 2>&1
-ok_if "[[ '$(ch_job "$d" time)' == 01:00:00 && ! -f '$d/wolfpack_chain/queue_study.txt' ]]" \
+ok_if "[[ '$(ch_job "$d" time)' == 01:00:00 && ! -f '$d/wolfpack_chain/backfill_study.txt' ]]" \
       "--no-queue-study uses the profile's walltime and runs no study"
 
-# --study shows the analysis and launches nothing.
+# The study is not the chain's any more: --study points at the command.
 d=$(ch_setup lookonly); cp "$H" "$W/lookonly.fake/history"
-out=$(ch_run "$d" --study 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" "--study prints the proposal (2 h)"
-ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "and creates nothing and submits nothing"
+must_refuse "vasp-relax-loop --study points at the command that does it now" "backfill-study" \
+    ch_run "$d" --study
+
+# ===========================================================================
+# 7. backfill-study, STANDING ALONE
+# ===========================================================================
+# In a calculation folder, with no option, it reads what the chain would read
+# -- and says where each number came from.
+out=$(ch_backfill "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
+      "backfill-study alone, in the folder, proposes the same 2 h (rc=$rc)"
+ok_if "grep -q 'NSW in INCAR' <<<\"\$out\" && grep -q 'slurm_vasptest.sh --ntasks' <<<\"\$out\"" \
+      "and says where each input came from"
+ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "it creates nothing and submits nothing"
+
+# One folder, both programs, the same numbers. If the two ever read a folder
+# differently, the standalone answer would describe a chain that is not the one
+# that runs. The start-up time is written the way vasp-test writes it, with a
+# decimal: the chain used to strip the point and read "10.4" as 104 s.
+d=$(ch_setup twins); cp "$H" "$W/twins.fake/history"
+sed -i 's/test_startup_s="10"/test_startup_s="10.4"/' "$d/.wolfpack/state.env"
+line=$(ch_backfill "$d" 2>/dev/null | grep '^WP_BACKFILL_STUDY ')
+ch_run "$d" >/dev/null 2>&1
+_f(){ sed -n "s/.* $1=\([^ ]*\).*/\1/p" <<<"$line"; }
+ok_if "[[ -n '$(_f t_ion_s)' && '$(_f t_ion_s)' == '$(ch_state "$d" t_ionic_s)' ]]" \
+      "the same ionic step: backfill-study $(_f t_ion_s) s, the chain $(ch_state "$d" t_ionic_s) s"
+ok_if "[[ '$(_f steps)' == '$(ch_state "$d" nsw_target)' && '$(_f cpus)' == '$(ch_state "$d" chain_ranks)' && '$(_f nodes)' == '$(ch_state "$d" chain_nodes)' ]]" \
+      "the same steps, ranks and nodes ($(_f steps), $(_f cpus), $(_f nodes))"
+ok_if "[[ '$(_f mem_mb)' == \$(( $(ch_state "$d" chain_mem_per_cpu) * $(ch_state "$d" chain_ranks) )) ]]" \
+      "the same memory ($(_f mem_mb) MB)"
+ok_if "[[ '$(_f wall_min)' == '$(ch_state "$d" chain_wall_min)' ]]" \
+      "and the same proposal: $(_f wall_min) min, which is what the chain then runs with"
+ok_if "[[ '$(ch_state "$d" t_startup_s)' == 10 ]]" \
+      "a start-up written as 10.4 s is read as 10 s, not 104 (the chain read $(ch_state "$d" t_startup_s))"
+
+# No folder at all: everything on the command line.
+e="$W/nofolder"; mkdir -p "$e"
+out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twins.fake" \
+        FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF=/nonexistent HOME="$e" \
+        "$WP_PY" "$Q" --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192 --t-ion-s 25.6 \
+        --steps 20 --startup-s 10 --margin-min 5 --default-wall-min 60 2>&1 ); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\"" \
+      "with no folder, given the job on the command line, it answers the same (rc=$rc)"
+out=$( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" WOLFPACK_CLUSTER_CONF=/nonexistent \
+        HOME="$e" "$WP_PY" "$Q" 2>&1 ); rc=$?
+ok_if "(( rc == 2 )) && grep -q 'cannot study without' <<<\"\$out\" && grep -q 'vasp-test' <<<\"\$out\"" \
+      "with neither, it refuses and says what is missing and how to get it (rc=$rc)"
 
 exit $(( FAIL_N > 0 ))

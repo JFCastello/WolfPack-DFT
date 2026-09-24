@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
-"""wolfpack_queue.py -- what this cluster's queue has done to jobs shaped like
-yours, and which chunk walltime that implies.  (LIBRARY + CLI)
+"""backfill_study.py  (on PATH as: backfill-study)
 
-Standard library only: this runs on a login node inside vasp-relax-loop's
-launcher, where nothing beyond python3 can be assumed.
+What this cluster's queue has done to jobs shaped like yours, and which chunk
+walltime that implies for a chunked relaxation.  A command of its own, and the
+library vasp-relax-loop calls at launch.
+
+    cd <calc folder>        # after vasp-dry-run -> vasp-recommend-slurm -> vasp-test
+    backfill-study          # everything is read from the folder, as the chain would
+
+    backfill-study --partition main --nodes 1 --cpus 40 --mem-mb 80000 \
+                   --t-ion-s 115 --steps 100     # no folder: say it yourself
+
+Any value given on the command line wins over the one read from the folder;
+that is how vasp-relax-loop calls it, with its own numbers, so the walltime it
+proposes is judged by the same arithmetic the chain then runs on.
+
+The last line of the output is for programs, not people:
+    WP_BACKFILL_STUDY wall_min=... source=study|fallback ... reason="..."
+
+Standard library only, Python 3.6+: it runs on a login node, where nothing
+beyond python3 can be assumed.
+
+It does not simulate the scheduler. It measures what the scheduler actually
+did -- backfill included -- to jobs like yours, at each walltime they asked for.
 
 ==============================================================================
 THE QUESTION
@@ -76,6 +95,8 @@ import argparse
 import datetime as _dt
 import json
 import math
+import os
+import re
 import subprocess
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -502,6 +523,186 @@ def sensitivity(jobs: Sequence[Job]) -> Dict[str, List[Tuple[str, int, float]]]:
 
 
 # --------------------------------------------------------------------------- #
+# A calculation folder: the inputs vasp-relax-loop derives at launch
+# --------------------------------------------------------------------------- #
+# The same files, the same defaults and the same arithmetic as vasp_chain.sh.
+# test_32 runs both on one folder and requires the same numbers from each.
+CHAIN_STEP_OVERHEAD = 1.15   # the +15 % the chain adds to an ionic step
+SPI_DEFAULT = 12.0           # electronic steps per ionic step, when unmeasured
+SPI_MAX = 25.0
+DEF_WALLTIME_MIN = 600       # DEF_WALLTIME_MIN in vasp_chain.sh
+DEF_MARGIN_MIN = 5           # DEF_MARGIN_MIN
+DEF_STARTUP_S = 120          # when vasp-test recorded no start-up time
+DEF_DAYS = 30                # WP_CHAIN_QUEUE_DAYS
+
+
+def read_kv(path: str) -> Dict[str, str]:
+    """KEY="value" lines, as the profile and .wolfpack/state.env are written."""
+    out: Dict[str, str] = {}
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                m = re.match(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$', ln)
+                if not m:
+                    continue
+                v = m.group(2).strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                else:
+                    v = re.split(r"\s+#", v, 1)[0].strip()
+                out[m.group(1)] = v
+    except OSError:
+        pass
+    return out
+
+
+def sbatch_value(text: str, opt: str) -> Optional[str]:
+    """First --opt=VALUE in the job script, as vasp_chain.sh's sb_num/sb_str."""
+    m = re.search(r"--%s=(\S+)" % re.escape(opt), text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _num(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _whole(v, default: int = 0) -> int:
+    """vasp_chain.sh's int(): keep the digits of an integer field."""
+    d = re.sub(r"[^0-9-]", "", str(v or ""))
+    try:
+        return int(d)
+    except ValueError:
+        return default
+
+
+def partition_maxtime_min(partition: str) -> Optional[float]:
+    """The partition's MaxTime in minutes; None when unlimited or unknown."""
+    try:
+        p = subprocess.run(["scontrol", "show", "partition", partition],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"MaxTime=(\S+)", p.stdout or "")
+    if not m or m.group(1) in ("UNLIMITED", "INFINITE", "NONE"):
+        return None
+    v = parse_timelimit_min("", m.group(1))
+    return v if v and v > 0 else None
+
+
+def ionic_step_estimate(t_e: float, test_ranks: int, ranks: int, cpu_eff: float,
+                        spi_measured: float, nelmin: int) -> Tuple[float, float, float, str]:
+    """(cal, spi, t_ion, spi_source): vasp_chain.sh's launch estimate, rounded
+    at the same places (%.3f, %.1f, %.1f) so both print the same number."""
+    r = test_ranks / ranks if (test_ranks > 0 and ranks > 0) else 1.0
+    e = min(max(cpu_eff / 100.0, 0.3), 1.0)
+    cal = float("%.3f" % (t_e * r / e))
+    nm = nelmin if nelmin >= 2 else 2
+    src = "measured by vasp-test"
+    s = spi_measured
+    if s <= 0:
+        s, src = SPI_DEFAULT, "ASSUMED -- vasp-test never finished an ionic step"
+    s = min(max(s, float(nm)), SPI_MAX)
+    spi = float("%.1f" % s)
+    t_ion = float("%.1f" % (cal * spi * CHAIN_STEP_OVERHEAD))
+    return cal, spi, t_ion, src
+
+
+def from_folder(folder: str) -> Tuple[Dict, Dict[str, str], List[str]]:
+    """(values, where-each-came-from, errors) for a calculation folder."""
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import wolfpack_incar as _incar          # the toolkit's own INCAR reader
+
+    val: Dict = {}
+    src: Dict[str, str] = {}
+    err: List[str] = []
+    conf_path = os.environ.get("WOLFPACK_CLUSTER_CONF") or \
+        os.path.expanduser("~/.config/wolfpack-dft/cluster.conf")
+    conf = read_kv(conf_path)
+    state = read_kv(os.path.join(folder, ".wolfpack", "state.env"))
+
+    job_path = os.path.join(folder, "slurm_vasptest.sh")
+    try:
+        job = open(job_path).read()
+    except OSError:
+        job = ""
+        err.append("no slurm_vasptest.sh here: run vasp-dry-run -> vasp-recommend-slurm "
+                   "-> vasp-test first, or give --nodes --cpus --mem-mb --t-ion-s")
+    ranks = _whole(sbatch_value(job, "ntasks"))
+    nodes = _whole(sbatch_value(job, "nodes"), 1) or 1
+    memcpu = _whole(sbatch_value(job, "mem-per-cpu"))
+    val["cpus"], src["cpus"] = ranks, "slurm_vasptest.sh --ntasks"
+    val["nodes"], src["nodes"] = nodes, "slurm_vasptest.sh --nodes"
+    val["mem_mb"], src["mem_mb"] = float(memcpu * ranks), "slurm_vasptest.sh --mem-per-cpu x --ntasks"
+    part = sbatch_value(job, "partition")
+    main_part = conf.get("WP_MAIN_PARTITION") or os.environ.get("WP_MAIN_PARTITION")
+    if part:
+        val["partition"], src["partition"] = part, "slurm_vasptest.sh --partition"
+    elif main_part:
+        val["partition"], src["partition"] = main_part, "profile WP_MAIN_PARTITION"
+    if job and (ranks <= 0 or memcpu <= 0):
+        err.append("slurm_vasptest.sh has no --ntasks or no --mem-per-cpu")
+
+    t_e = _num(state.get("test_avg_loop"))
+    if t_e <= 0:
+        err.append("no measured per-step time (test_avg_loop) in .wolfpack/state.env: "
+                   "run vasp-test here, or give --t-ion-s")
+    incar_live = os.path.join(folder, "INCAR")
+    incar_bak = os.path.join(folder, "INCAR.chain.bak")
+    try:
+        live = open(incar_live).read()
+    except OSError:
+        live = ""
+    nelmin = _whole(_incar.get_tag(live, "NELMIN") or "")
+    cal, spi, t_ion, spi_src = ionic_step_estimate(
+        t_e, _whole(state.get("test_ranks")), ranks,
+        _num(state.get("test_cpu_eff") or 100, 100.0),
+        _num(state.get("test_scf_per_ionic")), nelmin)
+    val["t_ion_s"] = t_ion
+    src["t_ion_s"] = ("%.3f s/electronic step x %.1f per ionic step (%s) x %.2f"
+                      % (cal, spi, spi_src, CHAIN_STEP_OVERHEAD))
+
+    # NSW, the whole relaxation's steps. From the chain's backup of YOUR INCAR
+    # when there is one: a chain rewrites NSW in the live INCAR every chunk.
+    nsw_file = incar_bak if os.path.isfile(incar_bak) else incar_live
+    try:
+        nsw_text = open(nsw_file).read()
+    except OSError:
+        nsw_text = ""
+    nsw = _whole(_incar.get_tag(nsw_text, "NSW") or "")
+    val["steps"] = nsw
+    src["steps"] = "NSW in %s" % os.path.basename(nsw_file)
+    if nsw <= 1:
+        err.append("NSW=%d in %s: there is no relaxation to chunk"
+                   % (nsw, os.path.basename(nsw_file)))
+
+    # Rounded, not truncated digit by digit: vasp-test writes "58.3".
+    st = state.get("test_startup_s")
+    val["startup_s"] = float(int(max(_num(st, 0.0), 0.0) + 0.5)) \
+        if st not in (None, "") else float(DEF_STARTUP_S)
+    src["startup_s"] = "vasp-test (test_startup_s)" if st not in (None, "") \
+        else "default (vasp-test recorded none)"
+    # The chain sources the profile over its environment: a key the profile
+    # sets wins, one it does not set comes from the environment, else default.
+    def setting(key):
+        v = conf.get(key)
+        return v if v not in (None, "") else os.environ.get(key) or None
+    mg = setting("WP_CHUNK_MARGIN_MIN")
+    val["margin_min"] = float(_whole(mg)) if mg is not None else float(DEF_MARGIN_MIN)
+    src["margin_min"] = "profile WP_CHUNK_MARGIN_MIN" if mg is not None else "default"
+    dw = setting("WP_CHUNK_WALLTIME_MIN")
+    val["default_wall_min"] = float(_whole(dw)) if dw is not None else float(DEF_WALLTIME_MIN)
+    src["default_wall_min"] = "profile WP_CHUNK_WALLTIME_MIN" if dw is not None else "default"
+    days = setting("WP_CHAIN_QUEUE_DAYS")
+    val["days"] = _whole(days, DEF_DAYS) or DEF_DAYS
+    src["days"] = "WP_CHAIN_QUEUE_DAYS" if days else "default"
+    return val, src, err
+
+
+# --------------------------------------------------------------------------- #
 # Presentation
 # --------------------------------------------------------------------------- #
 def fmt_dur(s: Optional[float]) -> str:
@@ -523,9 +724,16 @@ def fmt_wall(m: float) -> str:
 
 
 def report(res: Dict, sens: Optional[Dict] = None, partition: str = "",
-           days: int = 0) -> str:
+           days: int = 0, sources: Optional[Dict[str, str]] = None) -> str:
     L: List[str] = []
     sh = res["shape"]
+    if sources:
+        L.append("  where the inputs came from:")
+        for k in ("partition", "nodes", "cpus", "mem_mb", "t_ion_s", "steps",
+                  "startup_s", "margin_min", "default_wall_min", "days"):
+            if k in sources:
+                L.append(f"    {k:<17}{sources[k]}")
+        L.append("")
     L.append(f"  partition        : {partition or '?'}"
              + (f"   (MaxTime {fmt_wall(res['max_time_min'])})" if res["max_time_min"]
                 else "   (MaxTime unlimited or unknown)"))
@@ -566,9 +774,12 @@ def machine_line(res: Dict, fallback_min: float) -> str:
     else:
         wall, src = fallback_min, "fallback"
     reason = res["reason"].replace('"', "'")
-    return (f'WP_QUEUE_STUDY wall_min={int(round(wall))} source={src} '
+    sh = res["shape"]
+    return (f'WP_BACKFILL_STUDY wall_min={int(round(wall))} source={src} '
             f'feasible_any={int(res["feasible_any"])} '
             f'min_feasible_min={int(res["min_feasible_min"] or 0)} '
+            f't_ion_s={res["t_ion_s"]:.1f} steps={res["steps"]} nodes={sh["nodes"]} '
+            f'cpus={sh["cpus"]} mem_mb={sh["mem_mb"]:.0f} '
             f'level="{res["level"] or ""}" reason="{reason}"')
 
 
@@ -577,44 +788,87 @@ def machine_line(res: Dict, fallback_min: float) -> str:
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        prog="wolfpack_queue.py",
-        description="Study the queue for jobs shaped like this one and propose a "
-                    "chunk walltime (used by vasp-relax-loop at launch).")
-    p.add_argument("--partition", required=True)
-    p.add_argument("--nodes", type=int, required=True)
-    p.add_argument("--cpus", type=int, required=True, help="total cores of the job")
-    p.add_argument("--mem-mb", type=float, required=True, help="TOTAL requested memory, MB")
-    p.add_argument("--t-ion-s", type=float, required=True, help="estimated ionic step, s")
-    p.add_argument("--startup-s", type=float, default=120.0)
-    p.add_argument("--margin-min", type=float, default=5.0,
-                   help="configured chunk end margin (WP_CHUNK_MARGIN_MIN)")
-    p.add_argument("--steps", type=int, required=True, help="ionic steps still to do")
-    p.add_argument("--max-time-min", type=float, default=0.0,
-                   help="partition MaxTime in minutes; 0 = unlimited/unknown")
-    p.add_argument("--default-wall-min", type=float, required=True,
-                   help="the profile's chunk walltime, used when the study cannot decide")
-    p.add_argument("--days", type=int, default=30)
+        prog="backfill-study",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Which chunk walltime this queue rewards, for a chunked "
+                    "relaxation shaped like this one. Reads the partition's own "
+                    "accounting history (sacct) and replays vasp-relax-loop's "
+                    "arithmetic. Launches nothing.",
+        epilog="In a calculation folder after vasp-test, no option is needed: "
+               "everything is read from slurm_vasptest.sh, .wolfpack/state.env, "
+               "the INCAR and the cluster profile. Any option given wins over "
+               "what the folder says.")
+    p.add_argument("folder", nargs="?", default=".",
+                   help="calculation folder (default: here)")
+    p.add_argument("--partition")
+    p.add_argument("--nodes", type=int)
+    p.add_argument("--cpus", type=int, help="total cores (ranks) of the job")
+    p.add_argument("--mem-mb", type=float, help="TOTAL requested memory, MB")
+    p.add_argument("--t-ion-s", type=float, help="estimated ionic step, s")
+    p.add_argument("--steps", type=int, help="ionic steps to do (NSW)")
+    p.add_argument("--startup-s", type=float)
+    p.add_argument("--margin-min", type=float,
+                   help="chunk end margin (WP_CHUNK_MARGIN_MIN)")
+    p.add_argument("--max-time-min", type=float,
+                   help="partition MaxTime in minutes; 0 = unlimited. Default: ask scontrol")
+    p.add_argument("--default-wall-min", type=float,
+                   help="the walltime to fall back on when the study cannot decide")
+    p.add_argument("--days", type=int, help="history to read (default 30)")
     p.add_argument("--min-jobs", type=int, default=MIN_JOBS)
     p.add_argument("--mine", action="store_true", help="only your own jobs")
     p.add_argument("--json", default="", help="also write the analysis as JSON here")
     a = p.parse_args(argv)
 
-    lines, err = run_sacct(a.partition, a.days, all_users=not a.mine)
+    given = {k: getattr(a, k) for k in ("partition", "nodes", "cpus", "mem_mb", "t_ion_s",
+                                        "steps", "startup_s", "margin_min",
+                                        "default_wall_min", "days")}
+    needed = ("partition", "nodes", "cpus", "mem_mb", "t_ion_s", "steps")
+    val: Dict = {}
+    sources: Dict[str, str] = {}
+    errors: List[str] = []
+    if any(given[k] is None for k in needed):
+        # Only read the folder when the command line does not say it all -- the
+        # chain passes everything and must not depend on the folder parsing.
+        val, sources, errors = from_folder(a.folder)
+    for k, v in given.items():
+        if v is not None:
+            val[k] = v
+            sources[k] = "command line"
+    val.setdefault("startup_s", float(DEF_STARTUP_S))
+    val.setdefault("margin_min", float(DEF_MARGIN_MIN))
+    val.setdefault("default_wall_min", float(DEF_WALLTIME_MIN))
+    val.setdefault("days", DEF_DAYS)
+    missing = [k for k in needed if val.get(k) in (None, 0, 0.0, "")]
+    if missing:
+        for e in errors:
+            print(f"backfill-study: {e}", file=sys.stderr)
+        print("backfill-study: cannot study without: " + ", ".join(missing), file=sys.stderr)
+        return 2
+
+    if a.max_time_min is None:
+        mt = partition_maxtime_min(val["partition"])
+        if "partition" in sources and mt is not None:
+            sources["max_time_min"] = "scontrol"
+    else:
+        mt = a.max_time_min if a.max_time_min > 0 else None
+
+    lines, err = run_sacct(val["partition"], int(val["days"]), all_users=not a.mine)
     jobs = load_jobs(lines)
-    mt = a.max_time_min if a.max_time_min > 0 else None
-    res = study(jobs, nodes=a.nodes, cpus=a.cpus, mem_mb=a.mem_mb, t_ion_s=a.t_ion_s,
-                startup_s=a.startup_s, margin_cfg_min=a.margin_min, steps=a.steps,
-                max_time_min=mt, default_wall_min=a.default_wall_min,
-                min_jobs=a.min_jobs)
+    res = study(jobs, nodes=int(val["nodes"]), cpus=int(val["cpus"]),
+                mem_mb=float(val["mem_mb"]), t_ion_s=float(val["t_ion_s"]),
+                startup_s=float(val["startup_s"]), margin_cfg_min=float(val["margin_min"]),
+                steps=int(val["steps"]), max_time_min=mt,
+                default_wall_min=float(val["default_wall_min"]), min_jobs=a.min_jobs)
     if err and res["source"] != "study" and res["feasible_any"]:
         res["reason"] = err
     sens = sensitivity(jobs) if jobs else None
-    print(report(res, sens, a.partition, a.days))
+    shown = {k: v for k, v in sources.items() if v != "command line"}
+    print(report(res, sens, val["partition"], int(val["days"]), shown or None))
     if a.json:
         with open(a.json, "w") as fh:
-            json.dump({"result": res, "sensitivity": sens, "sacct_error": err}, fh,
-                      indent=1, default=str)
-    fb = a.default_wall_min
+            json.dump({"inputs": val, "sources": sources, "result": res,
+                       "sensitivity": sens, "sacct_error": err}, fh, indent=1, default=str)
+    fb = float(val["default_wall_min"])
     if mt is not None:
         fb = min(fb, mt)
     print(machine_line(res, fb))

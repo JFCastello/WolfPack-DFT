@@ -102,7 +102,7 @@ Package bugs found and fixed in `vasp_chain.sh`:
 1. The one-step check was dead code (above). It is now a real check, done
    before the cap is computed, with the shortest walltime that would work.
 2. On a stop about the **next** chunk (`step_exceeds_chunk`,
-   `memory_does_not_fit`, the budgets), the chain did not move CONTCAR to
+   `memory_does_not_fit`, NSW spent), the chain did not move CONTCAR to
    POSCAR, although **this** chunk had run to completion. The way out of
    such a stop is a new chain (`--fresh`), which starts from POSCAR, so it
    silently redid that chunk's steps. A negative control with the fix removed

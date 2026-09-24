@@ -1,0 +1,9 @@
+  [32m[ OK ][0m the chain ends when NSW is spent: 100 of 100 steps, reason nsw_budget
+  [32m[ OK ][0m in six chunks: 3 6 12 24 48 7 (got: 3 6 12 24 48 7 )
+  [32m[ OK ][0m chunk 60, 100 h of VASP, 30 days after launch: it continues and submits the next chunk
+  [32m[ OK ][0m and chain.log mentions none of the old limits
+  [32m[ OK ][0m a chain the old limits had stopped resumes and runs on (rc=0)
+  [32m[ OK ][0m --max-chunks is no longer an option
+  [32m[ OK ][0m and --help does not mention a chunk or time limit
+  [32m[ OK ][0m --walltime 1:30 is refused, not read as 130 min
+  [32m[ OK ][0m --walltime 90.5 is refused, not read as 905 min

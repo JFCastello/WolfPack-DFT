@@ -10,10 +10,19 @@
   [32m[ OK ][0m the study's time budget per chunk equals the chain's (6650 s vs 6650 s)
   [32m[ OK ][0m the study's ramp is the chain's: a calibration chunk of 3, then doubling, capped by what remains -- 3, 6, 11 -> 3 chunks for 20 steps ((True, 95, 3))
   [32m[ OK ][0m launched with no --walltime, the chain uses the study's choice (02:00:00)
-  [32m[ OK ][0m and records that it was the study's
-  [32m[ OK ][0m the study is shown at launch and kept in wolfpack_chain/queue_study.txt
+  [32m[ OK ][0m and records that it was backfill-study's
+  [32m[ OK ][0m the study is shown at launch and kept in wolfpack_chain/backfill_study.txt
   [32m[ OK ][0m with no accounting data the profile's default is used (01:00:00)
   [32m[ OK ][0m and the state says why the study could not decide
   [32m[ OK ][0m --no-queue-study uses the profile's walltime and runs no study
-  [32m[ OK ][0m --study prints the proposal (2 h)
-  [32m[ OK ][0m and creates nothing and submits nothing
+  [32m[ OK ][0m vasp-relax-loop --study points at the command that does it now
+  [32m[ OK ][0m backfill-study alone, in the folder, proposes the same 2 h (rc=0)
+  [32m[ OK ][0m and says where each input came from
+  [32m[ OK ][0m it creates nothing and submits nothing
+  [32m[ OK ][0m the same ionic step: backfill-study 25.6 s, the chain 25.6 s
+  [32m[ OK ][0m the same steps, ranks and nodes (20, 4, 1)
+  [32m[ OK ][0m the same memory (8000 MB)
+  [32m[ OK ][0m and the same proposal: 120 min, which is what the chain then runs with
+  [32m[ OK ][0m a start-up written as 10.4 s is read as 10 s, not 104 (the chain read 10)
+  [32m[ OK ][0m with no folder, given the job on the command line, it answers the same (rc=0)
+  [32m[ OK ][0m with neither, it refuses and says what is missing and how to get it (rc=2)

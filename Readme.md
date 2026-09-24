@@ -121,6 +121,7 @@ pass `--purge-repo`.
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
 | `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM`. Picks the chunk walltime from a study of the queue, resizes each chunk's memory from what the last one used, and continues after an OOM kill with a plain `--resume` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
+| `backfill-study` | `backfill_study.py` | **Which chunk walltime this queue rewards** for this calculation: from the partition's `sacct` history of jobs shaped like yours, the walltime that minimises chunks × (median wait + start-up). `vasp-relax-loop` runs it at launch; alone, it launches nothing |
 | `vasp-queue-wait` | `vasp_queue_wait.sh` | **How long jobs actually wait** in each partition, split by job size: median, mean, p90 and worst, from SLURM's own accounting. The median is the headline — queue waits have a long tail, and a mean is what makes people say "this queue takes a day" about one that usually starts in ten minutes |
 | `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — reads `sacct` for the job ids the pipeline recorded and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
@@ -421,9 +422,10 @@ An overrun costs a shorter chunk, not the run.
 
 It stops and tells you why on: a failed or crashed chunk, a lost `WAVECAR`
 (without which every later chunk would restart cold and never converge), an
-energy that stops improving, `NaN` in the OSZICAR, running out of `NELM`, or any
-of the chunk-count, compute and deadline limits. It never resubmits into a
-failure. Per-chunk history is in `wolfpack_chain/chain.log`; on success it appends
+energy that stops improving, `NaN` in the OSZICAR, or running out of `NELM`.
+**The only limit is your own `NELM`** (`NSW` for a relaxation): there is no cap
+on the number of chunks, on the compute accumulated, or on how many days the
+chain has been running. It never resubmits into a failure. Per-chunk history is in `wolfpack_chain/chain.log`; on success it appends
 one block to `report.out` and runs `vasp-check` for you.
 
 > Short jobs backfill better than long ones **only if they are also small**. For a
@@ -437,16 +439,17 @@ because a truncated electronic loop gives wrong forces. Everything above holds,
 plus four things specific to long relaxations on a real cluster.
 
 ```bash
-vasp-relax-loop --study            # what chunk walltime it would pick, and why; launches nothing
-vasp-relax-loop                    # launch: walltime from the queue study
+backfill-study                     # what chunk walltime it would pick, and why; launches nothing
+vasp-relax-loop                    # launch: walltime from backfill-study
 vasp-relax-loop --walltime 120     # launch with a chunk walltime you choose
 vasp-relax-loop --resume           # after a stop, a crash, or an OOM kill
 vasp-relax-loop --fresh            # archive an unfinished chain, start a new one here
 ```
 
 **The chunk walltime is chosen once, then fixed.** At launch it comes from
-`--walltime` if you give one. Otherwise it comes from a **queue study** (below),
-and if the study cannot decide, from the profile's `WP_CHUNK_WALLTIME_MIN`. It
+`--walltime` if you give one (whole minutes). Otherwise it comes from
+**`backfill-study`** (below), and if the study cannot decide, from the profile's
+`WP_CHUNK_WALLTIME_MIN`. It
 is capped at the partition's `MaxTime`; an explicit `--walltime` above `MaxTime`
 is refused, not silently cut. Every chunk of that chain then uses it, and the
 number of ionic steps per chunk adapts to it instead.
@@ -469,8 +472,16 @@ stops before submitting a chunk that cannot complete one. The geometry reached
 so far is kept in `POSCAR`, and the stop names the new chain that would fit:
 `vasp-relax-loop --fresh --walltime 83`.
 
-**The queue study.** `wolfpack_queue.py` reads the partition's accounting history
-(`sacct`, last 30 days; `WP_CHAIN_QUEUE_DAYS` changes it). It compares only
+**The walltime study: `backfill-study`.** A command of its own; `vasp-relax-loop`
+calls it at launch with its own numbers. Run it alone in the calculation folder
+to see the analysis without launching anything: it reads the same files the
+chain would (`slurm_vasptest.sh`, `.wolfpack/state.env`, the INCAR, the cluster
+profile) and prints where each number came from. Outside a folder, give the job
+on the command line (`--partition --nodes --cpus --mem-mb --t-ion-s --steps`).
+
+It does not simulate the scheduler. It measures what the scheduler actually did
+(backfill included) to jobs like yours. It reads the partition's accounting
+history (`sacct`, last 30 days; `WP_CHAIN_QUEUE_DAYS` changes it). It compares only
 jobs like yours: the same node band (1, 2–4, 5–16, 17+), cores within a factor
 of 2, memory within a factor of 3. It drops memory, then cores, then nodes only
 when there are too few such jobs, and says which comparison it used. For each candidate walltime
@@ -484,8 +495,13 @@ T(W) = chunks(W) × (median wait at W + start-up)  +  ionic steps × time per st
 
 It needs at least 8 comparable jobs in at least two walltimes. With less, it
 proposes nothing, says why, and the profile's walltime is used. The full table
-is printed at launch and kept in `wolfpack_chain/queue_study.txt`.
-`--no-queue-study` skips it.
+is printed at launch and kept in `wolfpack_chain/backfill_study.txt`.
+`vasp-relax-loop --no-queue-study` skips it.
+
+What it cannot see: jobs still waiting (only jobs that started have a wait to
+measure), and other users' jobs if the cluster's `sacct` shows you only your
+own. It assumes the relaxation needs all of `NSW`, a ceiling rather than a
+forecast.
 
 **Memory is measured every chunk and the next one is resized.** After each chunk
 the chain reads what it used: `MaxRSS`/`AveRSS` from `sacct`, or, where the
@@ -523,6 +539,11 @@ out that the chunk was OOM-killed (from `sacct`'s `OUT_OF_MEMORY` or
 A walltime kill is handled the same way: the walltime stays fixed, and the steps
 per chunk come down to what was measured. If not one step completed, it refuses
 and tells you to start a new chain with a longer walltime.
+
+**The only limit is `NSW`.** The chain runs until the relaxation converges or
+your `NSW` is spent, however many chunks, hours or days that takes. To go past
+`NSW`, raise it in `INCAR.chain.bak` (your original INCAR, which a new chain
+reads) and start again with `--fresh`.
 
 `--status` shows the chunk walltime and where it came from, the current
 allocation, the memory measured, and how many OOM kills the chain has survived.
@@ -924,7 +945,7 @@ wolfpack --help | less # paginate
 
 ## 8. The test suite
 
-`tests/` holds 33 tests, and they ship with the toolkit so you can see what is
+`tests/` holds 34 tests, and they ship with the toolkit so you can see what is
 actually checked rather than take a claim on trust.
 
 ```bash

@@ -249,6 +249,15 @@ ch_run(){
           HOME="$f" bash "$CH_TK" --mode relax "$@" )
 }
 
+# ch_backfill DIR [args...]       backfill-study, standing alone, in DIR, on the
+#                                 same fake cluster the chain sees
+ch_backfill(){
+    local d="$1" f; shift; f=$(_ch_fake "$d")
+    ( cd "$d" && env -u SLURM_JOB_ID PATH="$f/bin:/usr/bin:/bin" FAKE_DIR="$f" \
+          FAKE_MAXTIME="${FAKE_MAXTIME:-UNLIMITED}" WOLFPACK_CLUSTER_CONF="$f/cluster.conf" \
+          HOME="$f" "$WP_PY" "$TK_DIR/backfill_study.py" "$@" )
+}
+
 # ch_last_jid DIR                 the job the chain most recently submitted
 ch_last_jid(){ tail -1 "$(_ch_fake "$1")/submitted" 2>/dev/null; }
 

@@ -1,4 +1,4 @@
-  [32m[ OK ][0m all 22 advertised commands resolve to a file that exists
+  [32m[ OK ][0m all 23 advertised commands resolve to a file that exists
   [32m[ OK ][0m vasp_chain.sh --help works from an empty directory
   [32m[ OK ][0m vasp_check.sh --help works from an empty directory
   [32m[ OK ][0m vasp_clean.sh --help works from an empty directory
@@ -16,5 +16,6 @@
   [32m[ OK ][0m vasp_plot_fatbandsdos.py --help works from an empty directory
   [32m[ OK ][0m vasp_recommend_slurm.py --help works from an empty directory
   [32m[ OK ][0m vasp_test_recommend.py --help works from an empty directory
+  [32m[ OK ][0m backfill_study.py --help works from an empty directory
   [32m[ OK ][0m wolfpack.sh --help works from an empty directory
   [32m[ OK ][0m wolfpack rejects an unknown subcommand

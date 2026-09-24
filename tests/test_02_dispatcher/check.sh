@@ -19,7 +19,8 @@ done < <(grep -oE '"[a-z0-9-]+\|[a-z0-9_]+\.(sh|py)"' "$TK_DIR/install.sh" | tr 
 # --- every command renders its own help without running anything -----------
 # --help is the one thing a user types when they are already confused. It must
 # not need a calculation directory, must not hang, and must not exit non-zero.
-for f in "$TK_DIR"/vasp_*.sh "$TK_DIR"/build_*.py "$TK_DIR"/vasp_*.py "$TK_DIR"/wolfpack.sh; do
+for f in "$TK_DIR"/vasp_*.sh "$TK_DIR"/build_*.py "$TK_DIR"/vasp_*.py "$TK_DIR"/backfill_*.py \
+         "$TK_DIR"/wolfpack.sh; do
     [[ -f "$f" ]] || continue
     b=$(basename "$f")
     # .py files carry a #!/usr/bin/env python3 shebang, which resolves to the

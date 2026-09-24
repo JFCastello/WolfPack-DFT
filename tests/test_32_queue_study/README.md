@@ -1,12 +1,14 @@
 # test_32_queue_study
 
-> the chunk walltime chosen from what the queue did to jobs shaped like this one
+> backfill-study: the chunk walltime from what the queue did to jobs like this one
 
 ## 1. Definition
 
-Feeds `wolfpack_queue.py` accounting histories whose best answer is known in
-advance, checks the parsing, the decision and its fallbacks, then checks that
-`vasp-relax-loop` uses the result at launch, and ignores it when told to.
+Feeds `backfill-study` (`backfill_study.py`) accounting histories whose best
+answer is known in advance, and checks the parsing, the decision and its
+fallbacks. Then it checks that `vasp-relax-loop` uses the result at launch, and
+ignores it when told to. Finally it runs `backfill-study` standing alone, and
+checks that it reads a calculation folder exactly as the chain does.
 
 ## 2. Purpose
 
@@ -39,7 +41,8 @@ with the fields the study asks for
 They are synthetic on purpose: the right answer is then arithmetic chosen here,
 not something computed by the code under test. Sections 1–5 call the module
 directly; section 6 runs the real `vasp_chain.sh` against the harness of
-test_29, whose fake `sacct` serves the history. About 10 seconds.
+test_29, whose fake `sacct` serves the history; section 7 runs `backfill-study`
+as a command, in a folder and with no folder. About 15 seconds.
 
 ## 4. Expected results
 
@@ -65,10 +68,14 @@ double, up to what fits in *W* (`⌊T_work / (t_ionic × 1.15)⌋`).
 | 4 | 3 jobs per walltime | **no proposal** (`fallback`), with the reason "fewer than two …" |
 | 4 | `MaxTime` 150 min | no candidate above 150; 150 itself is a candidate |
 | 5 | the chain at 120 min, and the study at 120 min | the same time budget per chunk (6650 s); the chain's ramp at 60 min and 30 s per step: 3, 6, 11 → 3 chunks, steady cap 95 |
-| 6 | launch with no `--walltime` | `#SBATCH --time=02:00:00`, `chain_wall_source = queue study`, the study shown and kept in `wolfpack_chain/queue_study.txt` |
+| 6 | launch with no `--walltime` | `#SBATCH --time=02:00:00`, `chain_wall_source = backfill-study`, the study shown and kept in `wolfpack_chain/backfill_study.txt` |
 | 6 | no accounting data | profile default `01:00:00`; the state says why the study could not decide |
 | 6 | `--no-queue-study` | profile default, no study file |
-| 6 | `--study` | prints `PROPOSED CHUNK   : 2 h`, creates nothing, submits nothing |
+| 6 | `vasp-relax-loop --study` | refused, naming `backfill-study` |
+| 7 | `backfill-study` in the folder, no option | proposes **2 h**; says where each input came from; creates nothing, submits nothing |
+| 7 | the same folder through both programs, with `test_startup_s="10.4"` | backfill-study and the chain agree on the ionic step (25.6 s), steps, ranks, nodes, memory and walltime (120 min); the start-up is read as **10 s** |
+| 7 | no folder, the job on the command line | the same 2 h |
+| 7 | no folder and no options | exit 2, naming what is missing and `vasp-test` as the way to get it |
 
 **Why "similar" matters.** A 1-node job and a 20-node job at the same walltime
 wait very differently. The study first compares jobs that match on nodes (the
@@ -79,7 +86,7 @@ walltimes, and reports the level it used.
 
 ## 5. Obtained results
 
-All nineteen as expected. The study as the chain shows it at launch (section 6):
+All twenty-eight as expected. The study as the chain shows it at launch (section 6):
 
 ```
   walltime   fits?  steps/chunk  chunks   jobs   median    p75      p90     expected total
@@ -95,8 +102,15 @@ All nineteen as expected. The study as the chain shows it at launch (section 6):
 
 (rows with no jobs omitted here). 24.0 min = 3 × (5 min + 10 s) + 20 × 25.6 s.
 
-The module is new in this change, so there is no earlier behaviour to compare
-against. `wolfpack_queue.py` is standard-library only and Python 3.6+
+`backfill-study` is its own command since 2026-09-24; the chain calls it
+with its own numbers rather than letting it re-derive them, and section 7 is
+what keeps the two readings of a folder identical.
+
+One package bug was found by section 7 and fixed in `vasp_chain.sh`: vasp-test
+writes its start-up time with a decimal (`test_startup_s="58.3"`), and the
+chain's `int()` kept only the digits, reading **583 s**. Every chunk budget
+lost ten times its start-up; the tests never saw it because their state files
+held whole numbers. A negative control with the fix removed reads 104 for 10.4. `wolfpack_queue.py` is standard-library only and Python 3.6+
 (checked with `vermin`, not run: there is no 3.6 here). It runs on a login node,
 inside the launcher, where the toolkit's conda environment may not be active.
 
@@ -109,7 +123,7 @@ coincide and no percentile convention can change the answer.
 
 ## 7. Verdict
 
-**PASSED** — 19 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 28 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

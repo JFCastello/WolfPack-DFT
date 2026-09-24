@@ -49,6 +49,8 @@ COMMAND_MAP=(
     # name it was invoked as.
     "vasp-scf-loop|vasp_chain.sh"
     "vasp-relax-loop|vasp_chain.sh"
+    # The queue study vasp-relax-loop runs at launch, as a command of its own.
+    "backfill-study|backfill_study.py"
     "vasp-check|vasp_check.sh"
     "vasp-slurm-report|vasp_slurm_report.sh"
     "vasp-queue-wait|vasp_queue_wait.sh"

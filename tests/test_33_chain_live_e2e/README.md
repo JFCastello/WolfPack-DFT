@@ -67,8 +67,8 @@ All eight as expected, on 2026-09-24:
 
 ```
 # idx  jobid  kind   cap  used  t_step  elapsed  frac  peakMB  reqMB verdict    detail
-  1    1454   RELAX    3     3    13.7       51  0.28      72   1000 CONTINUE   3/3 ionic steps, max|F|=0.2218
-  2    1455   RELAX    6     5     9.4       49  0.27      71    300 CONVERGED  reached required accuracy after 5 ionic step(s)
+  1    1562   RELAX    3     3    15.7       52  0.29      72   1000 CONTINUE   3/3 ionic steps, max|F|=0.2218
+  2    1563   RELAX    6     5    10.1       52  0.29      72    300 CONVERGED  reached required accuracy after 5 ionic step(s)
 ```
 
 - **Memory source: OUTCAR (rank 0).** The testbed's `sacct` lists the job
