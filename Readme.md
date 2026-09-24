@@ -119,7 +119,7 @@ pass `--purge-repo`.
 | `vasp-recommend-slurm` | `vasp_recommend_slurm.py` | **Pipeline STAGE 2** — read that OUTCAR → KPAR/NCORE + `slurm.sh` (80%-mem, multi-node split) |
 | `vasp-test` | `vasp_test.sh` | **Pipeline STAGE 3** — benchmark of the *fixed* config (job `slurm_benchmark.sh`) → scale measured RAM to production → write the **definitive** `slurm_vasptest.sh` + (GW) `MAXMEM` into the INCAR; prints a **predicted-vs-measured** comparison + validation verdict of the chosen parallelization & node config |
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
-| `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM` |
+| `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM`. Picks the chunk walltime from a study of the queue, resizes each chunk's memory from what the last one used, and continues after an OOM kill with a plain `--resume` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
 | `vasp-queue-wait` | `vasp_queue_wait.sh` | **How long jobs actually wait** in each partition, split by job size: median, mean, p90 and worst, from SLURM's own accounting. The median is the headline — queue waits have a long tail, and a mean is what makes people say "this queue takes a day" about one that usually starts in ten minutes |
 | `vasp-check` | `vasp_check.sh` | **Physics coherence** of a run — convergence, metal/insulator/half-metal, magnetic order, direct/indirect gap with the VBM/CBM k-points, GW quasiparticle shifts. (Why it died / salvageability → `vasp-diagnose`) |
@@ -384,6 +384,148 @@ target and RSS-overhead factor can be pinned in the profile as `WP_MEM_UTIL` and
 
 > Requires SLURM job accounting (`sacct`/`MaxRSS`) so memory can be anchored to
 > the measured peak. If it is off, it falls back to VASP's own memory table.
+
+### Chunked runs — `vasp-scf-loop`
+
+Some schedulers make a long walltime wait a long time: a 10-hour job can sit in
+the queue for days while a 1-hour job backfills into a gap immediately. This runs
+the same calculation as a chain of short jobs.
+
+```bash
+cd <calc folder>          # after dry-run -> recommend -> test
+vasp-scf-loop             # start, then leave it alone
+vasp-scf-loop --status    # where is it
+vasp-scf-loop --stop      # finish the current chunk, then stop cleanly
+vasp-scf-loop --resume    # continue a stopped chain
+```
+
+Each chunk caps `NELM` to what fits the walltime, restarts from the previous
+chunk's `WAVECAR`, and submits the next one itself. There is no `--dependency`
+chain: exactly as many jobs run as are needed, and nothing is left queued when it
+converges. The first chunk is deliberately short — it calibrates against the real
+per-step time, and every later chunk is sized from that measurement.
+
+**The whole chain spends at most your INCAR's `NELM`.** A chain stands in for one
+job with that setting, so chunking never quietly enlarges the step budget.
+
+**Stopping is safe.** `--stop` lets the running chunk finish, archive and record
+itself before halting, so nothing is lost and `--resume` picks up where it left
+off. `--stop --now` additionally writes a `STOPCAR`, VASP's own clean stop, which
+still writes the `WAVECAR`.
+
+**Overrunning the walltime is survivable.** A walltime `SIGKILL` cannot be caught
+and would kill the job exactly where it submits its successor — chain dead, chunk
+lost. Each chunk asks SLURM for a catchable warning signal first and converts it
+into a `STOPCAR`, so VASP exits cleanly and the normal decision logic still runs.
+An overrun costs a shorter chunk, not the run.
+
+It stops and tells you why on: a failed or crashed chunk, a lost `WAVECAR`
+(without which every later chunk would restart cold and never converge), an
+energy that stops improving, `NaN` in the OSZICAR, running out of `NELM`, or any
+of the chunk-count, compute and deadline limits. It never resubmits into a
+failure. Per-chunk history is in `wolfpack_chain/chain.log`; on success it appends
+one block to `report.out` and runs `vasp-check` for you.
+
+> Short jobs backfill better than long ones **only if they are also small**. For a
+> job spanning several nodes the launcher says so, with the queue statistics it
+> used, rather than letting you find out after a week.
+
+### Chunked relaxation — `vasp-relax-loop`
+
+The same chain for a structural relaxation. It chunks `NSW`, never `NELM`,
+because a truncated electronic loop gives wrong forces. Everything above holds,
+plus four things specific to long relaxations on a real cluster.
+
+```bash
+vasp-relax-loop --study            # what chunk walltime it would pick, and why; launches nothing
+vasp-relax-loop                    # launch: walltime from the queue study
+vasp-relax-loop --walltime 120     # launch with a chunk walltime you choose
+vasp-relax-loop --resume           # after a stop, a crash, or an OOM kill
+vasp-relax-loop --fresh            # archive an unfinished chain, start a new one here
+```
+
+**The chunk walltime is chosen once, then fixed.** At launch it comes from
+`--walltime` if you give one. Otherwise it comes from a **queue study** (below),
+and if the study cannot decide, from the profile's `WP_CHUNK_WALLTIME_MIN`. It
+is capped at the partition's `MaxTime`; an explicit `--walltime` above `MaxTime`
+is refused, not silently cut. Every chunk of that chain then uses it, and the
+number of ionic steps per chunk adapts to it instead.
+
+**A chain that cannot fit one ionic step does not start.** If a single ionic step
+(estimated from `vasp-test`, ×1.5 for a first chunk that starts cold) does not
+fit in the chunk, every chunk would be killed before completing one. The
+launcher refuses, and tells you the shortest walltime that would work:
+
+```
+[FAIL] not even ONE ionic step fits in a 60-min chunk.
+ One step is ~2555.6s (estimated from the benchmark); a first chunk starts cold, so it must hold 1.5 x that: 3834s.
+ ...
+ The shortest chunk that holds one: 70 min.
+ Launch with:   --walltime 70      (or more ranks, for a faster step)
+```
+
+If steps grow later (a cell relaxation's basis grows with the volume), the chain
+stops before submitting a chunk that cannot complete one. The geometry reached
+so far is kept in `POSCAR`, and the stop names the new chain that would fit:
+`vasp-relax-loop --fresh --walltime 83`.
+
+**The queue study.** `wolfpack_queue.py` reads the partition's accounting history
+(`sacct`, last 30 days; `WP_CHAIN_QUEUE_DAYS` changes it). It compares only
+jobs like yours: the same node band (1, 2–4, 5–16, 17+), cores within a factor
+of 2, memory within a factor of 3. It drops memory, then cores, then nodes only
+when there are too few such jobs, and says which comparison it used. For each candidate walltime
+it takes the median wait of those jobs, counts the chunks your relaxation would
+need at that walltime (the same ramp the chain uses), and picks the walltime with
+the shortest expected total:
+
+```
+T(W) = chunks(W) × (median wait at W + start-up)  +  ionic steps × time per step
+```
+
+It needs at least 8 comparable jobs in at least two walltimes. With less, it
+proposes nothing, says why, and the profile's walltime is used. The full table
+is printed at launch and kept in `wolfpack_chain/queue_study.txt`.
+`--no-queue-study` skips it.
+
+**Memory is measured every chunk and the next one is resized.** After each chunk
+the chain reads what it used: `MaxRSS`/`AveRSS` from `sacct`, or, where the
+accounting records none, VASP's own `Maximum memory used` from OUTCAR (rank 0,
+applied to every rank). It then rewrites the next chunk's `#SBATCH` lines:
+
+```
+--mem-per-cpu = (MaxRSS + (ranks per node − 1) × AveRSS) / ranks per node × 1.25
+```
+
+This is sized for the heaviest node's total, because that is what SLURM
+enforces (`cgroup.conf`, `ConstrainRAMSpace`), not each task. The largest peak
+ever measured is never forgotten; for `ISIF ≥ 3` the request also grows with
+the cell volume. The **number of ranks never changes**, since your KPAR/NCORE
+were chosen for it. When a node can no longer hold them, they are spread over
+more nodes. When one rank alone needs more than a node, the chain stops and says
+what frees memory (a lower KPAR first). `chain.log` shows each chunk's peak next
+to what it was granted. This applies to `vasp-scf-loop` too.
+
+**After an OOM kill: `vasp-relax-loop --resume`, and nothing else.** It works
+out that the chunk was OOM-killed (from `sacct`'s `OUT_OF_MEMORY` or
+`slurmstepd`'s message), then:
+
+- raises the memory: the larger of 1.5 × what was granted
+  (`WP_CHAIN_OOM_FACTOR`) and what the measurements say, spreading over more
+  nodes if needed;
+- keeps the geometry the dead chunk reached (its `CONTCAR` becomes `POSCAR`);
+- counts the ionic steps it completed and adds them to the trajectory, even when
+  the whole job died and the chunk could not record anything itself;
+- sets aside a `WAVECAR` that was cut off while being written
+  (`WAVECAR.partial`), and starts that one chunk cold;
+- refuses, with the way out, when no layout the cluster offers can hold it, and
+  refuses while a chunk of the chain is still queued or running.
+
+A walltime kill is handled the same way: the walltime stays fixed, and the steps
+per chunk come down to what was measured. If not one step completed, it refuses
+and tells you to start a new chain with a longer walltime.
+
+`--status` shows the chunk walltime and where it came from, the current
+allocation, the memory measured, and how many OOM kills the chain has survived.
 
 ## 2. VASP run analysis
 
@@ -782,7 +924,7 @@ wolfpack --help | less # paginate
 
 ## 8. The test suite
 
-`tests/` holds 23 tests, and they ship with the toolkit so you can see what is
+`tests/` holds 33 tests, and they ship with the toolkit so you can see what is
 actually checked rather than take a claim on trust.
 
 ```bash
@@ -813,7 +955,7 @@ in `/tmp/wpslurm`; without it those tests skip rather than fail. **No POTCAR is
 included** — they are licensed and may not be redistributed. The tests read
 yours from `$WP_POTCAR_DIR`, and skip cleanly when a potential is absent.
 
-The whole suite runs in about 13 minutes on an 8-core laptop.
+The whole suite runs in about 20 minutes on an 8-core laptop.
 
 ---
 

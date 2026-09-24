@@ -25,7 +25,25 @@
 #   vasp-relax-loop             # a relaxation: chunks NSW, never NELM
 #   ... --status                # where is it
 #   ... --stop                  # finish the current chunk, then stop cleanly
-#   ... --resume                # continue a stopped chain
+#   ... --resume                # continue a stopped OR DEAD chain -- after an
+#                               # OOM kill it raises the memory by itself
+#   ... --study                 # show the queue study and the chunk walltime
+#                               # it would choose, without launching anything
+#   ... --fresh                 # archive an unfinished chain and start over
+#   ... --walltime MIN          # force the chunk walltime (skips the study)
+#   ... --no-queue-study        # use the profile's chunk walltime as is
+#
+# THE CHUNK WALLTIME is chosen once, at launch, and then fixed for the whole
+# chain: from --walltime if given, else from a study of what this partition's
+# queue has done to jobs shaped like this one (wolfpack_queue.py), else from
+# WP_CHUNK_WALLTIME_MIN. If not even ONE ionic step fits in it, the chain
+# refuses to start -- and stops, rather than submit a chunk that cannot
+# progress, if a step later grows past it.
+#
+# MEMORY is measured after every chunk (sacct, or VASP's own OUTCAR footer)
+# and the next chunk's --mem-per-cpu is rewritten from it. When the ranks no
+# longer fit a node, they are spread over more nodes; the rank count, and so
+# KPAR/NCORE, never changes under a running relaxation.
 #
 # REQUIREMENTS
 #   vasp-test must have run here: its slurm_vasptest.sh carries the MEASURED
@@ -51,7 +69,9 @@ die(){  printf '  %s[FAIL]%s %s\n' "$c_r" "$c_0" "$1" >&2; exit "${2:-1}"; }
 note(){ printf '  %s%s%s\n' "$c_d" "$*" "$c_0"; }
 kv(){   printf '  %-28s %s\n' "$1" "$2"; }
 
-usage(){ sed -n '2,33p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; }
+# The whole header, up to its closing rule: a fixed line range silently cut
+# the options off as the header grew.
+usage(){ awk 'NR == 1 { next } /^#####/ { if (++n == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
 
 # --------------------------------------------------------------------------- #
 # Mode: one implementation, two commands. The rendered job passes --mode
@@ -76,6 +96,9 @@ while [[ $# -gt 0 ]]; do
         --status)      ACTION="status"; shift ;;
         --stop)        ACTION="stop"; shift ;;
         --resume)      ACTION="resume"; shift ;;
+        --study)       ACTION="study"; shift ;;
+        --fresh)       OPT_FRESH=1; shift ;;
+        --no-queue-study) OPT_NOSTUDY=1; shift ;;
         --now)         STOP_NOW=1; shift ;;
         --walltime)    OPT_WALLTIME="${2:?}"; shift 2 ;;
         --max-chunks)  OPT_MAXCHUNKS="${2:?}"; shift 2 ;;
@@ -85,8 +108,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 STOP_NOW="${STOP_NOW:-0}"; OPT_FORCE="${OPT_FORCE:-0}"
+OPT_FRESH="${OPT_FRESH:-0}"; OPT_NOSTUDY="${OPT_NOSTUDY:-0}"
 [[ -n $MODE ]] || die "cannot tell which mode to run: invoke as vasp-scf-loop or vasp-relax-loop" 2
 [[ $MODE == scf || $MODE == relax ]] || die "unknown mode: $MODE" 2
+# The name the user types. $0 is that only through the ~/.local/bin symlink;
+# the rendered chunk job, and anyone calling the real path, see vasp_chain.sh.
+CMD="vasp-${MODE}-loop"
 
 # VASP's own graceful stop, and which loop each flavour leaves.
 #   LSTOP  finishes the CURRENT IONIC STEP and exits -- the relaxation keeps a
@@ -157,6 +184,16 @@ NELM_FLOOR=8                  # a chunk holding fewer steps than this is pointle
 NELM_CEIL=500
 SAFETY=1.15                   # per-step time is a prediction; leave room
 SIGNAL_LEAD=120               # seconds of warning before the walltime kill
+COLD_FACTOR=1.5               # chunk 1 absorbs the cold start: size it with this
+# Memory. MEM_SAFETY is headroom over what the previous chunk MEASURED; it is not
+# a guess at a requirement, which is measured. OOM_FACTOR is how far the request
+# is raised after an OOM kill -- a retry policy, like a back-off, because a kill
+# says only that the need was ABOVE the grant, never by how much.
+MEM_SAFETY="${WP_CHAIN_MEM_SAFETY:-1.25}"
+OOM_FACTOR="${WP_CHAIN_OOM_FACTOR:-1.5}"
+MEM_FLOOR_MB=256
+SACCT_POLL_S=45               # accounting lags a finished step by a few seconds
+QUEUE_DAYS="${WP_CHAIN_QUEUE_DAYS:-30}"
 
 # --------------------------------------------------------------------------- #
 # State: sourceable key="value", merged and replaced ATOMICALLY.  Appending
@@ -189,10 +226,13 @@ state_set(){   # state_set key value [key value ...]
 }
 
 log_line(){    # append-only; this is what the user reads after waking up
+    # peakMB is the heaviest rank this chunk measured; reqMB the --mem-per-cpu it
+    # RAN with. Side by side, because the gap between them is how close the chunk
+    # came to being killed.
     mkdir -p "$CHDIR"
-    [[ -f "$CH_LOG" ]] || printf '# %-4s %-10s %-6s %5s %5s %9s %8s %5s %-10s %s\n' \
-        idx jobid kind cap used t_step elapsed frac verdict detail > "$CH_LOG"
-    printf '  %-4s %-10s %-6s %5s %5s %9s %8s %5s %-10s %s\n' "$@" >> "$CH_LOG"
+    [[ -f "$CH_LOG" ]] || printf '# %-4s %-10s %-6s %5s %5s %9s %8s %5s %7s %6s %-10s %s\n' \
+        idx jobid kind cap used t_step elapsed frac peakMB reqMB verdict detail > "$CH_LOG"
+    printf '  %-4s %-10s %-6s %5s %5s %9s %8s %5s %7s %6s %-10s %s\n' "$@" >> "$CH_LOG"
 }
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +320,182 @@ cell_volume(){
 }
 
 # --------------------------------------------------------------------------- #
+# Queue and memory helpers.  Pure bash/awk, like contcar_ok: they run inside
+# the compute job too, where only VASP's modules are loaded.
+# --------------------------------------------------------------------------- #
+# The partition's MaxTime, in minutes; empty when unlimited or unknown. A chunk
+# walltime above it is a job the scheduler rejects at submit -- which, inside a
+# running chain, is a chain that dies at a chunk boundary.
+part_maxtime_min(){
+    local v
+    v=$(scontrol show partition "$1" 2>/dev/null | grep -oE 'MaxTime=[^ ]+' | head -1 | cut -d= -f2)
+    [[ -z $v || $v == UNLIMITED || $v == INFINITE || $v == NONE ]] && return 0
+    awk -v t="$v" 'BEGIN{ d=0; if (split(t, a, "-") == 2) { d = a[1]; t = a[2] }
+        m = split(t, b, ":")
+        if (m == 3)      printf "%d", d*1440 + b[1]*60 + b[2]
+        else if (m == 2) printf "%d", d*1440 + b[1]
+        else             printf "%d", d*1440 + b[1] }'
+}
+
+# Rank 0's peak RSS in MB, from VASP's own timing footer
+#     "Maximum memory used (kb):       48456."
+# Rank 0 is normally the heaviest rank (it gathers the all-k-point arrays), so
+# this is a fair stand-in for the peak when accounting has nothing.
+outcar_maxmem_mb(){
+    awk '/Maximum memory used \(kb\):/{ v = $5 + 0 }
+         END{ if (v > 0) printf "%.0f", v/1024 }' "${1:-OUTCAR}" 2>/dev/null
+}
+
+# sacct's word on one job:  "STATE MAXRSS_MB AVERSS_MB"  (numbers 0 if unknown).
+# --units=M everywhere, so nothing has to guess whether a bare number is KB.
+# Polls up to $2 seconds, because a step that just ended reaches the database a
+# few seconds later.
+job_mem_evidence(){
+    local jid="$1" poll="${2:-0}" deadline raw
+    [[ -n $jid ]] && command -v sacct >/dev/null 2>&1 || { echo "UNKNOWN 0 0"; return 0; }
+    deadline=$(( $(date +%s) + poll ))
+    while :; do
+        raw=$(sacct -j "$jid" --units=M -n -P -o JobID,State,MaxRSS,AveRSS 2>/dev/null)
+        # sacct FAILING is not sacct LAGGING: a cluster with accounting disabled
+        # answers the same way every time, and waiting on it would cost every
+        # chunk the whole poll for nothing.
+        (( $? != 0 )) && break
+        printf '%s\n' "$raw" | awk -F'|' '$1 ~ /\.[0-9]+$/ && $3 ~ /[0-9]/ {f=1} END{exit !f}' && break
+        # A step already recorded as FINISHED with no MaxRSS will never get one:
+        # slurmctld sends a step's usage to the database WITH its completion, not
+        # after. Where steps are recorded without RSS (this suite's testbed
+        # does that), waiting cost every chunk the whole poll.
+        printf '%s\n' "$raw" | awk -F'|' '
+            $1 ~ /\.[0-9]+$/ { n++; if ($2 ~ /^(COMPLETED|FAILED|CANCELLED|OUT_OF_ME|TIMEOUT|NODE_FAIL|PREEMPTED|DEADLINE)/) t++ }
+            END { exit !(n > 0 && t == n) }' && break
+        (( $(date +%s) >= deadline )) && break
+        sleep 3
+    done
+    printf '%s\n' "$raw" | awk -F'|' '
+        function mb(x,   u, v) { gsub(/[^0-9.KMGT]/, "", x); if (x == "") return 0
+            u = substr(x, length(x)); v = x + 0
+            if (u == "K") return v/1024; if (u == "G") return v*1024
+            if (u == "T") return v*1048576; return v }
+        $1 !~ /\./ { st = $2; sub(/ .*/, "", st) }          # "CANCELLED by 1000" -> CANCELLED
+        $2 ~ /OUT_OF_ME/ { oom = 1 }
+        $1 ~ /\.[0-9]+$/ { m = mb($3); if (m > mx) mx = m; a = mb($4); if (a > av) av = a }
+        END { if (oom) st = "OUT_OF_MEMORY"; if (st == "") st = "UNKNOWN"
+              printf "%s %.0f %.0f\n", st, mx, av }'
+}
+
+# The job's own stderr, wherever the chain has filed it by now. slurmstepd
+# writes its verdict there whether or not accounting caught up.
+err_mentions(){   # err_mentions JID REGEX
+    local f
+    for f in "VASP-chain-$1.err" "$CHDIR"/chunk-*/"VASP-chain-$1.err"; do
+        [[ -s $f ]] && grep -qiE "$2" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+OOM_RX='oom[-_]kill|Out Of Memory|exceeded memory limit'
+TIMEOUT_RX='DUE TO TIME LIMIT'
+
+# MB per CPU the next chunk should be granted, from what a chunk USED.
+#
+# SLURM limits the TOTAL of a job's tasks on each node, not each task: with
+# task/cgroup and ConstrainRAMSpace=yes the cgroup limit is "the allocated
+# memory" of the job on that node -- see cgroup.conf(5). So the requirement is
+# the heaviest NODE's total. The node holding rank 0, which carries the
+# gathered all-k-point arrays and runs at about twice the mean, totals roughly
+#     max_rss + (ntpn - 1) x ave_rss        spread over ntpn CPUs.
+# With no mean (VASP's OUTCAR only knows rank 0) every rank is taken to be as
+# heavy as rank 0: with rank 0 normally the heaviest, that errs toward more.
+# For a cell relaxation the next cell can be larger, and the plane-wave count
+# at fixed ENCUT grows with the volume, so the volume ratio scales it too.
+need_mem_per_cpu(){   # need_mem_per_cpu MAXRSS AVERSS NTPN VOLRATIO
+    awk -v mx="$1" -v av="$2" -v n="$3" -v vr="$4" -v s="$MEM_SAFETY" -v f="$MEM_FLOOR_MB" 'BEGIN{
+        if (n < 1) n = 1; if (vr < 1) vr = 1
+        if (av <= 0 || av > mx) av = mx
+        v = (mx + (n - 1) * av) / n * vr * s
+        if (v < f) v = f
+        printf "%d", int((v + 49) / 50) * 50 }'
+}
+
+# Lay RANKS out so each gets MEMCPU MB.  Prints "nodes ntpn exact" or, when it
+# cannot be done, a reason on stdout and returns 1.
+#
+# The RANK COUNT never changes: KPAR and NCORE in the INCAR were chosen for it,
+# and changing it would change the parallel decomposition under a running
+# calculation. What may change is how many nodes the ranks spread over --
+# fewer ranks per node is exactly how each one gets more memory. The layout
+# never shrinks below the node count the chain started with.
+fit_layout(){   # fit_layout RANKS MEMCPU
+    awk -v R="$1" -v M="$2" -v nm="${chain_node_mem_mb:-0}" -v mg="${chain_mem_margin:-0}" \
+        -v cpn="${chain_cpn:-1}" -v cap="${chain_max_cores:-0}" \
+        -v prof="${chain_profile:-whole-nodes}" -v n0="${chain_nodes0:-1}" 'BEGIN{
+        usable = int(nm * (1 - mg))
+        if (usable <= 0) { print "the profile gives no memory per node"; exit 1 }
+        fit = int(usable / M); if (fit > cpn) fit = cpn
+        if (fit < 1) {
+            printf "one rank alone needs %d MB, and a node offers %d MB after its margin", M, usable
+            exit 1 }
+        n = int((R + fit - 1) / fit); if (n < n0) n = n0
+        if (prof == "balanced") {
+            # equal occupancy: n must divide R. Look a little further, then give up
+            # on evenness rather than on the chain.
+            for (k = n; k <= n + 8; k++) if (R % k == 0 && R / k <= fit) { n = k; break }
+        }
+        t = int((R + n - 1) / n); ex = (n * t == R ? 1 : 0)
+        if (cap > 0) {
+            cost = (prof == "balanced" ? R : n * cpn)
+            if (cost > cap) {
+                printf "%d rank(s) at %d MB each need %d node(s) (%d cores charged), over the %d-core cap", \
+                       R, M, n, cost, cap
+                exit 1 } }
+        printf "%d %d %d", n, t, ex }'
+}
+
+# Settle the request and the layout together: the need depends on the ranks
+# per node (rank 0's excess is shared by fewer CPUs when there are fewer of
+# them) and the layout on the need. Fewer ranks per node only ever raises the
+# need, so this converges in a step or two. FLOOR is a lower bound on the
+# request (an OOM's escalation). Sets SM_NEED SM_NODES SM_NTPN SM_EXACT, or
+# SM_NEED and SM_WHY and returns 1 when no layout holds it. Called directly,
+# not in $( ), so that it can set them.
+settle_memory(){   # settle_memory PEAK AVE RANKS NTPN VOLRATIO FLOOR
+    local t="$4" lay i
+    SM_WHY=""
+    for i in 1 2 3 4 5; do
+        SM_NEED=$(need_mem_per_cpu "$1" "$2" "$t" "$5")
+        (( $(int "$6") > SM_NEED )) && SM_NEED=$(int "$6")
+        if ! lay=$(fit_layout "$3" "$SM_NEED"); then SM_WHY=$lay; return 1; fi
+        read -r SM_NODES SM_NTPN SM_EXACT <<<"$lay"
+        (( SM_NTPN == t )) && break
+        t=$SM_NTPN
+    done
+    return 0
+}
+
+# The shortest chunk walltime, in whole minutes, that leaves room for one ionic
+# step of T seconds x FACTOR after the start-up and the chunk margin -- which
+# is the larger of the configured one and 8 % of the walltime, as at launch.
+walltime_for_step(){   # walltime_for_step T FACTOR STARTUP_S MARGIN_CFG_MIN
+    awk -v t="$1" -v f="$2" -v s="$3" -v m="$4" 'BEGIN{
+        for (w = 1; w <= 100000; w++) { mg = m; if (int(w * 0.08) > mg) mg = int(w * 0.08)
+            if (w * 60 - mg * 60 - s >= t * f) { print w; exit } } }'
+}
+
+# Rewrite the rendered chunk's allocation in place: --mem-per-cpu, --nodes and
+# the --ntasks-per-node line (or the comment that stands in for it when the
+# split is uneven). Everything else in the job is left exactly as rendered.
+rewrite_allocation(){   # rewrite_allocation MEMCPU NODES NTPN EXACT RANKS
+    local tmp="$CH_JOB.new"
+    awk -v m="$1" -v n="$2" -v t="$3" -v ex="$4" -v r="$5" '
+        /^#SBATCH --mem-per-cpu=/        { print "#SBATCH --mem-per-cpu=" m; next }
+        /^#SBATCH --nodes=/              { print "#SBATCH --nodes=" n; next }
+        /^#SBATCH --ntasks-per-node=/ || /^# no --ntasks-per-node/ {
+            if (ex == 1) print "#SBATCH --ntasks-per-node=" t
+            else printf "# no --ntasks-per-node: %d ranks do not divide evenly over %d node(s)\n", r, n
+            next }
+        { print }' "$CH_JOB" > "$tmp" && mv -f "$tmp" "$CH_JOB" && chmod +x "$CH_JOB"
+}
+
+# --------------------------------------------------------------------------- #
 # Control verbs
 # --------------------------------------------------------------------------- #
 if [[ $ACTION == status ]]; then
@@ -298,6 +514,10 @@ if [[ $ACTION == status ]]; then
         kv "last cap"        "${last_nelm_cap:-?} electronic steps"
         kv "electronic steps" "${nelm_total:-0} of ${nelm_target:-?}"
     fi
+    kv "chunk walltime"  "${chain_wall_min:-?} min, fixed  (${chain_wall_source:-?})"
+    kv "allocation now"  "${chain_nodes:-?} node(s) x ${chain_ntpn:-?} ranks, ${chain_mem_per_cpu:-?} MB/cpu"
+    kv "memory measured" "last ${last_mem_peak_mb:-?} MB/rank (${last_mem_src:-?}), largest ${mem_peak_max_mb:-?}"
+    (( $(int "${oom_count:-0}") > 0 )) && kv "OOM kills survived" "${oom_count} (last job ${last_oom_jid:-?})"
     kv "compute used"    "$(awk -v s="${wall_used_s:-0}" 'BEGIN{printf "%.1f h", s/3600}')"
     kv "core-hours"      "${corehours:-0}"
     [[ -f "$CH_LOG" ]] && { echo; note "per-chunk history ($CH_LOG):"; cat "$CH_LOG"; }
@@ -310,7 +530,7 @@ if [[ $ACTION == stop ]]; then
     printf 'stopped by %s at %s\n' "${USER:-?}" "$(date -Iseconds)" > "$CH_STOP"
     say "STOP requested."
     note "The running chunk will finish normally, archive its output, and NOT submit a"
-    note "successor. Nothing is lost. Continue later with: $(basename "$0") --resume"
+    note "successor. Nothing is lost. Continue later with: ${CMD} --resume"
     if (( STOP_NOW )); then
         # VASP's own graceful stop. LABORT leaves the electronic loop and still
         # writes the WAVECAR, so the chain stays resumable -- unlike scancel.
@@ -406,7 +626,21 @@ if [[ $ACTION == chunk ]]; then
 
     incar_set LWAVE  ".TRUE."                  "the restart object between chunks"
     incar_set LCHARG ".TRUE."
-    if (( idx > 1 )); then
+    if [[ ${next_cold_start:-0} == 1 ]]; then
+        # --resume set the dead chunk's WAVECAR aside because it could not be
+        # verified complete. One cold start costs a few electronic steps; reading
+        # a truncated WAVECAR costs the chunk.
+        incar_set ISTART "0"                   "cold start: the last WAVECAR was not trustworthy"
+        incar_set ICHARG "2"                   "cold start: atomic charge densities"
+        # The chain pinned NELMDL=0 for warm restarts. A cold start wants the delay
+        # back: the user's own value if the backup has one, else VASP's default for
+        # ISTART=0, which is -5.
+        _nd=$(grep -m1 -oiE "^[[:space:]]*NELMDL[[:space:]]*=[[:space:]]*-?[0-9]+" INCAR.chain.bak 2>/dev/null \
+              | grep -oE -- '-?[0-9]+$')
+        incar_set NELMDL "${_nd:--5}"         "cold start: delay the charge update again"
+        [[ -n "${nbands:-}" ]] && incar_set NBANDS "$nbands" "pinned from chunk 1"
+        say "cold start for this chunk (the previous WAVECAR was set aside by --resume)"
+    elif (( idx > 1 )); then
         incar_set ISTART "1"                   "continue from the previous chunk's WAVECAR"
         incar_set ICHARG "0"                   "charge from the wavefunction"
         # A negative NELMDL delays the charge update at a COLD start. On a restart
@@ -455,6 +689,21 @@ if [[ $ACTION == chunk ]]; then
     startup=$(awk -v w="$elapsed" -v s="$sum_loop" 'BEGIN{r=w-s; if(r<0)r=0; printf "%.1f", r}')
     de=$(awk '/^(DAV|RMM|EDDAV|CG|DIIS):/{d=$4} END{printf "%s", (d==""?"":d)}' OSZICAR 2>/dev/null)
     frac=$(awk -v e="$elapsed" -v b="${t_vasp_budget_s:-1}" 'BEGIN{printf "%.2f", (b>0? e/b : 0)}')
+
+    # ---- memory: what this chunk actually used --------------------------------
+    # sacct first: its MaxRSS is the HEAVIEST task of the step and its AveRSS the
+    # mean, which is what the node-total rule needs. VASP's own footer is the
+    # fallback -- rank 0 only, but rank 0 is normally the heaviest. The poll is
+    # short when the walltime warning already fired: what is left of the job
+    # belongs to the archive and the successor, not to waiting on a database.
+    _poll=$SACCT_POLL_S; (( _hit_walltime )) && _poll=5
+    read -r mem_state mem_max mem_ave < <(job_mem_evidence "${SLURM_JOB_ID:-}" "$_poll")
+    mem_max=$(int "${mem_max:-0}"); mem_ave=$(int "${mem_ave:-0}"); mem_src="sacct"
+    if (( mem_max <= 0 )); then
+        mem_max=$(int "$(outcar_maxmem_mb OUTCAR)"); mem_ave=0; mem_src="OUTCAR (rank 0)"
+        (( mem_max <= 0 )) && mem_src="not measured"
+    fi
+    mem_granted=$(int "${SLURM_MEM_PER_CPU:-${chain_mem_per_cpu:-0}}")
 
     # ---- relax-only measurements -------------------------------------------
     ionic=0; t_ionic=0; fmax=""; nelm_hits=0; nelm_hit_last=0; relax_done=0; nsw_eff=0
@@ -509,7 +758,15 @@ if [[ $ACTION == chunk ]]; then
     if [[ -f "$CH_STOP" ]]; then
         reason="user"; detail="stop requested"
     elif (( rc != 0 )) || (( footer == 0 )); then
-        reason="failed"; detail="rc=${rc} footer=${footer}"
+        # An OOM kill is the one failure --resume can fix by itself, so it is told
+        # apart from the rest: by sacct's state, or by slurmstepd's own words in
+        # this job's stderr.
+        if [[ ${mem_state:-} == OUT_OF_MEMORY ]] || err_mentions "${SLURM_JOB_ID:-x}" "$OOM_RX"; then
+            reason="oom"
+            detail="killed for memory at ${mem_granted} MB/cpu$( (( mem_max > 0 )) && echo ", peak ${mem_max} MB/rank measured")"
+        else
+            reason="failed"; detail="rc=${rc} footer=${footer}"
+        fi
     elif grep -qaE 'NaN|\*\*\*\*\*' OSZICAR 2>/dev/null; then
         reason="numerical"; detail="NaN or overflow in OSZICAR"
     elif [[ ! -s WAVECAR ]] || [[ $(stat -c %Y WAVECAR 2>/dev/null || echo 0) -lt $chunk_start ]]; then
@@ -635,10 +892,17 @@ if [[ $ACTION == chunk ]]; then
     state_set chunk_index "$idx" nelm_total "$(( $(int "${nelm_total:-0}") + steps ))" \
               wall_used_s "$wall_used" corehours "$ch" t_elec_s "$t_step" \
               t_startup_s "$startup" last_nelm_cap "$cap" last_de "${de:-}" \
-              last_elapsed_s "$elapsed"
+              last_elapsed_s "$elapsed" next_cold_start 0
+    # A complete WAVECAR's size, for --resume: a later chunk that dies while
+    # writing leaves one of a different size, and that is how it is recognised.
+    if [[ -s WAVECAR ]] && (( $(stat -c %Y WAVECAR 2>/dev/null || echo 0) >= chunk_start )) \
+       && (( rc == 0 )) && (( footer == 1 )); then
+        state_set wavecar_bytes "$(stat -c %s WAVECAR 2>/dev/null || echo 0)"
+    fi
     if [[ $MODE == relax ]]; then
         state_set nsw_done "$(( $(int "${nsw_done:-0}") + ionic ))" \
                   last_fmax "${fmax:-}" t_ionic_s "${t_ionic:-0}" \
+                  t_ionic_measured "$(awk -v t="${t_ionic:-0}" 'BEGIN{ print (t > 0) ? 1 : 0 }')" \
                   nelm_hit_streak "$(( nelm_hit_last ? $(int "${nelm_hit_streak:-0}") + 1 : 0 ))" \
                   next_is_recovery 0
     fi
@@ -699,8 +963,21 @@ if [[ $ACTION == chunk ]]; then
                     warn "only ${newcap} ionic step(s) fit per chunk: the optimiser restarts more often than it advances. Consider a longer --walltime."
             fi
             state_set last_nsw_cap "$cap"
+            # Does ONE step still fit? The walltime is fixed for the whole chain,
+            # and the cap above is clamped to at least 1 -- so without this, a step
+            # that has grown past the chunk (a cell relaxation's basis grows with
+            # the volume; a harder geometry needs more SCF steps) would be handed
+            # a chunk it cannot complete, at the cost of a queue wait and a
+            # walltime of core-hours, again and again.
+            if awk -v t="${t_ionic:-0}" 'BEGIN{exit !(t>0)}'; then
+                _nfit=$(awk -v b="$budget" -v t="$t_ionic" -v s="$SAFETY" 'BEGIN{ print int(b/(t*s)) }')
+                if (( _nfit < 1 )); then
+                    verdict="STOP"; reason="step_exceeds_chunk"
+                    detail="one ionic step now takes ${t_ionic}s; the fixed ${chain_wall_min:-?}-min chunk leaves ${budget}s"
+                fi
+            fi
         fi
-        if (( _hit_walltime )); then
+        if [[ $verdict == CONTINUE ]] && (( _hit_walltime )); then
             newcap=$(awk -v n="$newcap" -v f="$_floor" 'BEGIN{v=int(n*0.7); print (v<f?f:v)}')
             tight=$(( $(int "${tight_streak:-0}") + 1 ))
             state_set tight_streak "$tight"
@@ -734,6 +1011,42 @@ if [[ $ACTION == chunk ]]; then
         fi
     fi
 
+    # ---- memory for the NEXT chunk --------------------------------------------
+    # Measured, not assumed. The largest peak ever seen is never forgotten, so
+    # one quiet chunk cannot talk the request down below what an earlier one
+    # needed. For a cell relaxation the next cell's volume scales it: at fixed
+    # ENCUT the plane-wave count grows with the volume.
+    mem_next="$(int "${chain_mem_per_cpu:-$mem_granted}")"
+    if (( mem_max > 0 )); then
+        _pk=$(( mem_max > $(int "${mem_peak_max_mb:-0}") ? mem_max : $(int "${mem_peak_max_mb:-0}") ))
+        _av=$(( mem_ave > $(int "${mem_ave_max_mb:-0}") ? mem_ave : $(int "${mem_ave_max_mb:-0}") ))
+        state_set mem_peak_max_mb "$_pk" mem_ave_max_mb "$_av" \
+                  last_mem_peak_mb "$mem_max" last_mem_src "$mem_src"
+        if [[ $verdict == CONTINUE ]]; then
+            _vr=1
+            if [[ $MODE == relax ]] && (( $(int "${chain_isif:-2}") >= 3 )) \
+               && contcar_ok CONTCAR POSCAR >/dev/null 2>&1; then
+                _vr=$(awk -v a="$(cell_volume POSCAR)" -v b="$(cell_volume CONTCAR)" \
+                      'BEGIN{ printf "%.4f", (a>0 && b>a ? b/a : 1) }')
+            fi
+            _R=$(int "${chain_ranks:-1}")
+            if ! settle_memory "$_pk" "$_av" "$_R" "$(int "${chain_ntpn:-1}")" "$_vr" 0; then
+                verdict="STOP"; reason="memory_does_not_fit"
+                detail="the next chunk needs ${SM_NEED} MB/cpu: ${SM_WHY}"
+            else
+                _need=$SM_NEED; _ln=$SM_NODES; _lt=$SM_NTPN; _le=$SM_EXACT
+                if (( _need != mem_next || _ln != $(int "${chain_nodes:-1}") || _lt != $(int "${chain_ntpn:-1}") )); then
+                    rewrite_allocation "$_need" "$_ln" "$_lt" "$_le" "$_R"
+                    say "memory for chunk $((idx+1)): ${mem_next} -> ${_need} MB/cpu (peak ${_pk} MB/rank, ${mem_src})"
+                    (( _ln != $(int "${chain_nodes:-1}") )) && \
+                        say "  spread over ${_ln} node(s), ${_lt} rank(s) per node; the rank count is unchanged"
+                fi
+                state_set chain_mem_per_cpu "$_need" chain_nodes "$_ln" chain_ntpn "$_lt" chain_ntpn_exact "$_le"
+                mem_next=$_need
+            fi
+        fi
+    fi
+
     # ---- advance the geometry (relax only) ----------------------------------
     # Ordering matters and is deliberate: the chunk is already archived, so this
     # runs AFTER the record is safe and BEFORE the successor is submitted. A
@@ -741,7 +1054,17 @@ if [[ $ACTION == chunk ]]; then
     # with a successor already running. There is no moment where both are true.
     #
     # A static run never touches POSCAR, and its CONTCAR is 0 bytes by design.
-    if [[ $MODE == relax ]] && [[ $verdict == CONTINUE || $verdict == CONVERGED ]]; then
+    #
+    # A stop decided about the NEXT chunk -- it would not fit the walltime, the
+    # memory or the budget -- comes after THIS one ran to completion, and its
+    # geometry is as good as a CONTINUE's. Leaving POSCAR a chunk behind meant
+    # the way out of such a stop (a new chain, --fresh) silently redid it.
+    _adv=0
+    [[ $verdict == CONTINUE || $verdict == CONVERGED ]] && _adv=1
+    [[ $verdict == STOP ]] && case $reason in
+        step_exceeds_chunk|memory_does_not_fit|budget|budget_drift|nsw_budget) _adv=1 ;;
+    esac
+    if [[ $MODE == relax ]] && (( _adv )); then
         if _why=$(contcar_ok CONTCAR POSCAR); then
             _v0=$(cell_volume POSCAR); _v1=$(cell_volume CONTCAR)
             if awk -v a="${_v0:-0}" -v b="${_v1:-0}" \
@@ -767,10 +1090,10 @@ if [[ $ACTION == chunk ]]; then
     _sig=""; (( _hit_walltime )) && _sig=" [signalled]"
     if [[ $MODE == relax ]]; then
         log_line "$idx" "${SLURM_JOB_ID:-?}" "RELAX" "$cap" "$ionic" "${t_ionic:-0}" \
-                 "$elapsed" "$frac" "$verdict" "${detail}${_sig}"
+                 "$elapsed" "$frac" "$mem_max" "$mem_granted" "$verdict" "${detail}${_sig}"
     else
         log_line "$idx" "${SLURM_JOB_ID:-?}" "SCF" "$cap" "$steps" "$t_step" "$elapsed" \
-                 "$frac" "$verdict" "${detail}${_sig}"
+                 "$frac" "$mem_max" "$mem_granted" "$verdict" "${detail}${_sig}"
     fi
 
     # ---- act ----------------------------------------------------------------
@@ -811,7 +1134,13 @@ if [[ $ACTION == chunk ]]; then
 
     if [[ $verdict == CONTINUE ]]; then
         state_set next_cap "$newcap" chain_state running next_is_recovery "$next_recovery"
-        say "not converged yet (${steps}/${nelm_eff} steps); submitting chunk $((idx+1)) with cap ${newcap}"
+        # A relaxation counts IONIC steps: electronic steps over NELM read there as
+        # "25/60 steps" of a 30-step NSW.
+        if [[ $MODE == relax ]]; then
+            say "not converged yet (${ionic} ionic step(s) in this chunk, $(int "${nsw_done:-0}") of ${nsw_target:-?} done); submitting chunk $((idx+1)) with cap ${newcap}"
+        else
+            say "not converged yet (${steps}/${nelm_eff} electronic steps); submitting chunk $((idx+1)) with cap ${newcap}"
+        fi
         if out=$(sbatch "$CH_JOB" 2>&1); then
             jid="${out##* }"
             echo "$jid" > "$CH_RUN"
@@ -822,8 +1151,9 @@ if [[ $ACTION == chunk ]]; then
         # Never retry in-job: that is how a chain becomes 4000 queued jobs.
         # Logged separately, because the line above already recorded CONTINUE.
         verdict="STOP"; reason="sbatch_failed"; detail="$out"
-        log_line "$idx" "${SLURM_JOB_ID:-?}" "SCF" "$cap" "$steps" "$t_step" "$elapsed" \
-                 "$frac" "STOP" "sbatch failed: ${out}"
+        log_line "$idx" "${SLURM_JOB_ID:-?}" "$( [[ $MODE == relax ]] && echo RELAX || echo SCF)" \
+                 "$cap" "$steps" "$t_step" "$elapsed" "$frac" "$mem_max" "$mem_granted" \
+                 "STOP" "sbatch failed: ${out}"
     fi
 
     # ---- stop ---------------------------------------------------------------
@@ -834,7 +1164,29 @@ if [[ $ACTION == chunk ]]; then
         echo "reason  : ${reason}"
         echo "detail  : ${detail}"
         echo
-        echo "Resume with:   $(basename "$SELF" .sh | sed 's/vasp_chain/vasp-scf-loop/') --resume"
+        # Named by MODE: this used to map the script name to vasp-scf-loop, so a
+        # stopped RELAXATION told the user to resume it with the SCF command.
+        if [[ $reason == step_exceeds_chunk ]]; then
+            _wn=$(walltime_for_step "$t_ionic" "$SAFETY" "$(int "${t_startup_s:-120}")" \
+                                    "$(int "${chain_margin_cfg_min:-$DEF_MARGIN_MIN}")")
+            echo "--resume cannot continue this chain: its chunk walltime (${chain_wall_min:-?} min) is"
+            echo "fixed, and one step no longer fits in it. POSCAR holds the geometry reached."
+            echo "Start a new chain from there, with a chunk that holds one step:"
+            echo "               vasp-${MODE}-loop --fresh --walltime ${_wn:-<min>}"
+        elif [[ $reason == memory_does_not_fit ]]; then
+            echo "--resume cannot continue this chain on this partition: ${detail}."
+            echo "What frees memory, in order: a lower KPAR in the INCAR (each k-point group"
+            echo "keeps its own copy of the charge density and grids), fewer ranks, LREAL = Auto."
+            echo "POSCAR holds the geometry reached. Then:   vasp-${MODE}-loop --fresh"
+        else
+            echo "Resume with:   vasp-${MODE}-loop --resume"
+        fi
+        if [[ $reason == oom ]]; then
+            _nx=$(awk -v g="$mem_granted" -v f="$OOM_FACTOR" 'BEGIN{ printf "%d", int((g*f+49)/50)*50 }')
+            echo "               --resume raises the memory by itself: at least ${mem_granted} -> ${_nx} MB/cpu,"
+            echo "               more if the measurements say so, spreading over more nodes if a"
+            echo "               node cannot hold it. The geometry reached so far is kept."
+        fi
         echo "Diagnose with: vasp-diagnose"
     } > "$CH_DEAD"
     warn "chain stopped: ${reason} -- ${detail}"
@@ -860,13 +1212,39 @@ hdr "Chunked $([[ $MODE == relax ]] && echo relaxation || echo SCF) -- setup"
      vasp-dry-run  ->  vasp-recommend-slurm  ->  vasp-test
    ${SRC_SLURM} carries the MEASURED memory and geometry; it cannot be guessed." 3
 
-if [[ $ACTION != resume ]] && [[ -f "$CH_ENV" ]]; then
+# ---- an earlier chain in this folder ----------------------------------------
+# A chunk still queued or running blocks BOTH start and resume. This used to be
+# checked for a start only, so --resume on a live chain submitted a second
+# chunk into the same folder: two VASPs over one WAVECAR and one CONTCAR.
+_prev_state=""; _prev_jid=""
+if [[ -f "$CH_ENV" ]]; then
     state_load
-    if [[ "${chain_state:-}" == running ]]; then
-        jid=$(tr -dc '0-9' < "$CH_RUN" 2>/dev/null)
-        if [[ -n $jid ]] && [[ -n "$(squeue -h -j "$jid" 2>/dev/null)" ]]; then
-            die "a chain is already running here (job ${jid}). Use --status, or --stop first." 3
-        fi
+    _prev_state="${chain_state:-}"
+    _prev_jid=$(tr -dc '0-9' 2>/dev/null < "$CH_RUN")
+    if [[ -n $_prev_jid ]] && [[ -n "$(squeue -h -j "$_prev_jid" 2>/dev/null)" ]]; then
+        [[ $ACTION == study ]] || \
+            die "a chunk of this chain is still queued or running (job ${_prev_jid}). Use --status, or --stop first." 3
+    fi
+fi
+if [[ $ACTION == resume ]] && [[ ! -f "$CH_ENV" ]]; then
+    die "nothing to resume: there is no chain here ($CH_ENV not found)." 3
+fi
+if [[ $ACTION == start ]] && [[ -f "$CH_ENV" ]]; then
+    # A NEW chain must not inherit the old one's state. state_set carries
+    # forward every key it is not given, so the last chain's NBANDS, NKPTS,
+    # force history and measured memory would silently steer this one.
+    _submitted=$(printf '%s' "${jobids:-}" | tr -s ' ' '\n' | grep -cE '^[0-9]+$')
+    if [[ $_prev_state == converged ]] || (( OPT_FRESH )) || (( _submitted == 0 )); then
+        _arch="${CHDIR}.prev-$(date +%Y%m%d-%H%M%S)"
+        mv "$CHDIR" "$_arch"
+        while IFS='=' read -r _k _; do
+            [[ $_k =~ ^[a-z_][a-z0-9_]*$ ]] && unset "$_k"
+        done < "$_arch/chain.env"
+        note "the previous chain here was archived to ${_arch}/ -- this is a NEW chain."
+    else
+        die "an unfinished chain is here (${_prev_state:-?}${stop_reason:+: ${stop_reason}}).
+   Continue it:        ${CMD} --resume
+   Or start over:      ${CMD} --fresh     (the old chain is archived, not deleted)" 3
     fi
 fi
 rm -f "$CH_STOP"
@@ -949,16 +1327,39 @@ EXE=$(grep -m1 -E '^/usr/bin/time -v srun ' "$SRC_SLURM" 2>/dev/null | awk '{pri
 EXE="${EXE:-${exe:-${WP_VASP_STD}}}"
 (( RANKS > 0 ))  || die "${SRC_SLURM} has no --ntasks." 3
 (( MEMCPU > 0 )) || die "${SRC_SLURM} has no --mem-per-cpu." 3
+ALLOC_SRC="${SRC_SLURM}"
 
-# ---- budget ---------------------------------------------------------------
-WALL=$(int "${OPT_WALLTIME:-${WP_CHUNK_WALLTIME_MIN:-$DEF_WALLTIME_MIN}}")
-MARGIN=$(int "${WP_CHUNK_MARGIN_MIN:-$DEF_MARGIN_MIN}")
-m2=$(awk -v w="$WALL" 'BEGIN{printf "%d", w*0.08}'); (( m2 > MARGIN )) && MARGIN=$m2
-STARTUP=$(int "${test_startup_s:-120}")
-T_VASP=$(( WALL*60 - MARGIN*60 ))
-T_WORK=$(( T_VASP - STARTUP ))
-(( T_WORK < 60 )) && die "the walltime budget leaves no room to compute (${WALL} min minus
-   ${MARGIN} min margin minus ${STARTUP}s start-up). Raise --walltime." 2
+# On --resume the allocation is the CHAIN's own, not slurm_vasptest.sh's. The
+# chain rewrites its memory and layout after every chunk; re-reading the
+# source script here threw all of that away, so a resume after an OOM kill
+# went straight back to the allocation that had just been killed.
+if [[ $ACTION == resume ]]; then
+    [[ ${chain_state:-} == converged ]] && \
+        die "this chain already converged -- see $CH_DONE. Use --fresh to start a new one." 3
+    [[ -n ${chain_mem_per_cpu:-} ]] && MEMCPU=$(int "$chain_mem_per_cpu")
+    [[ -n ${chain_nodes:-} ]]       && NODES=$(int "$chain_nodes")
+    [[ -n ${chain_ntpn:-} ]]        && NTPN=$(int "$chain_ntpn")
+    [[ -n ${chain_ntpn_exact:-} ]]  && NTPN_EXACT=$(int "$chain_ntpn_exact")
+    [[ -n ${chain_ranks:-} ]]       && RANKS=$(int "$chain_ranks")
+    [[ -n ${chain_exe:-} ]]         && EXE="$chain_exe"
+    [[ -n ${chain_partition:-} ]]   && PART="$chain_partition"
+    [[ -n ${chain_mem_per_cpu:-} ]] && ALLOC_SRC="the chain's own record (${CH_ENV})"
+fi
+
+# The node the chunks land on, and what the account may be charged. Kept in
+# the state: a chunk rewrites its successor's allocation from a compute node,
+# where the cluster profile may not be readable at all.
+if [[ $PART == "${WP_DEBUG_PARTITION:-}" && $PART != "${WP_MAIN_PARTITION:-}" ]]; then
+    NODE_MEM=$(int "${WP_DEBUG_MEM_PER_NODE_MB:-0}"); NODE_CPN=$(int "${WP_DEBUG_CPUS_PER_NODE:-1}")
+    NODE_MARGIN="${WP_DEBUG_MEM_MARGIN:-0.05}"
+else
+    NODE_MEM=$(int "${WP_MAIN_MEM_PER_NODE_MB:-0}"); NODE_CPN=$(int "${WP_MAIN_CPUS_PER_NODE:-1}")
+    NODE_MARGIN="${WP_MAIN_MEM_MARGIN:-0.02}"
+fi
+chain_node_mem_mb="$NODE_MEM"; chain_mem_margin="$NODE_MARGIN"; chain_cpn="$NODE_CPN"
+chain_max_cores="$(int "${WP_MAX_CORES:-0}")"; chain_profile="${WP_ALLOC_PROFILE:-whole-nodes}"
+chain_nodes0="${chain_nodes0:-$NODES}"
+MAXT=$(part_maxtime_min "$PART")
 
 # The user's ORIGINAL NELM, which is the whole chain's step budget.
 #
@@ -970,20 +1371,19 @@ _nelm_src="INCAR"
 [[ -f INCAR.chain.bak ]] && _nelm_src="INCAR.chain.bak"
 NELM_ORIG=$(int "$(grep -m1 -oiE "^[[:space:]]*NELM[[:space:]]*=[[:space:]]*[0-9]+" "$_nelm_src" 2>/dev/null | grep -oE '[0-9]+')")
 (( NELM_ORIG < 1 )) && NELM_ORIG=$NELM_CEIL
+
+# ---- what one step costs ------------------------------------------------------
+# Estimated BEFORE the walltime is chosen: the walltime has to be able to hold
+# a step, and the queue study weighs how many steps each candidate holds.
+#
 # The benchmark ran on the debug partition, at a different rank count, with
 # LWAVE/LCHARG off -- so its rate is a starting estimate, not a measurement of
 # this job. Chunk 1 is deliberately conservative and recalibrates from reality.
 CAL=$(awk -v t="$t_e" -v tr="${test_ranks:-0}" -v pr="$RANKS" -v eff="${test_cpu_eff:-100}" \
       'BEGIN{ r=(tr>0&&pr>0? tr/pr : 1); e=eff/100; if(e<0.3)e=0.3; if(e>1)e=1;
               printf "%.3f", t*r/e }')
-if [[ $MODE == scf ]]; then
-    CAP1=$(awk -v b="$T_WORK" -v t="$CAL" -v s="$SAFETY" -v c="$NELM_CEIL" -v f="$NELM_FLOOR" \
-           -v o="$NELM_ORIG" 'BEGIN{ if(t<=0){print f; exit}
-                 n=int(b/(t*s*1.5)); if(n>c)n=c; if(n>o)n=o; if(n<f)n=f; print n }')
-    (( CAP1 < NELM_FLOOR )) && die "one chunk cannot hold ${NELM_FLOOR} SCF steps at
-   ${CAL}s per step within ${WALL} min. Raise --walltime or the rank count." 2
-    CAP_UNIT="electronic steps"
-else
+T_ION=0; SPI=0; SPI_SRC=""
+if [[ $MODE == relax ]]; then
     # An IONIC step costs several electronic ones, and the benchmark rarely
     # completed even one -- so chunk 1 estimates, and only chunk 1. From chunk 2
     # the cost is read straight off VASP's own LOOP+ lines, one per ionic step.
@@ -1000,77 +1400,371 @@ else
               printf "%.1f", s }')
     # +15% for the force/stress evaluation and the CONTCAR/XDATCAR writes.
     T_ION=$(awk -v t="$CAL" -v s="$SPI" 'BEGIN{printf "%.1f", t*s*1.15}')
+fi
+# Which step cost decides whether one step FITS. A fresh chain has only the
+# estimate, and its first ionic step starts cold -- several times the steady
+# state -- hence the cold-start factor. A resumed chain has measured its own
+# steps, warm, and those are what the next chunk will actually take.
+T_FIT="$T_ION"; FIT_FACTOR="$COLD_FACTOR"; FIT_SRC="estimated from the benchmark"
+FIT_WHY="a first chunk starts cold, so it must hold ${COLD_FACTOR} x that"
+# t_ionic_s starts as the launch ESTIMATE; only a chunk's own LOOP+ makes it a
+# measurement. A chain from before that flag existed has measured once it has
+# run a chunk.
+if [[ -n ${t_ionic_measured+x} ]]; then _tmeas=$(int "$t_ionic_measured")
+else _tmeas=$(( $(int "${chunk_index:-0}") >= 1 ? 1 : 0 )); fi
+if [[ $ACTION == resume ]] && (( _tmeas )) && awk -v t="${t_ionic_s:-0}" 'BEGIN{exit !(t>0)}'; then
+    T_FIT="${t_ionic_s}"; FIT_FACTOR="$SAFETY"; FIT_SRC="measured by the chain's own chunks"
+    FIT_WHY="with the chain's ${SAFETY} x timing margin a chunk must hold"
+fi
+
+# ---- the chunk walltime: chosen ONCE, then fixed for the whole chain ---------
+MARGIN_CFG=$(int "${WP_CHUNK_MARGIN_MIN:-$DEF_MARGIN_MIN}")
+STARTUP=$(int "${test_startup_s:-120}")
+DEFAULT_WALL=$(int "${WP_CHUNK_WALLTIME_MIN:-$DEF_WALLTIME_MIN}")
+_wp_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+STUDY_REPORT=""; WALL_SRC=""
+_nsw_left=$(( nsw - $(int "${nsw_done:-0}") )); (( _nsw_left < 1 )) && _nsw_left=1
+if [[ $ACTION == resume ]] && [[ -n ${chain_wall_min:-} ]]; then
+    WALL=$(int "$chain_wall_min"); WALL_SRC="fixed at launch (${chain_wall_source:-?})"
+    [[ -n ${OPT_WALLTIME:-} ]] && warn "--walltime is ignored on --resume: a chain keeps the chunk walltime it
+     started with (${WALL} min). Use --fresh to start a new chain with a different one."
+elif [[ -n ${OPT_WALLTIME:-} ]]; then
+    WALL=$(int "$OPT_WALLTIME"); WALL_SRC="--walltime"
+elif [[ $MODE == relax ]] && (( ! OPT_NOSTUDY )) && command -v python3 >/dev/null 2>&1 \
+     && [[ -f "$_wp_dir/wolfpack_queue.py" ]]; then
+    # The study replays this chain's own arithmetic against what the queue has
+    # done to jobs shaped like this one. See wolfpack_queue.py.
+    STUDY_REPORT=$(python3 "$_wp_dir/wolfpack_queue.py" --partition "$PART" \
+            --nodes "$NODES" --cpus "$RANKS" --mem-mb "$(( MEMCPU * RANKS ))" \
+            --t-ion-s "$T_ION" --startup-s "$STARTUP" --margin-min "$MARGIN_CFG" \
+            --steps "$_nsw_left" --max-time-min "${MAXT:-0}" \
+            --default-wall-min "$DEFAULT_WALL" --days "$QUEUE_DAYS" 2>&1)
+    _sline=$(printf '%s\n' "$STUDY_REPORT" | grep '^WP_QUEUE_STUDY ' | tail -1)
+    STUDY_REPORT=$(printf '%s\n' "$STUDY_REPORT" | grep -v '^WP_QUEUE_STUDY ')
+    _swall=$(sed -n 's/.* wall_min=\([0-9][0-9]*\).*/\1/p' <<<"$_sline")
+    _ssrc=$(sed -n 's/.* source=\([a-z]*\).*/\1/p' <<<"$_sline")
+    _sreason=$(sed -n 's/.* reason="\(.*\)"$/\1/p' <<<"$_sline")
+    if [[ -n $_swall ]] && [[ $_ssrc == study ]]; then
+        WALL=$_swall; WALL_SRC="queue study"
+    else
+        WALL=$DEFAULT_WALL
+        WALL_SRC="profile default (WP_CHUNK_WALLTIME_MIN) -- the study could not decide: ${_sreason:-no output}"
+    fi
+else
+    WALL=$DEFAULT_WALL; WALL_SRC="profile default (WP_CHUNK_WALLTIME_MIN)"
+    (( OPT_NOSTUDY )) && WALL_SRC="${WALL_SRC}, --no-queue-study"
+fi
+# The partition's MaxTime is a hard ceiling. A walltime above it is a chunk the
+# scheduler rejects at submit -- inside a running chain, a chain that dies at a
+# boundary. An explicit --walltime over it is refused rather than overridden.
+if [[ -n $MAXT ]] && (( WALL > MAXT )); then
+    [[ $WALL_SRC == --walltime ]] && die "--walltime ${WALL} min is above the partition's MaxTime of ${MAXT} min:
+   the scheduler would reject every chunk. Ask for ${MAXT} or less." 2
+    note "chunk walltime ${WALL} min capped at the partition's MaxTime (${MAXT} min)"
+    WALL=$MAXT
+fi
+
+# ---- budget ---------------------------------------------------------------
+MARGIN=$MARGIN_CFG
+m2=$(awk -v w="$WALL" 'BEGIN{printf "%d", w*0.08}'); (( m2 > MARGIN )) && MARGIN=$m2
+T_VASP=$(( WALL*60 - MARGIN*60 ))
+T_WORK=$(( T_VASP - STARTUP ))
+(( T_WORK < 60 )) && die "the walltime budget leaves no room to compute (${WALL} min minus
+   ${MARGIN} min margin minus ${STARTUP}s start-up). Raise --walltime." 2
+
+# ---- does ONE ionic step fit? -----------------------------------------------
+# If not, every chunk would be killed before it completed a step, and the chain
+# would spend queue time and core-hours producing nothing. This used to be
+# checked AFTER the cap had been clamped to at least 1 -- so it could never
+# fire, and a chain that could not progress was submitted anyway.
+if [[ $MODE == relax ]]; then
+    _nfit=$(awk -v b="$T_WORK" -v t="$T_FIT" -v f="$FIT_FACTOR" \
+            'BEGIN{ if(t<=0){ print 1; exit } print int(b/(t*f)) }')
+    if (( _nfit < 1 )); then
+        # the shortest walltime that WOULD hold one step, by the same arithmetic
+        _wneed=$(walltime_for_step "$T_FIT" "$FIT_FACTOR" "$STARTUP" "$MARGIN_CFG")
+        _hold=$(awk -v t="$T_FIT" -v f="$FIT_FACTOR" 'BEGIN{ printf "%d", t*f + 0.999 }')
+        if [[ -n $MAXT ]] && (( ${_wneed:-0} > MAXT )); then
+            _way="   The partition allows at most ${MAXT} min, so no chunk on '${PART}' can hold one step.
+   The ways out: more ranks (a faster step), or a partition with a longer MaxTime."
+        elif [[ $ACTION == resume ]]; then
+            _way="   A chain keeps the chunk walltime it started with. Start a new one from where
+   this one got to (POSCAR):   vasp-${MODE}-loop --fresh --walltime ${_wneed}"
+        else
+            _way="   Launch with:   --walltime ${_wneed}      (or more ranks, for a faster step)"
+        fi
+        die "not even ONE ionic step fits in a ${WALL}-min chunk.
+   One step is ~${T_FIT}s (${FIT_SRC}); ${FIT_WHY}: ${_hold}s.
+   The chunk leaves ${T_WORK}s to compute after its ${MARGIN}-min margin and ${STARTUP}s
+   start-up, so every chunk would be killed before completing a step.
+   The shortest chunk that holds one: ${_wneed:-?} min.
+${_way}" 2
+    fi
+fi
+
+# ---- chunk 1 -------------------------------------------------------------------
+if [[ $MODE == scf ]]; then
+    CAP1=$(awk -v b="$T_WORK" -v t="$CAL" -v s="$SAFETY" -v c="$NELM_CEIL" -v f="$NELM_FLOOR" \
+           -v o="$NELM_ORIG" 'BEGIN{ if(t<=0){print f; exit}
+                 n=int(b/(t*s*1.5)); if(n>c)n=c; if(n>o)n=o; print n }')
+    (( CAP1 < NELM_FLOOR )) && die "one chunk cannot hold ${NELM_FLOOR} SCF steps at
+   ${CAL}s per step within ${WALL} min. Raise --walltime or the rank count." 2
+    CAP_UNIT="electronic steps"
+else
     # Chunk 1 is a CALIBRATION chunk: deliberately tiny, because it also absorbs
     # the cold start, where the first ionic step costs several times the steady
     # state and would otherwise poison the estimate for everything after it.
-    CAP1=$(awk -v b="$T_WORK" -v t="$T_ION" -v r="$nsw" 'BEGIN{
-               if(t<=0){print 1; exit} n=int(b/(t*1.5)); if(n>3)n=3; if(n>r)n=r
+    CAP1=$(awk -v b="$T_WORK" -v t="$T_ION" -v f="$COLD_FACTOR" -v r="$nsw" 'BEGIN{
+               if(t<=0){print 1; exit} n=int(b/(t*f)); if(n>3)n=3; if(n>r)n=r
                if(n<1)n=1; print n }')
-    (( CAP1 < 1 )) && die "one chunk cannot hold a single ionic step at ~${T_ION}s each
-   within ${WALL} min. Raise --walltime or the rank count." 2
     CAP_UNIT="ionic steps"
+fi
+
+# ---- the study, on its own ----------------------------------------------------
+if [[ $ACTION == study ]]; then
+    hdr "Queue study -- '${PART}', jobs shaped like this one"
+    if [[ -n $STUDY_REPORT ]]; then printf '%s\n' "$STUDY_REPORT"
+    else note "no study was run (${WALL_SRC})."; fi
+    echo
+    kv "chunk walltime"  "${WALL} min  (${WALL_SRC})"
+    [[ $MODE == relax ]] && kv "one ionic step" "~${T_FIT}s (${FIT_SRC}) -- fits: yes"
+    note "Nothing was launched. Run ${CMD} without --study to start the chain."
+    exit 0
+fi
+
+# ---- --resume: settle whatever the last chunk left behind -------------------
+RESUME_CAUSE=""
+if [[ $ACTION == resume ]]; then
+    last_jid=$(tr -dc '0-9' 2>/dev/null < "$CH_RUN")
+    [[ -z $last_jid ]] && last_jid=$(printf '%s' "${jobids:-}" | tr -s ' ' '\n' | grep -E '^[0-9]+$' | tail -1)
+    unfinished=0; [[ ${chain_state:-} == running ]] && unfinished=1
+    read -r _mstate _mmax _mave < <(job_mem_evidence "$last_jid" 0)
+    _mmax=$(int "${_mmax:-0}"); _mave=$(int "${_mave:-0}")
+    RESUME_CAUSE="${stop_reason:-}"
+    if [[ $RESUME_CAUSE == oom || ${_mstate:-} == OUT_OF_MEMORY ]] \
+       || { [[ -n $last_jid ]] && err_mentions "$last_jid" "$OOM_RX"; }; then
+        RESUME_CAUSE="oom"
+    elif [[ ${_mstate:-} == TIMEOUT ]] || { [[ -n $last_jid ]] && err_mentions "$last_jid" "$TIMEOUT_RX"; }; then
+        RESUME_CAUSE="timeout"
+    elif (( unfinished )); then
+        RESUME_CAUSE="died (${_mstate:-UNKNOWN})"
+    fi
+
+    # Some stops cannot be resumed by rerunning: the thing that stopped them is
+    # still there. Saying so beats a chunk that fails the same way.
+    case "${stop_reason:-}" in
+        bad_geometry|bad_contcar)
+            die "the last chunk's geometry was REJECTED (${stop_reason}): see CONTCAR.rejected and
+   $CH_DEAD. Continuing would propagate it. Fix POSCAR by hand, then --fresh." 3 ;;
+        symmetry_drift)
+            die "NKPTS changed between chunks, so the stored WAVECAR no longer matches the
+   k-point set. Set ISYM = 0 in the INCAR and start again with --fresh." 3 ;;
+        numerical)
+            die "the last chunk produced NaN or overflow in OSZICAR. That is the calculation,
+   not the chain: fix the INCAR (mixing, ALGO, POTIM), then --fresh." 3 ;;
+    esac
+
+    hdr "Resuming -- what the last chunk left behind"
+    kv "last chunk"      "job ${last_jid:-?}"
+    kv "how it ended"    "${RESUME_CAUSE:-stopped cleanly}$( (( _mmax > 0 )) && echo "  (peak ${_mmax} MB/rank measured)")"
+
+    # (1) A chunk that died WITH its job never ran its own bookkeeping: nothing
+    #     was archived, its ionic steps were not counted, the trajectory was not
+    #     extended. Do exactly what it would have done. "Fresh" means written by
+    #     that chunk, i.e. after it was submitted -- an older OSZICAR belongs to
+    #     the chunk before and must not be counted twice.
+    _ref="$CH_RUN"; [[ -f $_ref ]] || _ref="$CH_ENV"
+    _fresh(){ [[ -s $1 && $1 -nt $_ref ]]; }
+    ionic_dead=$(int "${dead_ionic:-0}")
+    if (( unfinished )); then
+        idx_dead=$(( $(int "${chunk_index:-0}") + 1 ))
+        cdir="$CHDIR/chunk-$(printf '%03d' "$idx_dead")"; mkdir -p "$cdir"
+        [[ $MODE == relax ]] && _fresh OSZICAR && ionic_dead=$(int "$(grep -c 'F=' OSZICAR 2>/dev/null)")
+        [[ -s POSCAR ]] && { cp -f POSCAR "$cdir/POSCAR.in"; gzip -f "$cdir/POSCAR.in" 2>/dev/null; }
+        for f in OUTCAR OSZICAR vasprun.xml CONTCAR XDATCAR; do
+            _fresh "$f" && { cp -f "$f" "$cdir/"; gzip -f "$cdir/$f" 2>/dev/null; }
+        done
+        for f in "VASP-chain-${last_jid}.out" "VASP-chain-${last_jid}.err"; do
+            [[ -e $f ]] && mv -f "$f" "$cdir/" 2>/dev/null
+        done
+        if [[ $MODE == relax ]] && _fresh XDATCAR; then
+            if [[ -f "$CHDIR/XDATCAR.all" ]]; then tail -n +8 XDATCAR >> "$CHDIR/XDATCAR.all"
+            else cp -f XDATCAR "$CHDIR/XDATCAR.all"; fi
+        fi
+        state_set chunk_index "$idx_dead" nsw_done "$(( $(int "${nsw_done:-0}") + ionic_dead ))"
+        log_line "$idx_dead" "${last_jid:-?}" "$( [[ $MODE == relax ]] && echo RELAX || echo SCF)" \
+                 "${next_cap:-?}" "$ionic_dead" "-" "-" "-" "$(( _mmax > 0 ? _mmax : 0 ))" \
+                 "${chain_mem_per_cpu:-$MEMCPU}" "DIED" "${RESUME_CAUSE}; settled by --resume"
+        kv "settled"         "chunk ${idx_dead}: ${ionic_dead} ionic step(s) counted and archived in ${cdir}/"
+        # Settled, and recorded as such. If a check below refuses to go on, the
+        # user will run --resume again -- and a chain still marked "running"
+        # would have this chunk archived a second time as the next one, its
+        # steps and its frames counted twice. The cause and the step count are
+        # kept, so that second --resume reaches the same decision.
+        case $RESUME_CAUSE in oom|timeout) _sk=$RESUME_CAUSE ;; *) _sk=died ;; esac
+        state_set chain_state stopped stop_reason "$_sk" dead_ionic "$ionic_dead"
+    fi
+
+    # (2) The geometry the last chunk reached. VASP writes CONTCAR after every
+    #     ionic step, so a chunk that died mid-run still left its progress there
+    #     -- but the chain promotes CONTCAR to POSCAR only after a chunk it saw
+    #     finish. Resuming from POSCAR would silently redo those steps.
+    if [[ $MODE == relax ]] && [[ -s CONTCAR ]] && ! cmp -s CONTCAR POSCAR; then
+        if _why=$(contcar_ok CONTCAR POSCAR); then
+            _v0=$(cell_volume POSCAR); _v1=$(cell_volume CONTCAR)
+            if awk -v a="${_v0:-0}" -v b="${_v1:-0}" \
+                  'BEGIN{ exit !(a>0 && b>0 && (b > 1.5*a || b < 0.5*a)) }'; then
+                warn "CONTCAR's cell volume changed ${_v0} -> ${_v1} A^3; NOT taking it. Continuing from POSCAR."
+            else
+                cp -f CONTCAR POSCAR.new && mv -f POSCAR.new POSCAR
+                ok "geometry advanced to the last completed ionic step (CONTCAR -> POSCAR)"
+            fi
+        else
+            warn "CONTCAR is not usable (${_why}); continuing from POSCAR, so the last chunk's steps are redone."
+        fi
+    fi
+
+    # (3) The restart object. VASP writes WAVECAR once, at the end of a run, so a
+    #     chunk killed mid-run left the previous chunk's -- intact, and right for
+    #     a restart. A WAVECAR written by the dead chunk itself was cut off
+    #     WHILE being written unless its size matches the last good one; a
+    #     truncated WAVECAR makes the next chunk die reading it, and then every
+    #     resume after it. Set it aside and start that one chunk cold.
+    COLD_NEXT=0
+    if [[ $RESUME_CAUSE != "" ]] && [[ -s WAVECAR ]] && [[ WAVECAR -nt $_ref ]]; then
+        _wsz=$(stat -c %s WAVECAR 2>/dev/null || echo 0)
+        if [[ -z ${wavecar_bytes:-} ]] || (( _wsz != $(int "${wavecar_bytes:-0}") )); then
+            mv -f WAVECAR WAVECAR.partial
+            COLD_NEXT=1
+            warn "WAVECAR was written by the chunk that died and cannot be verified complete;"
+            warn "set aside as WAVECAR.partial. The next chunk starts cold (ISTART=0, ICHARG=2)."
+        fi
+    fi
+
+    # (4) What killed it decides what changes.
+    case $RESUME_CAUSE in
+        memory_does_not_fit)
+            # The last chunk measured more than a node holds. Resubmitting at the
+            # old size would be a chunk sized below what was measured -- an OOM
+            # waiting to happen. Recompute from the measurements: if the profile
+            # has changed (bigger nodes, another partition) it may fit now.
+            if ! settle_memory "$(int "${mem_peak_max_mb:-0}")" "$(int "${mem_ave_max_mb:-0}")" "$RANKS" "$NTPN" 1 0; then
+                die "the memory this chain measured still does not fit: ${SM_WHY}.
+   What frees memory, in order: a lower KPAR in the INCAR (each k-point group
+   keeps its own copy of the charge density and grids), fewer ranks, LREAL = Auto.
+   POSCAR holds the geometry reached. Then start over with --fresh." 3
+            fi
+            ok "the measured memory fits now: ${SM_NEED} MB/cpu, ${SM_NODES} node(s) x ${SM_NTPN} rank(s)"
+            MEMCPU=$SM_NEED; NODES=$SM_NODES; NTPN=$SM_NTPN; NTPN_EXACT=$SM_EXACT
+            ;;
+        oom)
+            # A kill says the need was ABOVE the grant, never by how much. Take the
+            # larger of: the grant raised by OOM_FACTOR, and what the measurements
+            # say the heaviest node needs.
+            _granted=$(int "${chain_mem_per_cpu:-$MEMCPU}")
+            _esc=$(awk -v g="$_granted" -v f="$OOM_FACTOR" 'BEGIN{ printf "%d", int((g*f + 49)/50)*50 }')
+            _pk=$(( _mmax > $(int "${mem_peak_max_mb:-0}") ? _mmax : $(int "${mem_peak_max_mb:-0}") ))
+            _av=$(( _mave > $(int "${mem_ave_max_mb:-0}") ? _mave : $(int "${mem_ave_max_mb:-0}") ))
+            if ! settle_memory "$_pk" "$_av" "$RANKS" "$NTPN" 1 "$_esc"; then
+                die "the memory cannot be raised enough to continue: ${SM_WHY}.
+   The last chunk was killed at ${_granted} MB/cpu; the next needs at least ${SM_NEED}.
+   What frees memory, in order: a lower KPAR in the INCAR (each k-point group
+   keeps its own copy of the charge density and grids), fewer ranks, LREAL = Auto.
+   Then start over with --fresh." 3
+            fi
+            _new=$SM_NEED; _ln=$SM_NODES; _lt=$SM_NTPN; _le=$SM_EXACT
+            ok "memory raised ${_granted} -> ${_new} MB/cpu (the last chunk was OOM-killed at ${_granted})"
+            if (( _ln != NODES )); then
+                ok "at that size the ranks no longer fit ${NODES} node(s): spread over ${_ln} node(s), ${_lt} per node"
+                note "the rank count is unchanged (${RANKS}), so KPAR/NCORE in the INCAR still hold"
+            fi
+            MEMCPU=$_new; NODES=$_ln; NTPN=$_lt; NTPN_EXACT=$_le
+            state_set oom_count "$(( $(int "${oom_count:-0}") + 1 ))" \
+                      last_oom_jid "${last_jid:-}" last_oom_granted_mb "$_granted" \
+                      mem_peak_max_mb "$_pk" mem_ave_max_mb "$_av"
+            ;;
+        timeout)
+            # The walltime killed the job despite the STOPCAR warning: a step took
+            # longer than the chain's model said. The walltime stays fixed; what
+            # changes is how many steps a chunk is given.
+            if (( ionic_dead == 0 )); then
+                die "not one ionic step completed in a whole ${WALL}-min chunk before the walltime
+   killed it. The chunk walltime is fixed for this chain, and a step does not
+   fit in it. Start a new chain with a longer one:  --fresh --walltime <min>" 2
+            fi
+            _tdead=$(awk '/LOOP\+:/{ k=split($0,a,"real time"); if(k>1){ s+=a[2]+0; n++ } }
+                          END{ if(n>0) printf "%.1f", s/n; else print 0 }' OUTCAR 2>/dev/null)
+            if awk -v t="${_tdead:-0}" 'BEGIN{exit !(t>0)}'; then
+                _ncap=$(awk -v b="$T_WORK" -v t="$_tdead" -v s="$SAFETY" 'BEGIN{ print int(b/(t*s)) }')
+                (( _ncap < 1 )) && die "an ionic step now takes ~${_tdead}s and the fixed ${WALL}-min chunk leaves
+   ${T_WORK}s: it no longer fits. POSCAR holds the geometry reached. Start a new
+   chain from there:   vasp-${MODE}-loop --fresh --walltime $(walltime_for_step "$_tdead" "$SAFETY" "$STARTUP" "$MARGIN_CFG")" 2
+                state_set next_cap "$_ncap" t_ionic_s "$_tdead" t_ionic_measured 1
+                ok "steps per chunk reset to ${_ncap} from the ${_tdead}s the killed chunk measured"
+            fi
+            ;;
+    esac
+
+    # (5) Clear the dead chunk's markers and record what was decided.
+    if [[ -f $CH_DEAD ]]; then
+        _lastdir="$CHDIR/chunk-$(printf '%03d' "$(int "${chunk_index:-0}")")"
+        mkdir -p "$_lastdir"; mv -f "$CH_DEAD" "$_lastdir/STOPPED.txt" 2>/dev/null
+    fi
+    rm -f "$CH_RUN" STOPCAR
+    state_set chain_state running stop_reason "" dead_ionic "" next_cold_start "$COLD_NEXT" \
+              last_resume "$(date -Iseconds)" last_resume_cause "${RESUME_CAUSE:-clean}"
+    say "resuming at chunk $(( $(int "${chunk_index:-0}") + 1 ))"
 fi
 
 kv "VASP executable"    "$EXE"
 kv "geometry"           "${NODES} node(s) x ${NTPN} ranks, ${MEMCPU} MB/cpu on '${PART}'"
+kv "  from"             "$ALLOC_SRC"
+kv "node"               "${NODE_CPN} cores, ${NODE_MEM} MB$( [[ -n $MAXT ]] && echo ", MaxTime ${MAXT} min" )"
 kv "measured rate"      "${t_e} s/step (benchmark) -> ${CAL} s/step (scaled estimate)"
 kv "chunk walltime"     "${WALL} min  (margin ${MARGIN} min, start-up ${STARTUP}s)"
+kv "  chosen by"        "$WALL_SRC"
 if [[ $MODE == relax ]]; then
-    kv "estimated ionic step" "~${T_ION} s  (${SPI} electronic steps each, ${SPI_SRC})"
-    if [[ $SPI_SRC == ASSUMED* ]]; then
-        # Do not let a default masquerade as a measurement. The line above sits
-        # next to "measured rate", and the per-step time IS measured -- but the
-        # steps-per-ionic-step factor that turns it into an ionic-step cost is
-        # not, whenever the benchmark was cut off mid-SCF (which is usual). Chunk
-        # 1 is a calibration chunk precisely so this number gets replaced by a
-        # real one; say so rather than let the arithmetic look finished.
-        note "the electronic-steps-per-ionic-step factor is a DEFAULT, not a measurement:"
-        note "the benchmark was cut off before it closed an ionic step. Chunk 1 is a"
-        note "calibration chunk and will replace it with VASP's own LOOP+ timings."
+    kv "one ionic step"     "~${T_FIT}s (${FIT_SRC}) -- fits the chunk"
+    if [[ $ACTION != resume ]]; then
+        kv "estimated ionic step" "~${T_ION} s  (${SPI} electronic steps each, ${SPI_SRC})"
+        if [[ $SPI_SRC == ASSUMED* ]]; then
+            # Do not let a default masquerade as a measurement. The per-step time IS
+            # measured, but the steps-per-ionic-step factor that turns it into an
+            # ionic-step cost is not whenever the benchmark was cut off mid-SCF --
+            # which is usual. Chunk 1 is a calibration chunk precisely so this
+            # number gets replaced by a real one.
+            note "the electronic-steps-per-ionic-step factor is a DEFAULT, not a measurement:"
+            note "the benchmark was cut off before it closed an ionic step. Chunk 1 is a"
+            note "calibration chunk and will replace it with VASP's own LOOP+ timings."
+        fi
+        kv "first chunk cap"    "${CAP1} ionic steps  (calibration; later chunks measure)"
     fi
-    kv "first chunk cap"    "${CAP1} ionic steps  (calibration; later chunks measure)"
-    kv "target NSW"         "$nsw"
+    kv "target NSW"         "$nsw  (${nsw_done:-0} done)"
     kv "NELM per ionic step" "${NELM_ORIG}  (never chunked: a truncated SCF gives wrong forces)"
 else
     kv "first chunk cap"    "${CAP1} electronic steps  (calibration; later chunks resize)"
     kv "original NELM"      "$NELM_ORIG"
 fi
+kv "memory"             "measured after every chunk; the next one's --mem-per-cpu is rewritten from it"
 
-# ---- is chunking even worth it? -------------------------------------------
-# Short jobs backfill better than long ones only if they are also SMALL. Saying
-# so up front is better than letting the user discover it after a week.
-if command -v sacct >/dev/null 2>&1; then
-    medwait=$(sacct -X -a -r "$PART" -S "$(date -d '7 days ago' +%F)" \
-                -o Submit,Start -n -P 2>/dev/null \
-              | awk -F'|' '
-                    # sacct prints "None" for a job that never started (still
-                    # pending, or cancelled in the queue) and "Unknown" for one
-                    # it has no record of. Feeding either to `date -d` makes it
-                    # write "date: invalid date \u2018None\u2019" to the terminal --
-                    # once per row, which on a busy partition is a screenful of
-                    # noise in the middle of the setup report. Those rows carry
-                    # no wait time anyway: drop them here.
-                    function bad(x) { return x=="" || x=="None" || x=="Unknown" || x=="N/A" }
-                    !bad($1) && !bad($2) {
-                        cmd="date -d \""$1"\" +%s"; cmd|getline s; close(cmd)
-                        cmd="date -d \""$2"\" +%s"; cmd|getline t; close(cmd)
-                        if(t>=s) print t-s }' | sort -n | awk '{a[NR]=$1} END{if(NR)print a[int(NR/2)+1]}')
-    if [[ -n ${medwait:-} ]] && (( medwait > 0 )); then
-        est=$(awk -v n="$(( (NELM_ORIG + CAP1 - 1) / CAP1 ))" -v w="$medwait" -v j="$((WALL*60))" \
-              'BEGIN{printf "%.1f", n*(w+j)/3600}')
-        kv "median queue wait" "$(awk -v w="$medwait" 'BEGIN{printf "%.1f h", w/3600}') on '${PART}' (last 7 days)"
-        kv "rough turnaround"  "~${est} h across $(( (NELM_ORIG + CAP1 - 1) / CAP1 )) chunk(s)"
-        if (( NTPN * NODES > WP_MAIN_CPUS_PER_NODE )); then
-            warn "this job spans more than one node. Short jobs backfill well only when they"
-            warn "are also small; at this size chunking may not shorten the queue wait, and"
-            warn "you pay the start-up and WAVECAR I/O once per chunk. Consider one long job."
-        fi
-    fi
+# The study, where the user can read it: the chosen walltime is only as good
+# as the data behind it, so the data is shown rather than summarised.
+if [[ -n $STUDY_REPORT ]]; then
+    hdr "Queue study -- why this chunk walltime"
+    printf '%s\n' "$STUDY_REPORT"
+fi
+if (( NTPN * NODES > NODE_CPN )) && [[ $ACTION != resume ]]; then
+    warn "this job spans more than one node. Short jobs backfill well only when they"
+    warn "are also small; at this size chunking may not shorten the queue wait, and"
+    warn "you pay the start-up and WAVECAR I/O once per chunk."
 fi
 
-# ---- render the job ONCE --------------------------------------------------
-# Rendered once and reused verbatim by every chunk, which freezes the allocation
-# at setup: editing slurm_vasptest.sh later cannot change a running chain.
+# ---- render the job ----------------------------------------------------------
+# Re-rendered on every launch AND every resume, from the chain's own record.
+# Between those, each chunk rewrites its successor's --mem-per-cpu, --nodes and
+# --ntasks-per-node in place (rewrite_allocation) from what it measured. Editing
+# THIS file by hand is therefore undone at the next boundary -- change memory
+# in slurm_vasptest.sh before a --fresh chain, or let the chain measure it.
 mkdir -p "$CHDIR"
 SELF=$(readlink -f "$0")
 tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
@@ -1099,7 +1793,12 @@ tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
     # One mail per chain, not per chunk: the last chunk re-enables END itself.
     [[ -n "${WP_EMAIL:-}" ]] && { echo "#SBATCH --mail-user=${WP_EMAIL}"; echo "#SBATCH --mail-type=FAIL"; }
     echo ""
-    echo "# Generated by vasp-scf-loop on $(date -Iseconds). Re-used by every chunk."
+    echo "# Generated by vasp-${MODE}-loop on $(date -Iseconds)."
+    echo "# Submitted once per chunk. The #SBATCH allocation above is REWRITTEN by each"
+    echo "# chunk from the memory it measured, and this whole file is re-rendered on"
+    echo "# --resume: hand edits here do not survive a chunk boundary."
+    echo "#   walltime : ${WALL} min, fixed for the chain -- ${WALL_SRC}"
+    echo "#   memory   : starts from ${ALLOC_SRC}, then measured chunk by chunk"
     echo 'cd "$SLURM_SUBMIT_DIR" || exit 1'
     if [[ -n "${WP_VASP_MODULES:-}" ]]; then
         [[ "${WP_MODULE_PURGE:-1}" == "1" ]] && echo "${WP_MODULE_CMD:-ml} purge"
@@ -1124,12 +1823,18 @@ tt=$(printf '%02d:%02d:00' $((WALL/60)) $((WALL%60)))
 } > "$CH_JOB"
 chmod +x "$CH_JOB"
 [[ -f "$_wp_conf" ]] && cp -f "$_wp_conf" "$CHDIR/cluster.conf"
+[[ -n $STUDY_REPORT ]] && printf '%s\n' "$STUDY_REPORT" > "$CHDIR/queue_study.txt"
 
 # ---- state ----------------------------------------------------------------
-if [[ $ACTION == resume ]] && [[ -f "$CH_ENV" ]]; then
-    state_load
-    say "resuming at chunk $(( $(int "${chunk_index:-0}") + 1 ))"
-    state_set chain_state running stop_reason ""
+# The allocation and the layout context go into the state on every launch and
+# resume: the chunk that rewrites its successor reads them from here.
+_alloc_keys=(chain_mem_per_cpu "$MEMCPU" chain_nodes "$NODES" chain_ntpn "$NTPN"
+             chain_ntpn_exact "$NTPN_EXACT" chain_partition "$PART"
+             chain_node_mem_mb "$chain_node_mem_mb" chain_mem_margin "$chain_mem_margin"
+             chain_cpn "$chain_cpn" chain_max_cores "$chain_max_cores"
+             chain_profile "$chain_profile" chain_nodes0 "$chain_nodes0")
+if [[ $ACTION == resume ]]; then
+    state_set "${_alloc_keys[@]}"
 else
     rm -f "$CH_DONE" "$CH_DEAD"
     state_set chain_kind "$MODE" chain_state running chain_started "$(date -Iseconds)" \
@@ -1137,14 +1842,17 @@ else
               chain_ediff "$(incar_get EDIFF)" nelm_target "$NELM_ORIG" \
               nsw_target "$nsw" chain_ediffg "$(incar_get EDIFFG)" \
               chain_isif "$(int "$(incar_get ISIF)")" \
-              t_ionic_s "${T_ION:-0}" nsw_done 0 nelm_hit_streak 0 recovery_used 0 \
+              t_ionic_s "${T_ION:-0}" t_ionic_measured 0 nsw_done 0 nelm_hit_streak 0 recovery_used 0 \
               chunk_index 0 nelm_total 0 wall_used_s 0 corehours 0 \
               next_cap "$CAP1" t_elec_s "$CAL" t_startup_s "$STARTUP" \
               t_work_s "$T_WORK" t_vasp_budget_s "$T_VASP" \
+              chain_wall_min "$WALL" chain_wall_source "$WALL_SRC" chain_margin_cfg_min "$MARGIN_CFG" \
               max_chunks "$(int "${OPT_MAXCHUNKS:-${WP_CHAIN_MAX_CHUNKS:-$DEF_MAX_CHUNKS}}")" \
               max_wall_min "$DEF_MAX_WALL_MIN" \
               deadline_epoch "$(date -d "+${DEF_DEADLINE_DAYS} days" +%s)" \
-              stall_streak 0 tight_streak 0
+              stall_streak 0 tight_streak 0 mem_peak_max_mb 0 mem_ave_max_mb 0 \
+              oom_count 0 next_cold_start 0 \
+              "${_alloc_keys[@]}"
 fi
 
 # ---- go -------------------------------------------------------------------
@@ -1153,10 +1861,10 @@ if out=$(sbatch "$CH_JOB" 2>&1); then
     echo "$jid" > "$CH_RUN"
     state_set jobids "${jobids:-} ${jid}"
     echo
-    ok "chain started: $out"
+    ok "chain $([[ $ACTION == resume ]] && echo resumed || echo started): $out"
     note "It will keep submitting chunks until it converges."
-    note "  watch:  $(basename "$0") --status"
-    note "  stop :  $(basename "$0") --stop        (finishes the current chunk first)"
+    note "  watch:  ${CMD} --status"
+    note "  stop :  ${CMD} --stop        (finishes the current chunk first)"
 else
     die "sbatch failed: $out"
 fi

@@ -1,0 +1,39 @@
+  [32m[ OK ][0m an OOM-killed chunk is recognised as OOM, not as a generic failure (oom)
+  [32m[ OK ][0m the dead chunk submits no successor
+  [32m[ OK ][0m the stop names the right command (it used to say vasp-scf-loop for a relaxation)
+  [32m[ OK ][0m and says what --resume will do about the memory
+  [32m[ OK ][0m --resume, with nothing else, continues the chain (rc=0)
+  [32m[ OK ][0m the memory is raised by itself: 1450 -> 2200 MB/cpu (expected 2200, x1.5)
+  [32m[ OK ][0m the geometry the dead chunk reached is kept (CONTCAR -> POSCAR), not redone
+  [32m[ OK ][0m the 2 steps the dead chunk completed were counted (3 + 2 = 5)
+  [32m[ OK ][0m the chain is running again, with one new chunk submitted
+  [32m[ OK ][0m the stop record is filed with the chunk it belongs to
+  [32m[ OK ][0m its messages name vasp-relax-loop, not vasp_chain.sh
+  [32m[ OK ][0m the next chunk runs and the chain carries on
+  [32m[ OK ][0m (setup) a job death leaves the state saying 'running' -- nobody was left to change it
+  [32m[ OK ][0m --resume recovers a chunk that died with its job (rc=0)
+  [32m[ OK ][0m the dead chunk is archived as chunk 2, as its body would have done
+  [32m[ OK ][0m its 4 completed steps are counted from its OSZICAR (3 + 4 = 7)
+  [32m[ OK ][0m the continuous trajectory gains its 4 frames (7 in XDATCAR.all)
+  [32m[ OK ][0m chain.log records the death, not a gap
+  [32m[ OK ][0m the geometry it reached becomes the next start
+  [32m[ OK ][0m the dead job's own logs are filed with it (they hold slurmstepd's verdict)
+  [32m[ OK ][0m and --resume prints no shell error on the way (it used to: 'RUNNING: No such file or directory')
+  [32m[ OK ][0m when chunk 1 dies, chunk-001/POSCAR.in.gz is still the ORIGINAL geometry
+  [32m[ OK ][0m a second OOM raises it again (1700 -> 2550 MB/cpu)
+  [32m[ OK ][0m and the chain counts the kills it has survived (2)
+  [32m[ OK ][0m an escalation no node can hold is refused (rc=3)
+  [32m[ OK ][0m the refusal names the way out (a lower KPAR, fewer ranks, LREAL)
+  [32m[ OK ][0m and nothing is submitted
+  [32m[ OK ][0m --resume refuses while a chunk is still queued or running
+  [32m[ OK ][0m and submits nothing
+  [32m[ OK ][0m a truncated WAVECAR is set aside as WAVECAR.partial
+  [32m[ OK ][0m and the next chunk starts cold (ISTART=0 ICHARG=2), instead of reading it
+  [32m[ OK ][0m only that one chunk: the one after restarts warm again
+  [32m[ OK ][0m a plain start on an unfinished chain refuses and points at --resume
+  [32m[ OK ][0m --fresh archives the old chain instead of deleting it
+  [32m[ OK ][0m and the new chain starts with clean state, not the old one's
+  [32m[ OK ][0m (setup) the escalation is refused both times (rc=3, 3)
+  [32m[ OK ][0m the first --resume settles the dead chunk once: chunk 2, 3 + 2 = 5 steps, 5 frames (got: 2 5 5)
+  [32m[ OK ][0m a second --resume counts nothing again and invents no chunk 3 (got: 2 5 5)
+  [32m[ OK ][0m and it reaches the same decision, for the same reason

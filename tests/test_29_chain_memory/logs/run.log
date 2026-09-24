@@ -1,0 +1,23 @@
+  [32m[ OK ][0m chunk 1 runs with slurm_vasptest.sh's allocation (2000 MB/cpu)
+  [32m[ OK ][0m the next chunk's request is rewritten from the measurement: 2000 -> 1450 MB/cpu (expected 1450)
+  [32m[ OK ][0m and recorded in the chain's state
+  [32m[ OK ][0m the chunk reports ionic steps against NSW (3 in this chunk, 3 of 60)
+  [32m[ OK ][0m chain.log shows what the chunk used next to what it was granted (1500 of 2000)
+  [32m[ OK ][0m when a node cannot hold the ranks they spread: 2 node(s) x 2 per node (expected 2 x 2)
+  [32m[ OK ][0m the rank count is unchanged (4), so the INCAR's KPAR/NCORE still hold
+  [32m[ OK ][0m the request is recomputed for the new ranks-per-node: 5650 (expected 5650)
+  [32m[ OK ][0m (setup) chunk 3 continued, so the chain did size a chunk 4
+  [32m[ OK ][0m a lighter chunk (1000 MB) does not undercut the largest peak seen (request stays 5650)
+  [32m[ OK ][0m the largest peak is kept in the state (5000)
+  [32m[ OK ][0m with no sacct data, OUTCAR's peak sizes the request: 2600 (expected 2560 -> 2600)
+  [32m[ OK ][0m and the chunk says the number came from OUTCAR, not accounting
+  [32m[ OK ][0m it does not sit out a 45-s sacct poll for RSS that will never come (4 s)
+  [32m[ OK ][0m a cell that grew 9.3 % in volume is given 9.3 % more (2750, expected 2750; 2500 without the growth)
+  [32m[ OK ][0m a rank larger than a node stops the chain (reason: memory_does_not_fit)
+  [32m[ OK ][0m and no successor is submitted
+  [32m[ OK ][0m the stop says why, in numbers
+  [32m[ OK ][0m the chunk that measured it ran to completion, and its geometry is kept (CONTCAR -> POSCAR)
+  [32m[ OK ][0m the stop says --resume cannot fix it here, and what frees memory
+  [32m[ OK ][0m --resume refuses and submits nothing, rather than a chunk below the measured need (rc=3)
+  [32m[ OK ][0m on bigger nodes --resume continues at the measured need: 1 x 25000 (expected 1 x 25000)
+  [32m[ OK ][0m after --stop and --resume the chain keeps its measured allocation (2 x 5650), not slurm_vasptest.sh's 1 x 2000

@@ -1,6 +1,6 @@
 # WolfPack-DFT — test suite
 
-28 tests. They ship with the toolkit, so what is checked can be read rather
+33 tests. They ship with the toolkit, so what is checked can be read rather
 than taken on trust.
 
 **No POTCAR is here, or anywhere in this repository.** They carry
@@ -82,6 +82,16 @@ reads as a finding about the toolkit when it is not one.
 | `test_26_queue_wait` | the queue statistics, against arithmetic we chose |
 | `test_27_magmom_flag` | --magmom: magnitudes change, orderings do not |
 | `test_28_bench_failed` | a benchmark that died must not size production |
+| `test_29_chain_memory` | every chunk measures its memory and resizes the next |
+| `test_30_chain_oom_resume` | after an OOM, `--resume` alone continues, with more memory |
+| `test_31_chain_step_fit` | a fixed chunk walltime; refusing when one step cannot fit |
+| `test_32_queue_study` | the chunk walltime from what the queue did to similar jobs |
+| `test_33_chain_live_e2e` | a real chunked relaxation: VASP, SLURM, memory per chunk |
+
+Tests 29–32 drive the real `vasp_chain.sh` through `chain_harness.sh`: fake
+`sbatch`, `squeue`, `sacct`, `scontrol` and a fake VASP behind `srun`, each
+doing exactly what the test scripts. That is how a chunk can be made to die of
+an OOM, or with its whole job, on demand. test_33 runs the same chain for real.
 
 ## Adding one
 

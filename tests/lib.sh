@@ -83,7 +83,9 @@ must_refuse(){ # must_refuse "claim" "regex the message must match" cmd...
         fail "$claim -- it was ACCEPTED"
     elif grep -qiE "Traceback \(most recent call last\)" <<<"$out"; then
         fail "$claim -- crashed with a traceback instead of refusing"
-    elif grep -qiE "$rx" <<<"$out"; then
+    # `--` so a pattern that starts with a dash ("--resume") is a pattern and
+    # not an option grep silently rejects -- which reads as "no match".
+    elif grep -qiE -- "$rx" <<<"$out"; then
         pass "$claim"
     else
         fail "$claim -- refused, but the message does not say why: $(tail -1 <<<"$out" | cut -c1-90)"

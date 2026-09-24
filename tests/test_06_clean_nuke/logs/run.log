@@ -5,7 +5,7 @@
   [32m[ OK ][0m vasp-nuke removed the VASP outputs
   [32m[ OK ][0m vasp-nuke refuses while a chunked run is live, and says why
   [32m[ OK ][0m the live run's restart objects survive the refusal
-      job 1232 is still COMPLETING; using never-issued id 901232 instead
+      job 1348 is still COMPLETING; using never-issued id 901348 instead
   [32m[ OK ][0m a stale 'running' chain whose job is gone does not block cleanup
   [32m[ OK ][0m vasp-nuke in a non-calculation directory touches nothing
   [32m[ OK ][0m vasp-clean in a non-calculation directory touches nothing
