@@ -265,8 +265,14 @@ Both profiles allow a rank count **smaller than one node**: `NPAR` cannot exceed
 `NBANDS`, so a cell with few bands cannot use a whole node however many cores
 it is given.
 
+An even split can need more nodes than the core cap suggests: 189 ranks on
+48-core nodes is 7 nodes of 27 at best. `vasp-configure` reads the most nodes a
+job may have from the partition's `MaxNodes` (or a QOS limit) into
+`WP_MAX_NODES`, and `balanced` does not offer a layout that needs more.
+
 ```bash
 vasp-configure --alloc-profile balanced     # or: whole-nodes
+vasp-configure --max-nodes 5                # when SLURM does not say
 vasp-configure --edit                       # or edit WP_ALLOC_PROFILE by hand
 ```
 
@@ -1104,14 +1110,14 @@ VASP wiki and its tutorials, or a paper. A few of them:
 | `test_18_vasp_check` | Al | 0.000 eV | metal, no gap |
 | `test_01_cases` | bcc Fe moment | 2.241 μB | 2.2 μB PBE, 2.22 exp. |
 | `test_17_vasp_tutorial_magnetism` | hcp Co moment | 1.576 μB/Co | [VASP magnetism tutorial](https://www.vasp.at/tutorials/latest/magnetism/part1/) |
-| `test_16_chain_live` | chunked vs one long relaxation | \|dE\| = 1e-06 eV | identical, by construction |
+| `test_33_chain_live_e2e` | `vasp-relax-loop` vs one long relaxation | \|dE\| = 1e-06 eV, max \|Δr\| = 0.0003 Å | identical, by construction |
 
 The live tests need a SLURM to submit to. `tests/slurm_testbed.sh` builds one
 in `/tmp/wpslurm`; without it those tests skip rather than fail. **No POTCAR is
 included** — they are licensed and may not be redistributed. The tests read
 yours from `$WP_POTCAR_DIR`, and skip cleanly when a potential is absent.
 
-The whole suite runs in about 20 minutes on an 8-core laptop.
+The whole suite runs in about 30 minutes on an 8-core laptop (28 on 2026-09-25).
 
 ---
 

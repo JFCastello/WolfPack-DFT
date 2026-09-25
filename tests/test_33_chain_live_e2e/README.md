@@ -50,11 +50,11 @@ EDIFFG = −0.01, 4 ranks (as the reference; on this 4-core laptop 8 ranks are
 
 ```
   chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
-      1   1   2      2     2  11 6                11    0:02:48   0:09   0:04:21      -10.806882  0.5881  ok
-      2   1   2      2     3  11 6                11    0:04:21   0:11   0:02:14      -10.819998  0.1471  ok
-      3   1   2      2     4  11 4                11    0:02:14   0:08   0:01:51      -10.820686  0.0490  ok
-      4   1   2      2     5  11 3                11    0:01:51   0:08   0:02:02      -10.820764  0.0150  ok
-      5   1   2      2     6  11 2                11    0:02:02   0:08   0:01:01      -10.820772  0.0047  CONVERGED
+      1   1   2      2     2  11 6                11    0:02:23   0:08   0:01:48      -10.806882  0.5881  ok
+      2   1   2      2     3  11 6                11    0:01:48   0:08   0:01:35      -10.819998  0.1471  ok
+      3   1   2      2     4  11 4                11    0:01:35   0:07   0:01:51      -10.820686  0.0490  ok
+      4   1   2      2     5  11 3                11    0:01:51   0:08   0:01:30      -10.820764  0.0150  ok
+      5   1   2      2     6  11 2                11    0:01:30   0:07   0:00:43      -10.820772  0.0047  CONVERGED
 ```
 
 - **The answer:** \|ΔE\| = 1×10⁻⁶ eV, max \|Δr\| = 0.0003 Å against the direct run.
@@ -64,12 +64,22 @@ EDIFFG = −0.01, 4 ranks (as the reference; on this 4-core laptop 8 ranks are
 - **The electronic-step estimate was exact:** 11 estimated, 11 taken, for every
   chunk's first ionic step.
 - **The time estimate** is that count times the seconds per electronic step, and
-  this laptop does not repeat itself. VASP's own LOOP lines give **4.4 to 17.1 s
-  per electronic step** across the chunks for the same work (vasp-test measured
-  6.9). Chunk 1 used 1.55 × its estimate, chunk 2 0.51 ×. The walltime's
-  × 1.15 + 5 min absorbed it: no chunk ran out. An estimate from the chunk before
+  this laptop does not repeat itself. VASP's own LOOP lines give **2.5 to 9.4 s
+  per electronic step** across the chunks for the same work. Used/estimate went
+  from 0.48 to 1.17. The walltime's × 1.15 + 5 min absorbed it: no chunk ran
+  out. On an earlier run the spread was 4.4 to 17.1 s and the worst chunk used
+  1.55 × its estimate, absorbed the same way. An estimate from the chunk before
   can be no more precise than the machine is repeatable. On a cluster with
   dedicated nodes this should be much tighter, but it was not measured here.
+- **vasp-test's start-up: 8.7 s.** It is the benchmark's wall time minus the
+  steps VASP timed, so it includes the step VASP was in when it was stopped: an
+  upper bound, never below the real start-up.
+
+**A package bug this test found on its second run.** The start-up came out
+0.0 s. vasp-test measured the benchmark's wall time with a one-second clock:
+90 s, against 90.26 s of steps in the OUTCAR, so the difference was −0.26 s and
+was clamped to 0. The first run had passed by luck of the rounding. The
+interval is now measured to the nanosecond.
 
 The first version of this test asserted "used ≤ estimate × 1.15". It failed on
 chunk 1 because of the machine, not the method, and it now asserts what the

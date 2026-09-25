@@ -639,13 +639,20 @@ fi
 #    the analysis below still finishes inside the requested walltime.
 # --------------------------------------------------------------------------- #
 hdr "RUNNING VASP (timed)"
-run_start=$(date +%s)
+# Whole seconds for the report; to the nanosecond for the start-up below, which
+# is a difference of this interval and VASP's own timings and is smaller than
+# the 1 s a whole-second clock can be off by. Falls back to whole seconds where
+# date has no %N.
+_now(){ local t; t=$(date +%s.%N 2>/dev/null)
+        [[ $t =~ ^[0-9]+\.[0-9]+$ ]] && echo "$t" || date +%s; }
+run_start=$(date +%s); run_start_f=$(_now)
 # --signal=TERM lets VASP exit at the next safe point; --kill-after forces it.
 timeout --signal=TERM --kill-after="${KILL_GRACE_SEC}s" "${RUN_SECONDS}s" \
     srun --cpu-bind=cores "$VASP_EXE"
 rc=$?
-run_end=$(date +%s)
+run_end_f=$(_now); run_end=$(date +%s)
 wall=$(( run_end - run_start ))
+wall_f=$(awk -v a="$run_start_f" -v b="$run_end_f" 'BEGIN{ printf "%.3f", b-a }')
 if [[ $rc -eq 124 || $rc -eq 137 ]]; then
     echo "  VASP reached the ${RUN_CLOCK} benchmark limit and was stopped (expected)."
 elif [[ $rc -eq 0 ]]; then
@@ -794,7 +801,11 @@ nionic=$(grep -c 'LOOP+:' "$OUTCAR" 2>/dev/null); nionic="${nionic//[^0-9]/}"; n
 # ionic step, which callers must read as "no estimate available".
 scf_per_ionic=$(awk -v n="$nscf" -v i="$nionic" \
     'BEGIN{ if(i>0) printf "%.2f", n/i; else printf "0" }')
-startup_s=$(awk -v w="$wall" -v p="$sum_loopplus" -v o="$sum_open" \
+# wall_f, not wall: with whole seconds this came out at -0.26 s, clamped to 0,
+# for a Si benchmark whose interval measured 90 s and whose OUTCAR summed to
+# 90.26 s. It includes the step VASP was in when it was stopped, which the
+# OUTCAR never timed, so it is an upper bound on the start-up, never below it.
+startup_s=$(awk -v w="$wall_f" -v p="$sum_loopplus" -v o="$sum_open" \
     'BEGIN{ r=w-p-o; if(r<0) r=0; printf "%.1f", r }')
 
 if posq "$maxrss_mb" && [[ -n "$RAW" ]]; then
@@ -947,7 +958,7 @@ fi
     --prod-ranks "$PROD_RANKS" --prod-kpar "$FIX_KPAR" --prod-ncore "$FIX_NCORE" \
     --prod-npar "$FIX_NPAR" --prod-nsim "$FIX_NSIM" \
     --prod-partition "$PROD_PARTITION" --cpus-per-node "$PROD_CPN" \
-    --max-cores "${WP_MAX_CORES:-0}" \
+    --max-cores "${WP_MAX_CORES:-0}" --max-nodes "${WP_MAX_NODES:-0}" \
     --alloc-profile "${WP_ALLOC_PROFILE:-whole-nodes}" \
     --node-mem-mb "$PROD_NODE_MEM" --mem-util "$MEM_UTIL" \
     --pred-peak-mb "${pred_mem_per_rank:-0}" --pred-flat-mb "${pred_flat_mb:-0}" \

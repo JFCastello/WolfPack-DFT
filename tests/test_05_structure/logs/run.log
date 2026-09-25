@@ -7,3 +7,7 @@
   [32m[ OK ][0m a missing file is refused, not assumed empty
   [32m[ OK ][0m a file that is not a structure is refused
   [32m[ OK ][0m cells with different site counts: says so, reports no displacements
+  [32m[ OK ][0m vasp-check on a chain says what POSCAR and CONTCAR are
+  [32m[ OK ][0m vasp-check reports the WHOLE chain's displacement (0.04 frac), not the last chunk's (0.01)  (0.1536 vs 0.1536 +/- 0.02)
+  [32m[ OK ][0m an unchained relaxation: the same heading, no chain note
+  [32m[ OK ][0m the last chunk alone is a different number (0.01 frac), so the check above discriminates  (0.0384 vs 0.0384 +/- 0.005)

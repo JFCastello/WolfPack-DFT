@@ -1,10 +1,24 @@
   [32m[ OK ][0m a missing INCAR is refused, not replaced by a two-line stub
   [32m[ OK ][0m the refusal names the near-miss file sitting next to it
   [32m[ OK ][0m --no-incar is an explicit way through
-  [32m[ OK ][0m a cell with no magnetic species is refused
   [32m[ OK ][0m NiO: ran clean
   [32m[ OK ][0m NiO: more than one ordering was produced (9)
   [32m[ OK ][0m NiO: no enumlib debris left next to the inputs
   [32m[ OK ][0m NiO: the user's own file survived
-  [32m[ OK ][0m NiO: MAGMOM lines up with the POSCAR in all 9 folder(s)
   [32m[ OK ][0m NiO: the orderings actually differ from one another (6 distinct)
+  [32m[ OK ][0m EL:value form -- every moment is the 1.0 asked for (got: 0.0 1.0 )
+  [32m[ OK ][0m INCAR shorthand -- every moment is the 3.0 asked for (got: 0.0 3.0 )
+  [32m[ OK ][0m --magmom produces the same NUMBER of orderings as pymatgen's defaults (9)
+  [32m[ OK ][0m and the same sign patterns -- the magnitude changed, the orderings did not
+  [32m[ OK ][0m the INCAR shorthand agrees with them too
+  [32m[ OK ][0m pymatgen's default magnitude differs from the flag's (0.0 5.0  vs 0.0 1.0 )
+  [32m[ OK ][0m MAGMOM lines up with the POSCAR in all 27 folder(s), with and without --magmom
+  [32m[ OK ][0m MgO is refused without the flag (exit 1)
+  [32m[ OK ][0m and the refusal names --magmom as the way through
+  [32m[ OK ][0m with --magmom Mg:1.0 the same cell enumerates
+  [32m[ OK ][0m ferrimagnetic_by_motif -- pymatgen's per-Wyckoff strategy -- accepts the flag
+  [32m[ OK ][0m an element not in the cell is refused, and the cell's elements named
+  [32m[ OK ][0m a non-numeric magnitude is refused
+  [32m[ OK ][0m the wrong number of INCAR-form values is refused, by count
+  [32m[ OK ][0m all-zero moments are refused instead of enumerating nothing
+  [32m[ OK ][0m an empty --magmom is refused

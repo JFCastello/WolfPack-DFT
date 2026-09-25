@@ -211,6 +211,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # for the rank count the physics wants, spread evenly, and measures the cap
 # in RANKS. Set from WP_ALLOC_PROFILE in the cluster profile.
 ALLOC_PROFILE: str = WHOLE_NODES
+# The most nodes one job may have: the partition's MaxNodes or a QOS limit,
+# as vasp-configure read them (WP_MAX_NODES). 0 = none known. Profile A never
+# needs it -- its nodes are the core cap over the cores per node -- but an even
+# split in profile B can: 189 ranks on 48-core nodes is 7 nodes of 27, and a
+# partition of 5 rejects the job.
+MAX_NODES: int = 0
 
 CLUSTER_PARTITIONS: Dict[str, Dict[str, object]] = {
     # -- AMD Zen4 (Genoa) partitions --------------------------------------
@@ -1407,7 +1413,7 @@ def suggest_total_ranks(
     # hands out the cores a job asks for rather than whole nodes.
     if layout_profile == BALANCED:
         for n in range(max(1, min_cores), max_cores + 1):
-            if balanced_layout(n, cpn) is not None:
+            if balanced_layout(n, cpn, max_nodes=MAX_NODES) is not None:
                 out.add(n)
         return sorted(out)
 
@@ -1966,7 +1972,8 @@ def build_candidates(
             # what decides between two equally dense splits.
             if layout_profile == BALANCED:
                 _bl = balanced_layout(total_ranks, cpus_per_node,
-                                      ranks_per_kgroup=rpk)
+                                      ranks_per_kgroup=rpk,
+                                      max_nodes=MAX_NODES)
                 if _bl is None:
                     continue
                 nodes, ntasks_per_node = _bl
@@ -2577,7 +2584,8 @@ def build_gw_candidates(
             # ranks on a node is exactly how a group gets more memory.
             if layout_profile == BALANCED:
                 _bl = balanced_layout(total_ranks, cpus_per_node,
-                                      ranks_per_kgroup=rpk)
+                                      ranks_per_kgroup=rpk,
+                                      max_nodes=MAX_NODES)
                 if _bl is None:
                     continue
                 nodes, ntasks_per_node = _bl
@@ -2837,7 +2845,8 @@ def compute_request_geometry(candidate: "Candidate",
     # the rank count and the directive was withheld as untrue. Same shape as
     # the bug that put the two copies of this rule in different files.
     nodes, ntpn = node_layout(total, kpar, cpn, usable, usage,
-                              max_cores=max_cores, profile=ALLOC_PROFILE)
+                              max_cores=max_cores, profile=ALLOC_PROFILE,
+                              max_nodes=MAX_NODES)
 
     # Size the request: the mem_util sizing, but trimmed so ntpn ranks fit the node
     # (keeps the whole-group layout rather than adding a node). Stays in
@@ -3065,6 +3074,8 @@ def print_partition_summary(
           " (SLURM default)")
     print(f"  account core cap        : {max_cores}"
           f"  (range scanned: {min_cores}..{max_cores})")
+    if MAX_NODES:
+        print(f"  node cap per job        : {MAX_NODES}  (WP_MAX_NODES)")
     print(f"  parallel mode           : pure MPI (OMP=1, -c 1)")
     print()
 
@@ -3672,10 +3683,12 @@ def apply_cluster_profile(prof: Dict[str, str]) -> None:
     # The allocation profile is a property of the SITE, not of a partition:
     # whether the scheduler hands out whole nodes (A) or the cores a job asks
     # for (B) is the same answer on every queue of one cluster.
-    global ALLOC_PROFILE
+    global ALLOC_PROFILE, MAX_NODES
     _ap = prof.get("WP_ALLOC_PROFILE", "").strip().lower()
     if _ap in (WHOLE_NODES, BALANCED):
         ALLOC_PROFILE = _ap
+    _mn = prof.get("WP_MAX_NODES", "").strip()
+    MAX_NODES = int(_mn) if _mn.isdigit() else 0
 
     # The interconnect, as vasp-configure detected it (wolfpack_hw.sh). It
     # decides one LPLANE rule: on 1 Gbit Ethernet it "must be .TRUE.".

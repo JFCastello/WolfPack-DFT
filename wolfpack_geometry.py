@@ -59,7 +59,8 @@ BALANCED_SEARCH_NODES = 3
 
 def balanced_layout(total_ranks: int, cpus_per_node: int,
                     usable_node_mb: float = 0.0, usage_per_rank_mb: float = 0.0,
-                    ranks_per_kgroup: int = 0) -> Optional[Tuple[int, int]]:
+                    ranks_per_kgroup: int = 0,
+                    max_nodes: int = 0) -> Optional[Tuple[int, int]]:
     """Profile B: (nodes, ranks_per_node) with nodes * ranks_per_node EXACTLY
     equal to `total_ranks`, or None when no such layout is worth having.
 
@@ -90,6 +91,13 @@ def balanced_layout(total_ranks: int, cpus_per_node: int,
     `ranks_per_kgroup`, when given, is N / KPAR. A node holding a whole number
     of k-point groups keeps each group's communication inside one node, so a
     layout that manages it is preferred over a denser one that does not.
+
+    `max_nodes`, when given, is the most nodes one job may have (the
+    partition's MaxNodes, or a QOS limit; vasp-configure: WP_MAX_NODES). An
+    even split can need more nodes than the core cap suggests -- 189 = 3^3 x 7
+    ranks on 48-core nodes is 7 nodes of 27 at best -- and SLURM rejects a job
+    above the limit ("Requested node configuration is not available"). Such a
+    rank count has no layout here. 0 means no limit is known.
     """
     total = max(1, int(total_ranks))
     cpn = max(1, int(cpus_per_node))
@@ -111,6 +119,8 @@ def balanced_layout(total_ranks: int, cpus_per_node: int,
     for n in range(n_min, n_min + BALANCED_SEARCH_NODES + 1):
         if n <= 0 or total % n:
             continue
+        if max_nodes and n > max_nodes:
+            break
         m = total // n
         if m > m_max:
             continue
@@ -123,7 +133,8 @@ def balanced_layout(total_ranks: int, cpus_per_node: int,
 def node_layout(total_ranks: int, kpar: int, cpus_per_node: int,
                 usable_node_mb: float, usage_per_rank_mb: float,
                 max_cores: Optional[int] = None,
-                profile: str = WHOLE_NODES) -> Tuple[int, int]:
+                profile: str = WHOLE_NODES,
+                max_nodes: int = 0) -> Tuple[int, int]:
     """Return (nodes, ranks_per_node).
 
     `usable_node_mb` is the node's RAM minus whatever is held back.
@@ -152,7 +163,8 @@ def node_layout(total_ranks: int, kpar: int, cpus_per_node: int,
         got = balanced_layout(total_ranks, cpus_per_node,
                               usable_node_mb, usage_per_rank_mb,
                               ranks_per_kgroup=(max(1, int(total_ranks)) // max(1, int(kpar))
-                                                if kpar else 0))
+                                                if kpar else 0),
+                              max_nodes=max_nodes)
         if got is not None:
             return got
         # No even split worth having. Fall through to the whole-node layout

@@ -1,6 +1,6 @@
 # WolfPack-DFT — test suite
 
-33 tests. They ship with the toolkit, so what is checked can be read rather
+29 tests. They ship with the toolkit, so what is checked can be read rather
 than taken on trust.
 
 **No POTCAR is here, or anywhere in this repository.** They carry
@@ -58,18 +58,17 @@ reads as a finding about the toolkit when it is not one.
 | `test_02_dispatcher` | every advertised command resolves; every `--help` works |
 | `test_03_configure` | the cluster profile: round-trip, hand edits, bad values |
 | `test_04_supercell` | supercell arithmetic, against answers derived not copied |
-| `test_05_structure` | the POSCAR→CONTCAR diff, against an injected deformation |
+| `test_05_structure` | the POSCAR→CONTCAR diff, against an injected deformation; a chained relaxation's whole one |
 | `test_06_clean_nuke` | the two commands that delete: what they must NOT delete |
 | `test_07_dryrun` | stage 1: refusals, and not claiming what it did not measure |
 | `test_08_recommend` | the parallelization rules, judged per regime (DFT vs GW) |
 | `test_09_chain_math` | `vasp-scf-loop`'s refusals: runs that would produce nothing |
-| `test_10_magnetic` | magnetic orderings and MAGMOM/POSCAR site alignment |
+| `test_10_magnetic` | magnetic orderings, MAGMOM/POSCAR site alignment; `--magmom` changes magnitudes, not orderings |
 | `test_11_uchain` | the linear-response U arithmetic and its refusals |
 | `test_12_slurm_report` | sacct parsing and the three efficiency ratios |
 | `test_13_plots` | the figures, and the gap the data behind them carries |
-| `test_14_recommend_live` | every generated job script, on a live slurmctld |
 | `test_15_pipeline_live` | dry-run → recommend → test, end to end, with VASP |
-| `test_16_chain_live` | chunked vs one long run: same energy, same structure |
+| `test_16_chain_live` | `vasp-scf-loop`'s restart: an SCF cut in two vs one run, same energy |
 | `test_17_vasp_tutorial_magnetism` | the VASP magnetism tutorial, reproduced |
 | `test_18_vasp_check` | the post-mortem, on runs whose answer is known |
 | `test_19_vasp_diagnose` | why a run died — and not the other cause |
@@ -77,14 +76,13 @@ reads as a finding about the toolkit when it is not one.
 | `test_21_incar` | the INCAR editor's four rules, and its two-copy drift gate |
 | `test_22_geometry` | nodes × ranks: five invariants over 2025 layouts |
 | `test_23_scaling` | stage 3's extrapolation: measure small, run big |
-| `test_24_alloc_profiles` | whole-nodes vs balanced: n x m = ntasks, exactly |
-| `test_25_chain_structure` | what a CHAINED relaxation changed, not its last chunk |
-| `test_27_magmom_flag` | --magmom: magnitudes change, orderings do not |
+| `test_24_alloc_profiles` | whole-nodes vs balanced: n x m = ntasks, exactly; every script on a live slurmctld |
 | `test_28_bench_failed` | a benchmark that died must not size production |
 | `test_32_queue_study` | `backfill-study`: the queue wait, quartiles, fairshare, prediction |
 | `test_33_chain_live_e2e` | `vasp-relax-loop` for real: pipeline, VASP, SLURM; estimate vs time used |
 | `test_35_steptime` | an ionic step measured, or extrapolated from a cut-off SCF |
 | `test_36_relax_loop` | `vasp-relax-loop`: NSW per chunk, walltime per chunk, clean retries |
+| `test_37_lplane` | LPLANE by the wiki's rule: from NGZ, NCORE and the network; checked by vasp-test |
 
 test_36 drives the real `vasp_relax_loop.sh` through `chain_harness.sh`: fake
 `sbatch`, `squeue`, `sacct`, `scontrol` and a fake VASP behind `srun`, each

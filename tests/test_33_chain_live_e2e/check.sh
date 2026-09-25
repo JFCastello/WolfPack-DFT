@@ -16,7 +16,7 @@ have_slurm     || { skip "no reachable slurmctld -- run tests/slurm_testbed.sh s
 export SLURM_CONF="$TESTBED_ROOT/slurm.conf"
 W="$WORK/chainlive"; rm -rf "$W"; mkdir -p "$W"
 
-# Si with one atom pushed off its site (the case of test_16), 6x6x6 k-points.
+# Si with one atom pushed off its site, 6x6x6 k-points.
 _setup(){ # _setup DIR NSW
     local d="$1"; mkdir -p "$d"
     awk 'NR==10 { printf "   0.7700000000  0.7600000000  0.7500000000 Si\n"; next } { print }' \

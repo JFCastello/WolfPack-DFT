@@ -1,5 +1,5 @@
   [32m[ OK ][0m a profile is generated where none existed
-  [32m[ OK ][0m the generated profile carries the expected settings (31)
+  [32m[ OK ][0m the generated profile carries the expected settings (32)
   [32m[ OK ][0m a flag sets the value it names
   [32m[ OK ][0m a flag changes NOTHING but the value it names
   [32m[ OK ][0m a hand-added setting survives a full regeneration
@@ -10,3 +10,6 @@
   [32m[ OK ][0m --max-cores abc does not end up in the profile (got 'unset')
   [32m[ OK ][0m an empty module list is accepted and stored empty
   [32m[ OK ][0m --vasp-modules does not swallow the following flag
+  [32m[ OK ][0m the node limit is read from the partition's MaxNodes, and says so (got '5')
+  [32m[ OK ][0m --max-nodes sets it by hand
+  [32m[ OK ][0m --max-nodes 0 is refused, and the profile keeps its value

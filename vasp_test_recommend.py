@@ -174,7 +174,7 @@ def round_up(x, step=50):
 
 def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
              gw_node_frac=0.0, max_cores=None,
-             layout_profile=WHOLE_NODES):
+             layout_profile=WHOLE_NODES, max_nodes=0):
     """(mem_per_cpu, nodes, ntasks_per_node) keeping WHOLE k-point groups on a node.
 
     Sizes the request for >= mem_util utilisation, but the per-node ceiling comes
@@ -198,7 +198,8 @@ def geometry(total, cpn, prod_use, node_mem, mem_util=0.80, reserve=0, kpar=1,
     # pipeline prints as "<- submit this" -- would have a geometry the
     # benchmark never measured.
     nodes, ntpn = node_layout(total, kpar, cpn, usable, prod_use,
-                              max_cores=max_cores, profile=layout_profile)
+                              max_cores=max_cores, profile=layout_profile,
+                              max_nodes=max_nodes)
     fit_req = usable // max(ntpn, 1)
     mem_per_cpu = max(200, min(desired, max(int(math.ceil(prod_use)), (fit_req // 50) * 50)))
     # GW SWEET raise: grow the request to the queue-friendly node share (gw_node_frac,
@@ -397,6 +398,9 @@ def main():
                    help="Account core cap. Checked against ALLOCATED cores "
                         "(nodes x cpus-per-node), which is what SLURM charges, "
                         "not the rank count.")
+    p.add_argument("--max-nodes", type=int, default=0,
+                   help="most nodes one job may have (WP_MAX_NODES: the "
+                        "partition's MaxNodes or a QOS limit); 0 = none known")
     p.add_argument("--mem-util", type=float, default=0.80)
     # GW: the benchmark only reaches the FLAT phase and CANNOT measure the GW floor, so
     # we use VASP's own reported requirement (--gw-floor-mb / parsed from OUTCAR) or an
@@ -585,6 +589,7 @@ def main():
                                         prod_use, args.node_mem_mb,
                                         max_cores=args.max_cores,
                                         layout_profile=args.alloc_profile,
+                                        max_nodes=args.max_nodes,
                                         mem_util=args.mem_util, kpar=args.prod_kpar,
                                         gw_node_frac=(args.gw_node_frac if args.gw else 0.0))
     # GW feasibility at the MEASURED memory: a whole k-group must fit one node. If

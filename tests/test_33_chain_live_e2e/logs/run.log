@@ -2,18 +2,18 @@
   [32m[ OK ][0m stage 2 chose a layout (4 ranks)
   [32m[ OK ][0m vasp-test --full-size kept its OUTCAR and OSZICAR for the chain
   [32m[ OK ][0m and measured at the production rank count
-  [32m[ OK ][0m its start-up time is no longer clamped to 0 when an ionic step completed (12.3 s)
+  [32m[ OK ][0m its start-up time is no longer clamped to 0 when an ionic step completed (8.7 s)
   [32m[ OK ][0m the chain launches on the live scheduler (rc=0)
-      vasp-relax-loop -- si          updated 2026-09-25 15:15
+      vasp-relax-loop -- si          updated 2026-09-25 19:52
       NSW per chunk: 2 (INCAR)   stop after 40 geometries   retries: up to 2 per chunk
       EDIFFG -0.01 (forces)   WAVECAR carried: no   walltime = estimate x 1.15 + 5 min
     
       chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
-          1   1   2      2     2  11 6                11    0:02:48   0:09   0:04:21      -10.806882  0.5881  ok
-          2   1   2      2     3  11 6                11    0:04:21   0:11   0:02:14      -10.819998  0.1471  ok
-          3   1   2      2     4  11 4                11    0:02:14   0:08   0:01:51      -10.820686  0.0490  ok
-          4   1   2      2     5  11 3                11    0:01:51   0:08   0:02:02      -10.820764  0.0150  ok
-          5   1   2      2     6  11 2                11    0:02:02   0:08   0:01:01      -10.820772  0.0047  CONVERGED
+          1   1   2      2     2  11 6                11    0:02:23   0:08   0:01:48      -10.806882  0.5881  ok
+          2   1   2      2     3  11 6                11    0:01:48   0:08   0:01:35      -10.819998  0.1471  ok
+          3   1   2      2     4  11 4                11    0:01:35   0:07   0:01:51      -10.820686  0.0490  ok
+          4   1   2      2     5  11 3                11    0:01:51   0:08   0:01:30      -10.820764  0.0150  ok
+          5   1   2      2     6  11 2                11    0:01:30   0:07   0:00:43      -10.820772  0.0047  CONVERGED
     
       CONVERGED at chunk 5: reached required accuracy (EDIFFG -0.01), 6 geometries
       columns: ionic = ionic steps VASP completed in the chunk; geoms = distinct
@@ -25,13 +25,15 @@
   [32m[ OK ][0m each of the 5 chunks started from the CONTCAR of the one before
   [32m[ OK ][0m the folder's POSCAR is still the input; its CONTCAR is the last chunk's
   [32m[ OK ][0m no chunk ran out of its walltime or memory (0 did)
-      chunk   estimate   used   used/estimate
-          1       168s    261s     1.55
-          2       261s    134s     0.51
-          3       134s    111s     0.83
-          4       111s    122s     1.10
-          5       122s     61s     0.50
-  [31m[FAIL][0m no chunk used more than its estimate x 1.15, the safety factor (worst used/estimate: 1.55) [awk -v w='1.55' 'BEGIN{exit !(w <= 1.15)}']
+      chunk  est.e  e-steps  estimate  used  used/estimate
+          1     11       11      143s   108s     0.76
+          2     11       11      108s    95s     0.88
+          3     11       11       95s   111s     1.17
+          4     11       11      111s    90s     0.81
+          5     11       11       90s    43s     0.48
+  [32m[ OK ][0m the electronic steps of each chunk's first ionic step were never under-estimated by more than the 2-step margin
+      seconds per electronic step on this machine, across the chunks (VASP's LOOP): 2.5-9.4
+      the largest used/estimate: 1.17 -- what the walltime's x 1.15 + 5 min has to absorb
   [32m[ OK ][0m the chain and the direct run agree in energy (|dE| = 0.000001 eV; chain -.10820772E+02, direct -.10820773E+02)
   [32m[ OK ][0m and in structure (max |dr| = 0.0003 A)
       the direct run: 6 ionic steps; the chain: 5 chunks, 6 geometries, 10 SCF runs

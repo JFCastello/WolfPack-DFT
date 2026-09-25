@@ -1,24 +1,32 @@
 # test_16_chain_live
 
-> chunked relax and SCF vs one long run: same structure, same energy
+> vasp-scf-loop's restart: an SCF cut in two vs one run, same energy, fewer steps
 
 ## 1. Definition
 
-Runs the same relaxation twice — once straight through, once cut into two jobs
-with a restart at the boundary — and compares the final energy and structure.
-Then does the same for a static SCF, which chunks `NELM` instead of `NSW`.
+Runs the same static SCF twice: once straight through, and once cut after 8
+electronic steps and restarted with the tags `vasp-scf-loop` writes at a
+boundary. It compares the final energies, and how many steps the restart
+needed.
 
 ## 2. Purpose
 
-`vasp-relax-loop` and `vasp-scf-loop` exist to cut a long calculation into
-short jobs that backfill into a queue. Their entire value rests on one claim:
+`vasp-scf-loop` exists to cut a long SCF into short jobs that fit a queue. Its
+value rests on one claim:
 
 > splitting the calculation changes the answer by nothing.
 
-That cannot be verified by reading code. A chain that dropped `ISTART`/`ICHARG`,
-or wrote `LWAVE = .FALSE.` into a chunk, would restart from scratch at every
-boundary — the energies would still look plausible and the relaxation would
-still converge, to a slightly different geometry after more steps.
+That cannot be verified by reading code. The restart the chain writes is
+`ISTART = 1` (read the WAVECAR), `ICHARG = 0` (the density from those
+wavefunctions) and `NELMDL = 0` (no non-self-consistent delay on a restart).
+This test runs exactly those tags.
+
+A restart that silently lost the WAVECAR would still converge to the same
+energy, just from scratch. So the step count is checked too: a restart that
+used the wavefunctions needs fewer steps than a cold start.
+
+The relaxation's counterpart is `test_33_chain_live_e2e`, which runs
+`vasp-relax-loop` itself against a direct relaxation.
 
 ## 3. How it is executed
 
@@ -26,51 +34,47 @@ still converge, to a slightly different geometry after more steps.
 tests/run_all.sh test_16_chain_live
 ```
 
-Silicon, 2 atoms, with one atom displaced by (0.02, 0.01, 0) fractional so
-there is somewhere to relax **to** — a structure already at its minimum would
-agree trivially. Four VASP runs on 4 ranks; a few minutes.
+Silicon, 2 atoms, 6×6×6 k-points. Four VASP runs on 4 ranks; about a minute.
 
-- **direct**: `NSW = 12`, straight through.
-- **chunked**: `NSW = 6`, then restart from that `CONTCAR` + `WAVECAR` with
-  `ISTART = 1`, `ICHARG = 1`, and finish. The boundary is done by hand so the
+- **direct**: `NELM = 40`, straight through.
+- **chunked**: `NELM = 8`, then `NELM = 40` with `ISTART = 1`, `ICHARG = 0`,
+  `NELMDL = 0` from its own WAVECAR. The boundary is done by hand, so the
   comparison isolates the **restart** from the scheduler.
+- **the control**: the same restart, the same tags, with no WAVECAR to read.
 
 ## 4. Expected results
 
-Identical answers, to numerical precision. There is no physical reason for a
-difference: the restart reads the same wavefunction and density the direct run
-had in memory.
+The same energy, to numerical precision: the restart reads the wavefunctions
+the first half wrote. Fewer steps after the restart than the control needs.
+
+The control is not the direct run: that one pays 5 non-self-consistent steps
+(`NELMDL = -5`, VASP's default for a cold start) that a restart with
+`NELMDL = 0` does not, so a restart that ignored the WAVECAR could still come in
+under it.
 
 ## 5. Obtained results
 
 ```
-the reference relaxation finished (E = -10.820773 eV)
-the relaxation really was split (6 then 1 ionic steps)
-chunked and direct relaxation agree in energy     |dE| = 1.00e-06 eV
-chunked and direct relaxation agree in structure  max |dr| = 1.74e-11 A
-chunked and direct SCF agree in energy            |dE| = 0.00e+00 eV
+the SCF really was split                     8 then 4 electronic steps
+chunked and direct SCF agree in energy       |dE| = 0.00e+00 eV
+the restart used the WAVECAR                 4 steps, against 11 with no WAVECAR
 ```
 
-`1.7e-11 Å` is machine precision. The static SCF agrees to the last printed
-digit.
+The energy agrees to the last printed digit.
 
 ## 6. Pass / fail criterion
 
-| quantity | tolerance | why that tolerance |
+| quantity | tolerance | why |
 |---|---|---|
-| relaxation energy | 1e-3 eV | below any energy difference a conclusion is drawn from |
-| relaxation structure | 5e-3 Å | an order of magnitude below a typical `EDIFFG = -0.01` |
-| SCF energy | 1e-4 eV | a static run restarts from a converged WAVECAR; it has no excuse |
-
-Loose enough that a differently-converged run passes, tight enough that a
-restart which silently lost the wavefunction does not.
+| SCF energy | 1e-4 eV | a restart from the same wavefunctions has no excuse |
+| steps after the restart | fewer than the control's | the control is a restart from scratch with the same tags |
 
 ## 7. Verdict
 
-**PASSED** — 5 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 3 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 
 - `ISTART` — <https://www.vasp.at/wiki/index.php/ISTART>
 - `ICHARG` — <https://www.vasp.at/wiki/index.php/ICHARG>
-- `EDIFFG` — <https://www.vasp.at/wiki/index.php/EDIFFG>
+- `NELMDL` — <https://www.vasp.at/wiki/index.php/NELMDL>

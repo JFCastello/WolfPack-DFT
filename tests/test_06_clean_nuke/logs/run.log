@@ -9,7 +9,6 @@
   [32m[ OK ][0m vasp-clean -r leaves a chain's own directories alone
   [32m[ OK ][0m vasp-clean on a chunk directory of a live chain refuses
   [32m[ OK ][0m vasp-nuke inside a chunk directory of a live chain refuses (rc=2)
-      job 1598 is still COMPLETING; using never-issued id 901598 instead
   [32m[ OK ][0m a stale 'running' chain whose job is gone does not block cleanup
   [32m[ OK ][0m vasp-nuke in a non-calculation directory touches nothing
   [32m[ OK ][0m vasp-clean in a non-calculation directory touches nothing

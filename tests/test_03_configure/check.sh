@@ -82,4 +82,25 @@ got=$(grep -oP '^WP_VASP_MODULES=.\K[^"'"'"']*' "$W/mod2.conf" 2>/dev/null)
 [[ "$got" == "--max-cores" ]] \
     && fail "--vasp-modules swallowed the NEXT FLAG as its value" \
     || pass "--vasp-modules does not swallow the following flag"
+
+# --- the node limit is read from the partition -----------------------------
+# The core cap alone does not bound the nodes of an evenly split job (189 ranks
+# on 48-core nodes is 7 nodes of 27), and a partition whose MaxNodes is lower
+# rejects it. The testbed's main partition says MaxNodes=5.
+if have_slurm; then
+    timeout 120 env SLURM_CONF="$TESTBED_ROOT/slurm.conf" bash "$C" --conf "$W/nodes.conf" \
+        --non-interactive --main-partition sequana_cpu >"$W/nodes.log" 2>&1
+    got=$(grep -oP '^WP_MAX_NODES="\K[^"]*' "$W/nodes.conf" 2>/dev/null)
+    ok_if "[[ '$got' == 5 ]] && grep -q '5 nodes <- partition MaxNodes' '$W/nodes.log'" \
+          "the node limit is read from the partition's MaxNodes, and says so (got '${got:-unset}')"
+else
+    skip "no reachable slurmctld -- the node limit's detection was not checked"
+fi
+timeout 60 bash "$C" --conf "$W/nodes2.conf" --non-interactive --max-nodes 3 >"$W/nodes2.log" 2>&1
+grep -q '^WP_MAX_NODES="3"' "$W/nodes2.conf" \
+    && pass "--max-nodes sets it by hand" \
+    || fail "--max-nodes 3 did not take"
+cp "$W/nodes2.conf" "$W/nodes3.conf"
+timeout 60 bash "$C" --conf "$W/nodes3.conf" --non-interactive --max-nodes 0 >"$W/nodes3.log" 2>&1 || true
+ok_if "grep -q '^WP_MAX_NODES=\"3\"' '$W/nodes3.conf'" "--max-nodes 0 is refused, and the profile keeps its value"
 exit $(( FAIL_N > 0 ))

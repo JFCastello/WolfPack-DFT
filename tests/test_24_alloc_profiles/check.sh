@@ -34,9 +34,12 @@ WP_MEM_UTIL_MIN="0.80"
 WP_MAIN_MEM_MARGIN="0.02"
 WP_DEBUG_MEM_MARGIN="0.05"
 WP_ALLOC_PROFILE="$1"
+WP_MAX_NODES="5"
 EOF
     echo "$f"
 }
+# WP_MAX_NODES = 5 is what vasp-configure reads from the testbed partition
+# these scripts are submitted to (MaxNodes=5, 48-core nodes).
 CONF_A=$(_conf whole-nodes); CONF_B=$(_conf balanced)
 
 _mkdry(){ # _mkdry NAME NKPTS NBANDS -> path
@@ -89,14 +92,34 @@ for nk in 1 8 29 41 63 72 190; do
             bad=$((bad+1)); examples+=$'\n'"    NKPTS=$nk NBANDS=$nb: $m ranks on a 48-core node"
         elif (( N > 240 )); then
             bad=$((bad+1)); examples+=$'\n'"    NKPTS=$nk NBANDS=$nb: $N ranks over the 240 cap"
+        elif (( n > 5 )); then
+            bad=$((bad+1)); examples+=$'\n'"    NKPTS=$nk NBANDS=$nb: $n nodes, over the partition's 5"
         fi
     done
 done
 if (( bad == 0 )); then
-    pass "profile B: $n_checked layouts, every one n x m = ntasks exactly, m <= 48, within the cap"
+    pass "profile B: $n_checked layouts, every one n x m = ntasks exactly, m <= 48, within the cap and the 5-node limit"
 else
-    fail "profile B: $bad of $n_checked layouts are not an exact even split$examples"
+    fail "profile B: $bad of $n_checked layouts are not an exact even split inside the limits$examples"
 fi
+
+# ===========================================================================
+# 1b. THE NODE LIMIT IS WHAT KEEPS PROFILE B INSIDE THE PARTITION
+# ===========================================================================
+# An even split can need more nodes than the core cap suggests: 63 k-points
+# want 189 ranks, and 189 = 3^3 x 7 is 7 nodes of 27 at best. The same case
+# without WP_MAX_NODES is the control: if it did not come out above 5, the
+# check with the limit would be proving nothing.
+dry=$(_mkdry "k63b48_limit" 63 48)
+CONF_B_NOLIM="$W/cluster_balanced_nolimit.conf"
+grep -v '^WP_MAX_NODES=' "$CONF_B" > "$CONF_B_NOLIM"
+d0=$(_run "$CONF_B_NOLIM" "$dry" --max-cores 240)
+d5=$(_run "$CONF_B" "$dry" --max-cores 240)
+n0=$(_geo "$d0" nodes); r0=$(_geo "$d0" ntasks); n5=$(_geo "$d5" nodes); r5=$(_geo "$d5" ntasks)
+ok_if "[[ '${n0:-0}' -gt 5 ]]" \
+      "the control: with no node limit known, profile B spreads $r0 ranks over ${n0:-?} nodes"
+ok_if "[[ -n '$n5' && '$n5' -le 5 ]]" \
+      "with WP_MAX_NODES = 5 it chooses a layout that fits: $r5 ranks on $n5 nodes"
 
 # ===========================================================================
 # 2. B EXPRESSES WHAT A CANNOT
@@ -188,29 +211,57 @@ else
 fi
 
 # ===========================================================================
-# 5. A LIVE SCHEDULER ACCEPTS BOTH
+# 5. A LIVE SCHEDULER ACCEPTS EVERY SCRIPT, BOTH PROFILES
 # ===========================================================================
+# Parsing a script tells you it is syntactically fine. Only the scheduler can
+# tell you it is ACCEPTABLE -- and the failure that matters is silent:
+# --nodes, --ntasks and --ntasks-per-node are three claims, and when they
+# disagree SLURM resolves the contradiction rather than refusing, giving the
+# job more CPUs than it asked for.
+#
+# 190 is in the grid on purpose: 190 = 2 x 5 x 19 shares only a factor 2 with
+# any multiple of 48, so it is where a rank count that suits the physics and
+# one the cluster hands out whole disagree.
 if have_slurm; then
     # As every live test does: sbatch must not depend on the caller's shell.
     export SLURM_CONF="$TESTBED_ROOT/slurm.conf"
-    bad=0; n_checked=0; examples=""
     for prof in A B; do
         c=$([[ $prof == A ]] && echo "$CONF_A" || echo "$CONF_B")
-        for nk in 8 41 72; do
-            dry=$(_mkdry "live_${prof}_$nk" "$nk" 200)
-            d=$(_run "$c" "$dry" --max-cores 240)
-            [[ -s "$d/slurm.sh" ]] || continue
-            sed -i 's|^/usr/bin/time -v srun .*|echo would-run|' "$d/slurm.sh"
-            n_checked=$((n_checked+1))
-            out=$(cd "$d" && sbatch --test-only slurm.sh 2>&1) || {
-                bad=$((bad+1)); examples+=$'\n'"    profile $prof NKPTS=$nk: $(tail -1 <<<"$out")"; }
+        ok=0; bad=0; examples=""
+        for nk in 1 41 63 72 190; do
+          for nb in 48 200 800; do
+            dry=$(_mkdry "live_${prof}_${nk}_${nb}" "$nk" "$nb")
+            for ct in dft gw; do
+              for cap in 48 96 240; do
+                d=$(_run "$c" "$dry" --calc-type "$ct" --max-cores "$cap")
+                # A refusal is not this check's business: a GW k-group that
+                # cannot fit a node at a 48-core cap is correctly refused.
+                [[ -s "$d/slurm.sh" ]] || continue
+                sed -i 's|^/usr/bin/time -v srun .*|echo would-run|' "$d/slurm.sh"
+                out=$(cd "$d" && sbatch --test-only slurm.sh 2>&1)
+                r=$(_geo "$d" ntasks); n=$(_geo "$d" nodes); t=$(_geo "$d" ntasks-per-node)
+                why=""
+                grep -qiE 'error|failure' <<<"$out" && why="REJECTED: $(sed 's/^sbatch: //' <<<"$out" | tail -1 | cut -c1-60)"
+                # SLURM charges WHOLE NODES in profile A. A job inside its rank
+                # budget can still be outside its core budget.
+                [[ -z "$why" && $prof == A && -n "$n" ]] && (( n * 48 > cap )) \
+                    && why="OVER CAP: $((n*48)) cores for a $cap-core cap"
+                [[ -z "$why" && -n "$r" ]] && (( r > cap )) && why="OVER CAP: $r ranks for a $cap-core cap"
+                # Three claims that disagree is how a job gets CPUs it never asked for.
+                [[ -z "$why" && -n "$t" && -n "$n" ]] && (( n * t != r )) && why="INCONSISTENT: $n x $t != $r"
+                if [[ -n "$why" ]]; then
+                    bad=$((bad+1)); examples+=$'\n'"    NKPTS=$nk NBANDS=$nb $ct cap=$cap -- $why"
+                else ok=$((ok+1)); fi
+              done
+            done
+          done
         done
+        if (( bad == 0 && ok > 0 )); then
+            pass "profile $prof: $ok script(s), every one accepted by a live slurmctld, inside its cap, n x m = ntasks"
+        else
+            fail "profile $prof: $bad of $((ok+bad)) script(s) rejected, over the cap or inconsistent$examples"
+        fi
     done
-    if (( bad == 0 )); then
-        pass "$n_checked script(s) from both profiles, every one accepted by a live slurmctld"
-    else
-        fail "$bad of $n_checked script(s) rejected$examples"
-    fi
 else
     skip "no reachable slurmctld -- the generated scripts were not submitted"
 fi

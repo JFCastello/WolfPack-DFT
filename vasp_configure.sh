@@ -48,6 +48,8 @@
 #   --main-partition NAME  --debug-partition NAME
 #   --main-cpus N          --debug-cpus N
 #   --main-mem MB          --debug-mem MB           --max-cores N
+#   --max-nodes N             (most nodes one job may have; the partition's
+#                              MaxNodes or a QOS limit, detected when there is one)
 #   --debug-max-cores N       (core cap for the vasp-test benchmark job)
 #   --chunk-walltime MIN      (walltime of ONE chunk of a chained SCF;
 #                              vasp-scf-loop --walltime overrides it per run.
@@ -89,6 +91,7 @@ WP_MAIN_PARTITION=""; WP_DEBUG_PARTITION=""
 WP_MAIN_CPUS_PER_NODE=""; WP_DEBUG_CPUS_PER_NODE=""
 WP_MAIN_MEM_PER_NODE_MB=""; WP_DEBUG_MEM_PER_NODE_MB=""
 WP_MAIN_NUMA_CORES=""; WP_MAX_CORES=""
+WP_MAX_NODES=""           # most nodes one job may have (partition MaxNodes / QOS); empty = none known
 WP_INTERCONNECT=""; WP_INTERCONNECT_DETAIL=""; WP_ETH_SPEED_MBS=""   # the network (LPLANE)
 # Pipeline policy (asked in section 7; not hardcoded in the stage scripts).
 WP_TEST_WALLTIME_MIN=""    # debug/test partition walltime cap (min); VASP runs this minus the analysis margin
@@ -187,6 +190,7 @@ while [[ $# -gt 0 ]]; do
         --main-mem)         _cli_int WP_MAIN_MEM_PER_NODE_MB "${2:?}" "--main-mem"; shift 2 ;;
         --debug-mem)        _cli_int WP_DEBUG_MEM_PER_NODE_MB "${2:?}" "--debug-mem"; shift 2 ;;
         --max-cores)        _cli_int WP_MAX_CORES "${2:?}" "--max-cores"; shift 2 ;;
+        --max-nodes)        _cli_int WP_MAX_NODES "${2:?}" "--max-nodes"; shift 2 ;;
         --alloc-profile)    _cli_profile WP_ALLOC_PROFILE "${2:?}" "--alloc-profile"; shift 2 ;;
         --interconnect)     case "${2:-}" in
                                 infiniband|omnipath|roce|slingshot|ethernet|unknown) _cli WP_INTERCONNECT "$2" ;;
@@ -923,6 +927,24 @@ ask WP_MAX_CORES "Max total cores per job" "$WP_MAX_CORES" \
     "The most cores ONE production job may hold. This is your allocation's limit, not the machine's size. vasp-recommend-slurm REFUSES to recommend a layout above it rather than write a script the scheduler would reject."
 echo
 
+# ---- 5. max nodes ----
+# The core cap alone does not bound the NODES: with the balanced profile an
+# even split can need more nodes than cap / cores-per-node (189 ranks on
+# 48-core nodes is 7 nodes of 27), and a partition whose MaxNodes is lower
+# rejects the job.
+info "Maximum nodes one job may have (partition MaxNodes / QOS)"
+detected_nodes="$(detect_node_cap "$WP_MAIN_PARTITION")"
+if [[ -n "$detected_nodes" ]]; then note "  detected limit: ${detected_nodes} nodes"; wp_why
+else note "  no node limit found in SLURM -- leave empty if there is none."; fi
+: "${WP_MAX_NODES:=$detected_nodes}"
+ask WP_MAX_NODES "Max nodes per job (empty = no limit)" "$WP_MAX_NODES" \
+    "The most nodes ONE production job may be given. vasp-recommend-slurm does not offer a layout that needs more, because SLURM rejects it."
+if [[ -n "$WP_MAX_NODES" && ! "$WP_MAX_NODES" =~ ^[1-9][0-9]*$ ]]; then
+    warn "max nodes '$WP_MAX_NODES' is not a positive whole number -- leaving it empty (no limit)."
+    WP_MAX_NODES=""
+fi
+echo
+
 # ---- 5a. how the ranks are laid out on the nodes ----
 : "${WP_ALLOC_PROFILE:=whole-nodes}"
 info "How this cluster hands out cores"
@@ -1067,7 +1089,7 @@ if [[ -f "$CONF" ]]; then
     _managed=" WP_EMAIL WP_MODULE_CMD WP_MODULE_PURGE WP_VASP_MODULES WP_VASP_STD \
 WP_VASP_GAM WP_VASP_NCL WP_VASP_LD_LIBRARY_PATH WP_EXTRA_ENV WP_MAIN_PARTITION \
 WP_DEBUG_PARTITION WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
-WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB WP_MAIN_NUMA_CORES WP_MAX_CORES \
+WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB WP_MAIN_NUMA_CORES WP_MAX_CORES WP_MAX_NODES \
 WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN WP_MEM_UTIL_MIN \
 WP_MEM_UTIL WP_GW_NODE_FRAC WP_ALLOC_PROFILE WP_DEBUG_MAX_CORES \
 WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN WP_INTERCONNECT WP_INTERCONNECT_DETAIL WP_ETH_SPEED_MBS "
@@ -1091,7 +1113,7 @@ fi
              WP_MAIN_PARTITION WP_DEBUG_PARTITION \
              WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
              WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB \
-             WP_MAIN_NUMA_CORES WP_MAX_CORES WP_ALLOC_PROFILE \
+             WP_MAIN_NUMA_CORES WP_MAX_CORES WP_MAX_NODES WP_ALLOC_PROFILE \
              WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN \
              WP_MEM_UTIL_MIN WP_MEM_UTIL \
              WP_GW_NODE_FRAC \
@@ -1126,6 +1148,7 @@ echo "    VASP modules    : ${WP_VASP_MODULES:-(none)}  [$WP_MODULE_CMD]"
 echo "    main partition  : $WP_MAIN_PARTITION  (${WP_MAIN_CPUS_PER_NODE} cores, ${WP_MAIN_MEM_PER_NODE_MB} MB/node)"
 echo "    debug partition : $WP_DEBUG_PARTITION  (${WP_DEBUG_CPUS_PER_NODE} cores, ${WP_DEBUG_MEM_PER_NODE_MB} MB/node)"
 echo "    max cores/job   : $WP_MAX_CORES"
+echo "    max nodes/job   : ${WP_MAX_NODES:-(no limit known)}"
 echo "    interconnect    : ${WP_INTERCONNECT}${WP_INTERCONNECT_DETAIL:+  (${WP_INTERCONNECT_DETAIL})}"
 echo "    test walltime   : ${WP_TEST_WALLTIME_MIN} min   mem policy: >=${WP_MEM_UTIL_MIN} (target ${WP_MEM_UTIL})"
 echo "    chunk walltime  : ${WP_CHUNK_WALLTIME_MIN} min (margin ${WP_CHUNK_MARGIN_MIN} min)   -- one chunk of a chained relax/SCF"
