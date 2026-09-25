@@ -14,7 +14,10 @@
 #   sacct    answers from files the test writes: per-job memory and state, and
 #            a queue history for the study.
 #   squeue   says a job is alive only if the test said so.
-#   scontrol reports a partition MaxTime the test chose.
+#   scontrol reports a partition MaxTime the test chose, and its priority
+#            settings (show config) when the test wrote them.
+#   sshare, sprio, sacctmgr   the test's answer, else a controller that
+#            cannot be reached.
 #
 # Every chain command runs in a subshell whose PATH starts with the fakes and
 # otherwise holds only /usr/bin:/bin -- so the real sacct and sbatch cannot be
@@ -117,9 +120,22 @@ EOS
 #!/bin/bash
 if [[ $1 == show && $2 == partition ]]; then
     echo "PartitionName=$3 AllowGroups=ALL Default=NO MaxTime=${FAKE_MAXTIME:-UNLIMITED} MinNodes=0"
+elif [[ $1 == show && $2 == config && -f "$FAKE_DIR/config" ]]; then
+    cat "$FAKE_DIR/config"
 fi
 exit 0
 EOS
+    # sshare, sprio, sacctmgr: the test's answer when it wrote one, else what
+    # a login node with no reachable controller says.
+    local c
+    for c in sshare sprio sacctmgr; do
+        cat > "$f/bin/$c" <<EOS
+#!/bin/bash
+if [[ -f "\$FAKE_DIR/$c" ]]; then cat "\$FAKE_DIR/$c"; exit 0; fi
+echo "$c: fatal: Could not establish a configuration source" >&2
+exit 1
+EOS
+    done
     cat > "$f/bin/srun" <<'EOS'
 #!/usr/bin/env python3
 """A fake VASP. One line of $FAKE_DIR/plan per call, key=value:

@@ -173,17 +173,23 @@ must_refuse "vasp-relax-loop --study points at the command that does it now" "ba
 # ===========================================================================
 # In a calculation folder it reads the job from slurm_vasptest.sh -- here 1
 # node, 4 ranks, 8 GB, --time=04:00:00 -- and reports what the queue did to
-# jobs of that shape, in broad walltime bands. Against the history above:
-#   up to 1 h:  the twelve 1-h jobs, all waited 2 h
-#   1 to 4 h:   twelve 2-h jobs (5 min) and twelve 4-h jobs (4 h): median
-#               (5 + 240)/2 min = 2.0 h, 9 in 10 within 4 h
-#   the job as written (4 h) falls in 1 to 4 h: about 2.0 h
+# jobs of that shape: the quartiles of the wait down, broad walltime bands
+# across. Against the history above (quartiles by linear interpolation):
+#   0-1 h:  the twelve 1-h jobs, all waited 2 h: 2.0 h, 2.0 h, 2.0 h
+#   1-4 h:  twelve 2-h jobs (5 min) and twelve 4-h jobs (4 h), 24 sorted:
+#           Q1 at rank 5.75 = 5 min, Q2 (5 + 240)/2 min = 2.0 h,
+#           Q3 at rank 17.25 = 4.0 h
+#   the job as written (4 h) falls in 1-4 h: about 2.0 h
 # It estimates no run time: that is vasp-relax-loop's, from vasp-test.
 out=$(ch_backfill "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 2.0 h. Of the 24 jobs of your size that asked for 1 to 4 h' <<<\"\$out\"" \
       "the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=$rc)"
-ok_if "grep -qE '^  up to 1 h +2.0 h +2.0 h +12\$' <<<\"\$out\" && grep -qE '^  1 to 4 h +2.0 h +4.0 h +24\$' <<<\"\$out\"" \
-      "the table: one row per broad band, half-started and 9-in-10, and how many jobs"
+ok_if "grep -q 'a quarter started within 5 min, half within 2.0 h, three quarters within 4.0 h' <<<\"\$out\"" \
+      "and its three quartiles, in words: 5 min, 2.0 h, 4.0 h"
+ok_if "grep -qE '^  walltime asked +0-1 h +1-4 h\$' <<<\"\$out\" && grep -qE '^  Q1  \(25 % within\) +2.0 h +5 min\$' <<<\"\$out\" \
+       && grep -qE '^  Q2  \(50 % within\) +2.0 h +2.0 h\$' <<<\"\$out\" && grep -qE '^  Q3  \(75 % within\) +2.0 h +4.0 h\$' <<<\"\$out\" \
+       && grep -qE '^  jobs +12 +24\$' <<<\"\$out\"" \
+      "the table: the quartiles down, one column per walltime band, and how many jobs"
 ok_if "grep -q 'your size = 1 node, 2-8 cores, 3-23 GB' <<<\"\$out\"" \
       "and it says in numbers what 'your size' means"
 ok_if "! grep -qiE 'ionic|RECOMMENDATION|RUN TIME|NSW' <<<\"\$out\"" \
@@ -280,10 +286,14 @@ ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 36 min. Of the 10 jobs of 
       "the 7-day job waits about 36 min: the median of the 10 similar week-long jobs"
 ok_if "grep -q 'Your job 13276000 here asked for 7 days and waited 12 min' <<<\"\$out\"" \
       "and it reports what the folder's own job waited"
-ok_if "grep -qE '^  4 to 7 days +36 min +37 min +10\$' <<<\"\$out\" && ! grep -q 'up to 1 h' <<<\"\$out\"" \
-      "the table shows jobs of this size only -- the 76 short jobs of 4 cores are not"
-ok_if "(( \$(wc -l <<<\"\$out\") <= 15 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\"" \
-      "in $(wc -l <<<"$out") lines, with no machine line"
+# The ten waits, sorted: 35 35 35 35 36 36 36 37 37 37 min -> Q1 35, Q2 36,
+# Q3 at rank 6.75 = 36.75, printed 37 min.
+ok_if "grep -qE '^  walltime asked +4-7 d\$' <<<\"\$out\" && grep -qE '^  Q1  \(25 % within\) +35 min\$' <<<\"\$out\" \
+       && grep -qE '^  Q2  \(50 % within\) +36 min\$' <<<\"\$out\" && grep -qE '^  Q3  \(75 % within\) +37 min\$' <<<\"\$out\" \
+       && grep -qE '^  jobs +10\$' <<<\"\$out\"" \
+      "the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not"
+ok_if "(( \$(wc -l <<<\"\$out\") <= 21 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\"" \
+      "in $(wc -l <<<"$out") lines, fairshare included, with no machine line"
 
 # ===========================================================================
 # 8b. SANTOS DUMONT: a 7-day job on a partition where nobody asks for more than 4
@@ -320,7 +330,7 @@ EOS
 sout=$(ch_backfill "$s" 2>&1)
 ok_if "grep -q \"It asks for 7 days, more than the partition's MaxTime of 4 days: it will not start\" <<<\"\$sout\"" \
       "with MaxTime known, a job above it is said not to start"
-ok_if "grep -qE '^  2 to 4 days +31.7 h' <<<\"\$sout\" && grep -qE '^  1 to 4 h +60 s' <<<\"\$sout\" && grep -qE '^  4 to 12 h +3.3 h' <<<\"\$sout\"" \
+ok_if "grep -qE '^  walltime asked +1-4 h +4-12 h +2-4 d\$' <<<\"\$sout\" && grep -qE '^  Q2  \(50 % within\) +60 s +3.3 h +31.7 h\$' <<<\"\$sout\"" \
       "and the table gives the bands the history has: 60 s, 3.3 h, 31.7 h"
 
 # The same folder with no timing data at all: the queue answer is the same --
@@ -339,5 +349,119 @@ rm -f "$d"/VASP-13276000.*
 ch_run "$d" >/dev/null 2>&1
 ok_if "[[ '$(ch_state "$d" chain_wall_min)' == 5760 && '$(ch_state "$d" chain_wall_source)' == backfill-study ]]" \
       "vasp-relax-loop, from vasp-test's data and backfill-study's waits, picks 96-h chunks ($(ch_state "$d" chain_wall_min) min)"
+
+# ===========================================================================
+# 9. FAIRSHARE NOW: where the user stands in today's priority order
+# ===========================================================================
+# From scontrol show config, sshare -a and sprio, as SLURM defines them:
+# priority = sum of weight x factor; the age factor reaches 1 at
+# PriorityMaxAge. The fixture, and the answers by hand:
+#   weights fairshare 5000, age 2000 over 14 days: one day of waiting is
+#     2000/14 = 142.9 points, so 0.1 of factor (500 points) = 3.5 days
+#   alice, account fisica, factor 0.420 -> 0.420 x 5000 = 2100 points
+#   user associations: root 1.000, alice 0.420, ana 0.980, beto 0.620,
+#     carla 0.700, dani 0.990 -> 5 of 6 above her
+#   fisica: 25.0 % of the shares, 31.0 % of the use; alice 20.0 %, 53.7 %
+#   pending on fakepart: 6 jobs, 4 users. Fairshare terms of the others:
+#     ana 4900, beto 3100 above 2100; carla 1500 x 2 below -> 2
+#   her job 700001 (3321): 7950, 5500, 5400 above -> 3
+#   her job 700006 (2000): 3321, 7950, 3100, 5500, 5400 above -> 5
+fd=$(ch_setup fair); ff="$fd.fake"
+_fscfg(){ # _fscfg FLAGS WEIGHT_FAIRSHARE [TYPE]
+    printf '%s\n' "PriorityDecayHalfLife   = 3-00:00:00" "PriorityFlags           = $1" \
+        "PriorityMaxAge          = 14-00:00:00" "PriorityUsageResetPeriod = NONE" \
+        "PriorityType            = ${3:-priority/multifactor}" "PriorityWeightAge       = 2000" \
+        "PriorityWeightAssoc     = 0" "PriorityWeightFairShare = $2" "PriorityWeightJobSize   = 1000" \
+        "PriorityWeightPartition = 1000" "PriorityWeightQOS       = 0" "PriorityWeightTRES      = (null)" \
+        > "$ff/config"
+}
+cat > "$ff/sshare.all" <<'EOS'
+root|||0.000000|948323423||1.000000|
+ root|root|1|0.500000|0|0.000000|1.000000|inf
+ fisica||1|0.250000|223344556|0.310000||0.806452
+  fisica|alice|1|0.200000|120000000|0.537300|0.420000|0.372232
+  fisica|ana|1|0.200000|0|0.000000|0.980000|inf
+  fisica|beto|1|0.200000|50000000|0.223870|0.620000|0.893376
+ quimica||1|0.250000|100000000|0.105000||2.380952
+  quimica|carla|1|0.500000|100000000|1.000000|0.700000|0.500000
+  quimica|dani|1|0.500000|0|0.000000|0.990000|inf
+EOS
+cat > "$ff/sprio.all" <<'EOS'
+    700001      alice       3321       2100
+    700002        ana       7950       4900
+    700003       beto       3100       3100
+    700004      carla       5500       1500
+    700005      carla       5400       1500
+    700006      alice       2000       2100
+EOS
+cp "$ff/sshare.all" "$ff/sshare"; cp "$ff/sprio.all" "$ff/sprio"; _fscfg "" 5000
+_fs(){ USER=alice LOGNAME=alice ch_backfill "$fd" --partition fakepart --nodes 1 --cpus 4 \
+          --mem-mb 8192 --time 240 "$@" 2>&1; }
+fout=$(_fs); rc=$?
+ok_if "(( rc == 0 )) && grep -q '^FAIRSHARE NOW   (Fair Tree)\$' <<<\"\$fout\" \
+       && grep -q '^  your factor   0.420   alice in account fisica; 1.000 is the top-ranked user\$' <<<\"\$fout\"" \
+      "Fair Tree: her factor, her account, and what 1.000 means (rc=$rc)"
+ok_if "grep -q '^  above you     5 of the 6 user associations (user + account) have a higher factor\$' <<<\"\$fout\"" \
+      "5 of the 6 user associations rank above her"
+ok_if "grep -q 'account fisica: 25.0 % of the shares, 31.0 % of the use, among its sibling accounts' <<<\"\$fout\" \
+       && grep -q 'alice: 20.0 % of the shares, 53.7 % of the use, within fisica' <<<\"\$fout\"" \
+      "shares against use, for her account among its siblings and for her within it"
+ok_if "grep -q '^  weights       fairshare 5000, age 2000 (full after 14 days), job size 1000, partition 1000, QOS 0\$' <<<\"\$fout\"" \
+      "the weights, as scontrol show config gives them"
+ok_if "grep -q 'your factor adds 2100 points' <<<\"\$fout\" && grep -q '0.1 of factor = 500 points = what 3.5 days of waiting add (age)' <<<\"\$fout\"" \
+      "what her factor is worth: 2100 points; 0.1 of factor = 3.5 days of waiting"
+ok_if "grep -q '^  pending now   6 jobs of 4 users on fakepart; 2 carry more fairshare points than yours\$' <<<\"\$fout\"" \
+      "the pending jobs now: 6 of 4 users, 2 with more fairshare points than hers"
+ok_if "grep -q 'your job 700001: priority 3321, 3 pending jobs above it' <<<\"\$fout\" \
+       && grep -q 'your job 700006: priority 2000, 5 pending jobs above it' <<<\"\$fout\"" \
+      "and where each of her own pending jobs stands: 3 and 5 above"
+ok_if "grep -q 'past use counts half after 3 days (PriorityDecayHalfLife)' <<<\"\$fout\"" \
+      "how fast her usage fades: half after 3 days"
+
+_fscfg "NO_FAIR_TREE" 5000; fout=$(_fs)
+ok_if "grep -q '^FAIRSHARE NOW   (classic)\$' <<<\"\$fout\" && grep -q '1.000 unused, 0.500 exactly your share' <<<\"\$fout\" \
+       && grep -q 'normalized shares 0.2000, effective usage 0.5373; factor = 2^(-usage/shares)' <<<\"\$fout\"" \
+      "PriorityFlags=NO_FAIR_TREE: the classic scale, 0.5 = exactly one's share"
+_fscfg "" 0; fout=$(_fs)
+ok_if "grep -q 'PriorityWeightFairshare is 0: fairshare does not change priority here' <<<\"\$fout\" && ! grep -q 'points' <<<\"\$fout\"" \
+      "a fairshare weight of 0 is said, and no points are claimed"
+_fscfg "" 0 priority/basic; fout=$(_fs)
+ok_if "grep -q 'PriorityType=priority/basic: jobs start in the order they were submitted (FIFO); there is no fairshare' <<<\"\$fout\" \
+       && ! grep -q 'your factor' <<<\"\$fout\"" \
+      "priority/basic: FIFO, and no fairshare invented"
+
+# PrivateData: sshare and sprio show her own rows only.
+_fscfg "" 5000
+grep -v -e '|ana|' -e '|beto|' -e '|carla|' -e '|dani|' -e ' root|root' -e 'quimica' "$ff/sshare.all" > "$ff/sshare"
+grep alice "$ff/sprio.all" > "$ff/sprio"
+fout=$(_fs)
+ok_if "grep -q 'above you     not visible: sshare shows only your own associations' <<<\"\$fout\" \
+       && grep -q 'pending now   sprio lists only your own jobs on fakepart' <<<\"\$fout\" \
+       && grep -q 'your job 700006: priority 2000, 1 pending job above it' <<<\"\$fout\"" \
+      "what the cluster hides is said to be hidden, not counted as zero"
+
+# Two accounts: the job's --account, else her default (sacctmgr).
+{ cat "$ff/sshare.all"; echo "  quimica|alice|1|0.500000|0|0.000000|0.950000|inf"; } > "$ff/sshare"
+cp "$ff/sprio.all" "$ff/sprio"; echo "fisica" > "$ff/sacctmgr"
+fout=$(_fs --account quimica)
+ok_if "grep -q '^  your factor   0.950   alice in account quimica' <<<\"\$fout\"" "--account quimica: that account's factor"
+fout=$(_fs)
+ok_if "grep -q '^  your factor   0.420   alice in account fisica' <<<\"\$fout\" \
+       && grep -q 'you have 2 accounts (fisica, quimica); this is fisica, your default' <<<\"\$fout\"" \
+      "without it, her default account, and a note that there are two"
+
+# Nothing to ask: one line, and the queue report above it as before.
+rm -f "$ff/config" "$ff/sshare" "$ff/sprio" "$ff/sacctmgr"
+fout=$(_fs); rc=$?
+ok_if "(( rc == 0 )) && [[ \$(sed -n '/^FAIRSHARE NOW/,\$p' <<<\"\$fout\" | wc -l) == 2 ]] \
+       && grep -q '^  not available here: scontrol show config shows no Priority settings; sshare failed' <<<\"\$fout\"" \
+      "with no scheduler to ask: one line saying so, and why (rc=$rc)"
+fout=$(_fs --no-fairshare)
+ok_if "! grep -q 'FAIRSHARE' <<<\"\$fout\"" "--no-fairshare leaves it out"
+_fscfg "" 5000; cp "$ff/sshare.all" "$ff/sshare"; cp "$ff/sprio.all" "$ff/sprio"
+fout=$(USER=alice ch_backfill "$fd" --machine --partition fakepart --nodes 1 --cpus 4 \
+        --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10 2>&1)
+ok_if "! grep -q 'FAIRSHARE' <<<\"\$fout\" && grep -q '^WP_BACKFILL_STUDY' <<<\"\$fout\"" \
+      "the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime"
 
 exit $(( FAIL_N > 0 ))

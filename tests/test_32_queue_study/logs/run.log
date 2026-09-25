@@ -17,7 +17,8 @@
   [32m[ OK ][0m --no-queue-study uses the profile's walltime and runs no study
   [32m[ OK ][0m vasp-relax-loop --study points at the command that does it now
   [32m[ OK ][0m the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=0)
-  [32m[ OK ][0m the table: one row per broad band, half-started and 9-in-10, and how many jobs
+  [32m[ OK ][0m and its three quartiles, in words: 5 min, 2.0 h, 4.0 h
+  [32m[ OK ][0m the table: the quartiles down, one column per walltime band, and how many jobs
   [32m[ OK ][0m and it says in numbers what 'your size' means
   [32m[ OK ][0m no run-time estimate, no recommendation: the queue only
   [32m[ OK ][0m it creates nothing and submits nothing
@@ -34,8 +35,8 @@
   [32m[ OK ][0m --machine without the chain's step estimate is refused (rc=2)
   [32m[ OK ][0m the 7-day job waits about 36 min: the median of the 10 similar week-long jobs
   [32m[ OK ][0m and it reports what the folder's own job waited
-  [32m[ OK ][0m the table shows jobs of this size only -- the 76 short jobs of 4 cores are not
-  [32m[ OK ][0m in 14 lines, with no machine line
+  [32m[ OK ][0m the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not
+  [32m[ OK ][0m in 21 lines, fairshare included, with no machine line
   [32m[ OK ][0m a MaxTime scontrol does not show is said to be unknown, not left out (rc=0)
   [32m[ OK ][0m a walltime beyond anything in the history gets that fact, not a wait borrowed from shorter jobs
   [32m[ OK ][0m and the commands that show the limit
@@ -43,3 +44,20 @@
   [32m[ OK ][0m and the table gives the bands the history has: 60 s, 3.3 h, 31.7 h
   [32m[ OK ][0m without vasp-test's data the queue report is unchanged (rc=0)
   [32m[ OK ][0m vasp-relax-loop, from vasp-test's data and backfill-study's waits, picks 96-h chunks (5760 min)
+  [32m[ OK ][0m Fair Tree: her factor, her account, and what 1.000 means (rc=0)
+  [32m[ OK ][0m 5 of the 6 user associations rank above her
+  [32m[ OK ][0m shares against use, for her account among its siblings and for her within it
+  [32m[ OK ][0m the weights, as scontrol show config gives them
+  [32m[ OK ][0m what her factor is worth: 2100 points; 0.1 of factor = 3.5 days of waiting
+  [32m[ OK ][0m the pending jobs now: 6 of 4 users, 2 with more fairshare points than hers
+  [32m[ OK ][0m and where each of her own pending jobs stands: 3 and 5 above
+  [32m[ OK ][0m how fast her usage fades: half after 3 days
+  [32m[ OK ][0m PriorityFlags=NO_FAIR_TREE: the classic scale, 0.5 = exactly one's share
+  [32m[ OK ][0m a fairshare weight of 0 is said, and no points are claimed
+  [32m[ OK ][0m priority/basic: FIFO, and no fairshare invented
+  [32m[ OK ][0m what the cluster hides is said to be hidden, not counted as zero
+  [32m[ OK ][0m --account quimica: that account's factor
+  [32m[ OK ][0m without it, her default account, and a note that there are two
+  [32m[ OK ][0m with no scheduler to ask: one line saying so, and why (rc=0)
+  [32m[ OK ][0m --no-fairshare leaves it out
+  [32m[ OK ][0m the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime

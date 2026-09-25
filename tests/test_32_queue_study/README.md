@@ -1,6 +1,6 @@
 # test_32_queue_study
 
-> backfill-study: how long a job waits, and the chunk walltime the chain takes from it
+> backfill-study: how long a job waits, your fairshare now, and the chunk walltime the chain takes from it
 
 ## 1. Definition
 
@@ -8,7 +8,9 @@ Feeds `backfill-study` (`backfill_study.py`) accounting histories whose right
 answer is known in advance. It checks the parsing, the queue wait it reports
 for a job, and the chunk walltime it returns to `vasp-relax-loop`. Then it
 launches the chain against the same histories, to check that the chain takes
-that walltime.
+that walltime. Last, it feeds the fairshare section scheduler answers
+(`scontrol show config`, `sshare`, `sprio`) whose numbers are worked out by
+hand.
 
 ## 2. Purpose
 
@@ -20,6 +22,11 @@ scheduler did (backfill included) to similar jobs; it does not simulate it.
 ionic-step time from `vasp-test`'s measurements, which is its own job and not
 repeated in `backfill-study`. It hands that time over and gets back the chunk
 walltime with the shortest `chunks × (median wait + start-up)`.
+
+Past waits are everyone's. What orders the pending jobs today is their
+priority, and the user's part of it is their fairshare, so the report ends
+with it: data from the scheduler, in SLURM's own definitions. A number read
+wrongly there (a factor, a count of jobs above yours) would be acted on.
 
 The test makes sure the waits are measured correctly (from `Eligible`, like
 with like), that the comparison relaxes and says so when data is thin, and
@@ -49,35 +56,51 @@ About 20 seconds.
 | 4 | 3 jobs per walltime | no proposal, and why; `MaxTime` 150 bounds the candidates and is one |
 | 5 | the chain at 120 min | the same time budget per chunk (6650 s) and the same ramp (3, 6, 11) as the chain |
 | 6 | the chain launched with no `--walltime` | `#SBATCH --time=02:00:00`, source `backfill-study`, the table kept in `wolfpack_chain/backfill_study.txt`; with no data, the profile's 1 h; `--no-queue-study` skips it; `--study` points at `backfill-study` |
-| 7 | `backfill-study` in the folder (4 ranks, 8 GB, `--time=04:00:00`) | in a sentence: about **2.0 h**, from the 24 jobs of its size that asked 1 to 4 h; the table by broad band: up to 1 h **2.0 h** (12 jobs), 1 to 4 h **2.0 h** / 4.0 h (24); "your size" spelled out (1 node, 2–8 cores, 3–23 GB); no run-time estimate and no recommendation; nothing created or submitted |
+| 7 | `backfill-study` in the folder (4 ranks, 8 GB, `--time=04:00:00`) | in a sentence: about **2.0 h**, from the 24 jobs of its size that asked 1 to 4 h, and its quartiles 5 min, 2.0 h, 4.0 h; the table with the quartiles down and the bands across: 0-1 h **2.0 / 2.0 / 2.0 h** (12 jobs), 1-4 h **5 min / 2.0 h / 4.0 h** (24); "your size" spelled out (1 node, 2–8 cores, 3–23 GB); no run-time estimate and no recommendation; nothing created or submitted |
 | 7 | `test_startup_s="10.4"` | the chain reads **10 s**, not 104, and takes backfill-study's 2 h |
 | 7 | the job on the command line, no folder | the same 2.0 h; without `--partition`, the profile's |
 | 7 | no folder and no options; the toolkit's own directory; a folder that does not exist | one message each: not a calculation folder (naming `--nodes --cpus --mem-mb`), or no such folder |
 | 7 | `--machine`, the chain's call | its step estimate in, **2 h** out; with too little data the profile's 60 min; without the step estimate, refused |
-| 8 | the LaMnO3 relaxation (1 × 56 ranks, 46 GB, 7 days; 76 short 4-core jobs and 10 similar week-long jobs that waited 35–37 min) | about **36 min**, from the 10 jobs of its size that asked 4 to 7 days; the folder's own job waited 12 min; the 4-core jobs are not in the table; at most 15 lines |
+| 8 | the LaMnO3 relaxation (1 × 56 ranks, 46 GB, 7 days; 76 short 4-core jobs and 10 similar week-long jobs that waited 35–37 min) | about **36 min**, from the 10 jobs of its size that asked 4 to 7 days; one column 4-7 d: **35 / 36 / 37 min**, 10 jobs; the folder's own job waited 12 min; the 4-core jobs are not in the table; at most 21 lines, fairshare included |
 | 8b | Santos Dumont: 1 × 48 cores, 73 GB, 7 days, where nobody asked for more than 4 days; `scontrol` shows no MaxTime | "MaxTime: not shown by scontrol"; "No job asked for more than 4 days … yours asks for 7 days", the commands that show the limit, and **no** wait borrowed from the 4-day jobs |
-| 8b | the same with MaxTime 4 days | "more than the partition's MaxTime of 4 days: it will not start"; the table 60 s, 3.3 h, 31.7 h |
+| 8b | the same with MaxTime 4 days | "more than the partition's MaxTime of 4 days: it will not start"; the median row 60 s, 3.3 h, 31.7 h under 1-4 h, 4-12 h, 2-4 d |
 | 8 | the LaMnO3 folder without vasp-test's data | the same queue report: it never needed it |
 | 8 | `vasp-relax-loop` launched there | its step estimate (263 s × 12 × 1.15) → **96-h** chunks from backfill-study |
+| 9 | Fair Tree; weights fairshare 5000, age 2000 over 14 days; alice in fisica, factor 0.420 | the factor and "1.000 is the top-ranked user"; **5 of 6** associations above; fisica 25.0 % of the shares / 31.0 % of the use, alice 20.0 % / 53.7 %; the weights; **2100** points, and 0.1 of factor = 500 points = **3.5 days** of waiting (2000/14 a day) |
+| 9 | 6 pending jobs of 4 users; hers at priority 3321 and 2000 | **2** carry more fairshare points than her 2100 (4900, 3100; not 1500 × 2); **3** and **5** pending jobs above her two; usage halves after 3 days |
+| 9 | `PriorityFlags=NO_FAIR_TREE` | "(classic)", "0.500 exactly your share", normalized shares 0.2000 against effective usage 0.5373 |
+| 9 | fairshare weight 0; `priority/basic` | "does not change priority here", and no points claimed; "FIFO; there is no fairshare", and no factor |
+| 9 | `sshare` and `sprio` showing only her own rows (PrivateData) | "not visible", "sprio lists only your own jobs": hidden, not counted as zero |
+| 9 | two accounts | `--account quimica` gives quimica's 0.950; without it, her default from `sacctmgr` (fisica, 0.420) and a note naming both |
+| 9 | no scheduler to ask; `--no-fairshare`; the chain's `--machine` call | one line saying why; the section left out; the chain's answer without it |
 
 ## 5. Obtained results
 
-All forty-five as expected. The Santos Dumont case, as it now reads:
+All sixty-three as expected. The fairshare section of case 9, as it reads:
 
 ```
-YOUR JOB
-  No job on fakepart asked for more than 4 days in the last 30 days; yours asks for 7 days.
-  If that is the partition's limit, this job will not start. Check:
-      scontrol show partition fakepart | grep -o 'MaxTime=[^ ]*'
-      sacctmgr show qos format=name,maxwall
-
-HOW LONG JOBS OF YOUR SIZE WAITED, BY THE WALLTIME THEY ASKED FOR
-  asked for           half started within   9 in 10 within   jobs
-  1 to 4 h                           60 s             60 s     20
-  4 to 12 h                         3.3 h            3.3 h     20
-  2 to 4 days                      31.7 h           31.7 h     20
-  your size = 1 node, 24-96 cores, 24-219 GB. Bands with fewer than 8 such jobs are not shown.
+FAIRSHARE NOW   (Fair Tree)
+  your factor   0.420   alice in account fisica; 1.000 is the top-ranked user
+  above you     5 of the 6 user associations (user + account) have a higher factor
+  shares, use   account fisica: 25.0 % of the shares, 31.0 % of the use, among its sibling accounts
+                alice: 20.0 % of the shares, 53.7 % of the use, within fisica
+  weights       fairshare 5000, age 2000 (full after 14 days), job size 1000, partition 1000, QOS 0
+  worth         your factor adds 2100 points to each of your jobs' priority
+                0.1 of factor = 500 points = what 3.5 days of waiting add (age)
+  pending now   6 jobs of 4 users on fakepart; 2 carry more fairshare points than yours
+                your job 700001: priority 3321, 3 pending jobs above it
+                your job 700006: priority 2000, 5 pending jobs above it
+  decay         past use counts half after 3 days (PriorityDecayHalfLife)
 ```
+
+**Quartiles and fairshare, 2026-09-24.** The user asked for the quartiles down
+the table and for an analysis of the current fairshare. The table now has Q1,
+Q2 (the median) and Q3 as rows and one column per walltime band; the sentence
+gives the same three numbers. The fairshare section is new. On its first run
+one assertion failed, and it was a package bug: with a fairshare weight of 0
+the report still said "4 carry more fairshare points than yours", counting
+points that weigh nothing. That clause now needs a weight above 0. Against the
+previous version, 19 of the 63 assertions fail.
 
 **Made readable on 2026-09-24.** A user found the per-walltime table obscure:
 fifteen fine rows, each compared its own way ("your size" beside "your node
@@ -106,11 +129,14 @@ with their neighbours' waits.
 Exact: parsed values, waits, the chosen walltime, chunk counts, similarity
 levels, and the `#SBATCH --time` of the rendered chunk. The histories use
 constant waits per walltime (or 35–37 min), so no percentile convention can
-change the answer.
+change the answer. The quartiles are the linear-interpolation ones, and the
+test's comments work them out rank by rank. The fairshare lines are exact too:
+the factor, the counts, the percentages, the points and the days, each
+against the arithmetic in the check's comments.
 
 ## 7. Verdict
 
-**PASSED** — 45 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 63 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 
@@ -122,3 +148,17 @@ change the answer.
 - Backfill scheduling starts lower-priority jobs early only if they do not
   delay higher-priority ones — which depends on their time limit —
   <https://slurm.schedmd.com/sched_config.html>
+- Job priority = sum of weight × factor, each factor in [0, 1]; the age factor
+  maxes out at `PriorityMaxAge` (default 7 days); `PriorityDecayHalfLife`;
+  Fair Tree the default since 19.05 —
+  <https://slurm.schedmd.com/priority_multifactor.html>
+- Fair Tree: the factor is the user's rank over the number of user
+  associations, 1.0 the top one; LevelFS = shares / usage among siblings —
+  <https://slurm.schedmd.com/fair_tree.html>
+- Classic: F = 2^(-U/S), 0.5 = exactly one's share; `PriorityFlags=NO_FAIR_TREE`
+  — <https://slurm.schedmd.com/classic_fair_share.html>
+- `sshare` fields (NormShares, EffectvUsage, FairShare, LevelFS; under Fair Tree
+  normalized among siblings) — <https://slurm.schedmd.com/sshare.html>
+- `sprio`: the pending jobs' priority and weighted factors —
+  <https://slurm.schedmd.com/sprio.html>
+- `PriorityType=priority/basic` is FIFO — <https://slurm.schedmd.com/slurm.conf.html>

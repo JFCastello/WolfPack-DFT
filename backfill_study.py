@@ -2,10 +2,13 @@
 """backfill_study.py  (on PATH as: backfill-study)
 
 How long a job waits in this cluster's queue, from what the queue has done to
-jobs shaped like it. Nothing else: it estimates no run time.
+jobs shaped like it, and where you stand in its priority order today (your
+fairshare: scontrol show config, sshare, sprio). Nothing else: it estimates
+no run time.
 
     cd <calc folder>        # reads the job from slurm_vasptest.sh (or slurm.sh)
-    backfill-study          # its expected wait, and the waits at other walltimes
+    backfill-study          # its expected wait, the quartiles of the waits at
+                            # each walltime, and your fairshare now
 
     backfill-study --partition main --nodes 1 --cpus 40 --mem-mb 80000 --time 2-00:00:00
 
@@ -670,6 +673,9 @@ def from_folder(folder: str) -> Tuple[Dict, List[str]]:
     part = sbatch_value(job, "partition")
     if part:
         val["partition"], val["partition_from"] = part, script
+    m = re.search(r"^#SBATCH\s+(?:--account=|-A\s*)(\S+)", job, re.MULTILINE)
+    if m:
+        val["account"] = m.group(1)
     tw = parse_walltime_arg(sbatch_value(job, "time") or "")
     if tw:
         val["wall_min"] = tw
@@ -754,13 +760,22 @@ def fmt_h(s: Optional[float]) -> str:
     return f"{s / 86400:.1f} days"
 
 
+def fmt_cell(s: Optional[float]) -> str:
+    """fmt_h, short enough for a table cell: 40 s, 36 min, 5.2 h, 4.6 d."""
+    t = fmt_h(s)
+    return t[:-5] + " d" if t.endswith(" days") else t
+
+
 # Broad walltime bands for the table people read. Fine bins spread a month of
 # history thin, one noisy row at a time; a few wide bands keep enough jobs in
-# each to mean something.
-BANDS = ((0, 60, "up to 1 h"), (60, 240, "1 to 4 h"), (240, 720, "4 to 12 h"),
-         (720, 1440, "12 h to 1 day"), (1440, 2880, "1 to 2 days"),
-         (2880, 5760, "2 to 4 days"), (5760, 10080, "4 to 7 days"),
-         (10080, float("inf"), "more than 7 days"))
+# each to mean something. (lo, hi, words for sentences, a table heading)
+BANDS = ((0, 60, "up to 1 h", "0-1 h"), (60, 240, "1 to 4 h", "1-4 h"),
+         (240, 720, "4 to 12 h", "4-12 h"), (720, 1440, "12 h to 1 day", "12-24 h"),
+         (1440, 2880, "1 to 2 days", "1-2 d"), (2880, 5760, "2 to 4 days", "2-4 d"),
+         (5760, 10080, "4 to 7 days", "4-7 d"), (10080, float("inf"), "more than 7 days", "> 7 d"))
+# The table's rows: the quartiles of the wait.
+QUARTILES = (("Q1  (25 % within)", "p25_s"), ("Q2  (50 % within)", "median_s"),
+             ("Q3  (75 % within)", "p75_s"))
 LEVEL_WORDS = {"nodes + cores + memory": "your size",
                "nodes + cores": "your node and core count",
                "nodes": "your node count",
@@ -768,7 +783,7 @@ LEVEL_WORDS = {"nodes + cores + memory": "your size",
 
 
 def band_of(limit_min: float) -> Optional[Tuple[float, float, str]]:
-    for lo, hi, label in BANDS:
+    for lo, hi, label, _short in BANDS:
         if lo < limit_min <= hi:
             return (lo, hi, label)
     return None
@@ -787,9 +802,10 @@ def band_table(jobs: Sequence[Job], nodes: int, cpus: int, mem_mb: float,
             b = band_of(j.limit_min)
             if b:
                 acc.setdefault(b[2], []).append(j.wait_s)
-        rows = [{"label": label, "lo": lo, "hi": hi, "n": len(acc[label]),
-                 "median_s": median(acc[label]), "p90_s": percentile(acc[label], 0.90)}
-                for lo, hi, label in BANDS if len(acc.get(label, [])) >= min_jobs]
+        rows = [{"label": label, "short": short, "lo": lo, "hi": hi, "n": len(acc[label]),
+                 "p25_s": percentile(acc[label], 0.25), "median_s": median(acc[label]),
+                 "p75_s": percentile(acc[label], 0.75)}
+                for lo, hi, label, short in BANDS if len(acc.get(label, [])) >= min_jobs]
         if rows:
             return lname, rows
     return None, []
@@ -859,7 +875,8 @@ def machine_line(res: Dict, fallback_min: float) -> str:
 
 def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
                  rows: List[Dict], past: List[Dict], maxtime: Tuple[Optional[float], str],
-                 max_asked_min: Optional[float], days: int, n_jobs: int) -> str:
+                 max_asked_min: Optional[float], days: int, n_jobs: int,
+                 fairshare: Optional[Dict] = None) -> str:
     L: List[str] = []
     part, nodes, cpus, mem = val["partition"], int(val["nodes"]), int(val["cpus"]), val["mem_mb"]
     mt, mt_state = maxtime
@@ -893,8 +910,8 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
         if row:
             L.append(f"  Expected wait: about {fmt_h(row['median_s'])}. Of the {row['n']} jobs of "
                      f"{LEVEL_WORDS.get(level, level)} that asked for {row['label']},")
-            L.append(f"  half started within {fmt_h(row['median_s'])}, and 9 in 10 within "
-                     f"{fmt_h(row['p90_s'])}.")
+            L.append(f"  a quarter started within {fmt_h(row['p25_s'])}, half within "
+                     f"{fmt_h(row['median_s'])}, three quarters within {fmt_h(row['p75_s'])}.")
         else:
             L.append(f"  Not enough jobs of {LEVEL_WORDS.get(level, 'your size')} asked for "
                      f"{b[2] if b else fmt_slurm_time(wall)} to estimate its wait "
@@ -909,18 +926,310 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
 
     # ---- the table ---------------------------------------------------------
     if rows:
+        # The quartiles down, the walltimes across: one column per band.
         L.append(f"HOW LONG JOBS OF {LEVEL_WORDS.get(level, level).upper()} WAITED, "
                  f"BY THE WALLTIME THEY ASKED FOR")
-        L.append(f"  {'asked for':<18}{'half started within':>21}{'9 in 10 within':>17}{'jobs':>7}")
-        for r in rows:
-            L.append(f"  {r['label']:<18}{fmt_h(r['median_s']):>21}{fmt_h(r['p90_s']):>17}{r['n']:>7}")
-        L.append(f"  {LEVEL_WORDS.get(level, level)} = {size_words(level, nodes, cpus, mem)}."
-                 f" Bands with fewer than {MIN_JOBS} such jobs are not shown.")
+        L.append(f"  {'walltime asked':<19}" + "".join(f"{r['short']:>9}" for r in rows))
+        for name, key in QUARTILES:
+            L.append(f"  {name:<19}" + "".join(f"{fmt_cell(r[key]):>9}" for r in rows))
+        L.append(f"  {'jobs':<19}" + "".join(f"{r['n']:>9}" for r in rows))
+        L.append(f"  {LEVEL_WORDS.get(level, level)} = {size_words(level, nodes, cpus, mem)}. "
+                 f"Q1, Q2, Q3: a quarter, half and three quarters")
+        L.append(f"  of those jobs had started within that time. Walltimes with fewer than "
+                 f"{MIN_JOBS} such jobs are not shown.")
     else:
         L.append(f"No walltime band has {MIN_JOBS}+ jobs comparable to yours in the last {days} days.")
+    if fairshare is not None:
+        L.append("")
+        L.extend(fairshare_report(fairshare, part))
     for n in notes:
         L.append(f"  note: {n}")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------- #
+# Fairshare, now
+# --------------------------------------------------------------------------- #
+# The waits above are what the queue did, over the past weeks, to everyone's
+# jobs of your size. What orders the pending jobs TODAY is their priority, and
+# your part of it is your fairshare. Data only, from three commands:
+#
+#   scontrol show config   the priority plugin, its weights, PriorityMaxAge,
+#                          PriorityDecayHalfLife
+#   sshare -a              each association's shares, usage and factor
+#   sprio -p PARTITION     the pending jobs: priority and fairshare term
+#
+# SLURM's own definitions (priority_multifactor.html, fair_tree.html,
+# classic_fair_share.html): priority = sum of weight x factor, every factor
+# in [0, 1]. Under Fair Tree -- the default since 19.05 -- a user's factor is
+# their rank over the number of user associations, 1.0 the top-ranked, and
+# LevelFS = shares / usage among siblings. Under the classic algorithm
+# (PriorityFlags=NO_FAIR_TREE) the factor is 2^(-usage/shares): 1.0 unused,
+# 0.5 exactly one's share. The age factor grows from 0 to 1 over
+# PriorityMaxAge of waiting.
+SSHARE_FIELDS = "Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare,LevelFS"
+
+
+def _run(cmd: Sequence[str], timeout: int = 30) -> Tuple[Optional[str], str]:
+    """(stdout, error): None and the reason when the command cannot answer."""
+    try:
+        p = subprocess.run(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=timeout)
+    except FileNotFoundError:
+        return None, f"{cmd[0]} is not on PATH"
+    except subprocess.TimeoutExpired:
+        return None, f"{cmd[0]} did not answer within {timeout}s"
+    except OSError as exc:
+        return None, f"{cmd[0]}: {exc}"
+    if p.returncode != 0 and not (p.stdout or "").strip():
+        err = [ln.strip() for ln in (p.stderr or "").splitlines() if ln.strip()]
+        return None, f"{cmd[0]} failed" + (f" ({err[-1]})" if err else "")
+    return p.stdout or "", ""
+
+
+def _num(v) -> Optional[float]:
+    try:
+        x = float(str(v).strip())
+    except ValueError:
+        return None
+    return None if math.isnan(x) else x
+
+
+def _me() -> str:
+    u = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    if not u:
+        try:
+            import getpass
+            u = getpass.getuser()
+        except Exception:
+            pass
+    return u
+
+
+def priority_config() -> Tuple[Dict[str, str], str]:
+    """scontrol show config's Priority* settings, keys lower-cased: scontrol
+    prints PriorityWeightFairShare where slurm.conf spells ...Fairshare."""
+    out, err = _run(["scontrol", "show", "config"])
+    if out is None:
+        return {}, err
+    cfg: Dict[str, str] = {}
+    for ln in out.splitlines():
+        m = re.match(r"^\s*(Priority\w+)\s*=\s*(.*?)\s*$", ln)
+        if m:
+            cfg[m.group(1).lower()] = m.group(2)
+    return cfg, ("" if cfg else "scontrol show config shows no Priority settings")
+
+
+def sshare_rows() -> Tuple[List[Dict], str]:
+    """Every association sshare shows: accounts (no user) and users."""
+    out, err = _run(["sshare", "-a", "-P", "-n", "-o", SSHARE_FIELDS])
+    if out is None:
+        return [], err
+    rows = []
+    for ln in out.splitlines():
+        f = ln.split("|")
+        if len(f) < 8:
+            continue
+        rows.append({"account": f[0].strip(), "user": f[1].strip(),
+                     "norm_shares": _num(f[3]), "eff_usage": _num(f[5]),
+                     "factor": _num(f[6]), "level_fs": _num(f[7])})
+    return rows, ("" if rows else "sshare shows no associations")
+
+
+def sprio_rows(partition: str) -> Tuple[List[Dict], str]:
+    """The partition's pending jobs: id, user, priority, fairshare term."""
+    out, err = _run(["sprio", "-h", "-p", partition, "-o", "%i %u %Y %F"])
+    if out is None:
+        return [], err
+    rows = []
+    for ln in out.splitlines():
+        f = ln.split()
+        if len(f) < 4:
+            continue
+        pr, fs = _num(f[2]), _num(f[3])
+        if pr is not None and fs is not None:
+            rows.append({"jid": f[0], "user": f[1], "priority": pr, "fs": fs})
+    return rows, ""
+
+
+def default_account(user: str) -> Optional[str]:
+    out, _ = _run(["sacctmgr", "-n", "-P", "show", "user", user, "format=DefaultAccount"])
+    first = (out or "").strip().splitlines()
+    return first[0].strip() if first and first[0].strip() else None
+
+
+def fairshare_study(partition: str, account: Optional[str] = None) -> Dict:
+    """Where the user stands now. Every piece is optional: what a command
+    cannot tell is recorded as its reason, never guessed."""
+    me = _me()
+    fs: Dict = {"user": me, "notes": []}
+    cfg, fs["config_error"] = priority_config()
+    fs["type"] = cfg.get("prioritytype", "")
+    if fs["type"] == "priority/basic":
+        return fs
+    if cfg:
+        flags = cfg.get("priorityflags", "").upper()
+        fs["algorithm"] = ("classic" if "NO_FAIR_TREE" in flags or "DEPTH_OBLIVIOUS" in flags
+                           else "Fair Tree")
+        fs["weights"] = {k: _num(cfg.get("priorityweight" + k, "0")) or 0.0
+                         for k in ("fairshare", "age", "jobsize", "partition", "qos", "assoc")}
+        fs["weight_tres"] = cfg.get("priorityweighttres", "")
+        fs["max_age_min"] = parse_timelimit_min("", cfg.get("prioritymaxage", ""))
+        fs["half_life_min"] = parse_timelimit_min("", cfg.get("prioritydecayhalflife", ""))
+        fs["reset"] = cfg.get("priorityusageresetperiod", "")
+
+    rows, fs["sshare_error"] = sshare_rows()
+    mine = [r for r in rows if r["user"] == me]
+    if rows and not mine:
+        fs["sshare_error"] = f"sshare shows no association for {me or 'you'}"
+    if mine:
+        accts = [r["account"] for r in mine]
+        pick = account if account in accts else None
+        if account and not pick:
+            fs["notes"].append(f"the job's account {account} is not one of yours in sshare")
+        if pick is None and len(mine) > 1:
+            d = default_account(me)
+            pick = d if d in accts else None
+            why = "your default" if pick else "the first sshare lists"
+            pick = pick or accts[0]
+            fs["notes"].append(f"you have {len(accts)} accounts ({', '.join(accts)}); "
+                               f"this is {pick}, {why}: --account picks another")
+        row = next((r for r in mine if r["account"] == pick), mine[0])
+        fs["mine"] = row
+        fs["account_row"] = next((r for r in rows if not r["user"]
+                                  and r["account"] == row["account"]), None)
+        users = [r for r in rows if r["user"]]
+        fs["n_users"] = len(users)
+        fs["others_visible"] = any(r["user"] != me for r in users)
+        if row["factor"] is not None:
+            fs["n_above"] = sum(1 for r in users
+                                if r["factor"] is not None and r["factor"] > row["factor"])
+            if cfg:
+                fs["term"] = row["factor"] * fs["weights"]["fairshare"]
+
+    if partition:
+        fs["pending"], fs["sprio_error"] = sprio_rows(partition)
+    return fs
+
+
+def _pct(x: Optional[float]) -> str:
+    if x is None:
+        return "?"
+    return "<0.1 %" if 0 < x < 0.001 else f"{100 * x:.1f} %"
+
+
+def fairshare_report(fs: Dict, partition: str) -> List[str]:
+    alg = fs.get("algorithm")
+    L = ["FAIRSHARE NOW" + (f"   ({alg})" if alg else "")]
+    if fs.get("type") == "priority/basic":
+        L.append("  PriorityType=priority/basic: jobs start in the order they were submitted "
+                 "(FIFO); there is no fairshare.")
+        return L
+    me, row, W = fs["user"] or "you", fs.get("mine"), fs.get("weights")
+    if not row and not W:
+        why = "; ".join(e for e in (fs.get("config_error"), fs.get("sshare_error")) if e)
+        L.append(f"  not available here: {why or 'no answer'}.")
+        return L
+    pad = " " * 16
+
+    # ---- your factor, and who is above it ----------------------------------
+    if row and row["factor"] is not None:
+        scale = {"Fair Tree": "1.000 is the top-ranked user",
+                 "classic": "1.000 unused, 0.500 exactly your share"}.get(alg, "")
+        L.append(f"  your factor   {row['factor']:.3f}   {me} in account {row['account']}"
+                 + (f"; {scale}" if scale else ""))
+        if fs.get("others_visible"):
+            L.append(f"  above you     {fs['n_above']} of the {fs['n_users']} user associations "
+                     f"(user + account) have a higher factor")
+        else:
+            L.append("  above you     not visible: sshare shows only your own associations")
+        ar, share = fs.get("account_row"), []
+
+        def known(r):
+            return bool(r) and r["norm_shares"] is not None and r["eff_usage"] is not None
+        if alg == "Fair Tree":
+            # NormShares and EffectvUsage are among siblings here (sshare.html).
+            if known(ar):
+                share.append(f"account {ar['account']}: {_pct(ar['norm_shares'])} of the shares, "
+                             f"{_pct(ar['eff_usage'])} of the use, among its sibling accounts")
+            if known(row):
+                share.append(f"{me}: {_pct(row['norm_shares'])} of the shares, "
+                             f"{_pct(row['eff_usage'])} of the use, within {row['account']}")
+        elif known(row):
+            share.append(f"normalized shares {row['norm_shares']:.4f}, effective usage "
+                         f"{row['eff_usage']:.4f}; factor = 2^(-usage/shares)")
+        for i, s in enumerate(share):
+            L.append(("  shares, use   " if i == 0 else pad) + s)
+    elif fs.get("sshare_error"):
+        L.append(f"  your factor   unknown: {fs['sshare_error']}")
+
+    # ---- what it weighs ----------------------------------------------------
+    if W:
+        age = f"age {W['age']:.0f}"
+        if fs.get("max_age_min"):
+            age += f" (full after {fmt_walltime(fs['max_age_min'])})"
+        parts = [f"fairshare {W['fairshare']:.0f}", age, f"job size {W['jobsize']:.0f}",
+                 f"partition {W['partition']:.0f}", f"QOS {W['qos']:.0f}"]
+        if W["assoc"]:
+            parts.append(f"association {W['assoc']:.0f}")
+        if fs.get("weight_tres") and fs["weight_tres"] != "(null)":
+            parts.append(f"TRES {fs['weight_tres']}")
+        L.append("  weights       " + ", ".join(parts))
+        if W["fairshare"] == 0:
+            L.append(f"{pad}PriorityWeightFairshare is 0: fairshare does not change priority here")
+        elif fs.get("term") is not None:
+            L.append(f"  worth         your factor adds {fs['term']:.0f} points to each of your "
+                     f"jobs' priority")
+            step = 0.1 * W["fairshare"]
+            if W["age"] and fs.get("max_age_min"):
+                per_day = W["age"] / (fs["max_age_min"] / 1440.0)
+                days = step / per_day
+                if days <= fs["max_age_min"] / 1440.0:
+                    L.append(f"{pad}0.1 of factor = {step:.0f} points = what {days:.1f} days of "
+                             f"waiting add (age)")
+                else:
+                    L.append(f"{pad}0.1 of factor = {step:.0f} points, more than waiting ever "
+                             f"adds ({W['age']:.0f})")
+            elif not W["age"]:
+                L.append(f"{pad}waiting adds nothing: PriorityWeightAge is 0")
+    elif fs.get("config_error"):
+        L.append(f"  weights       unknown: {fs['config_error']}")
+
+    # ---- the pending jobs, now ---------------------------------------------
+    if partition and "pending" in fs:
+        pend = fs["pending"]
+        if fs.get("sprio_error"):
+            L.append(f"  pending now   unknown: {fs['sprio_error']}")
+        elif not pend:
+            L.append(f"  pending now   no pending jobs on {partition}")
+        else:
+            others = [p for p in pend if p["user"] != me]
+            if others:
+                line = (f"  pending now   {len(pend)} jobs of {len({p['user'] for p in pend})} "
+                        f"users on {partition}")
+                if fs.get("term") is not None and W and W["fairshare"] > 0:
+                    more = sum(1 for p in others if round(p["fs"]) > round(fs["term"]))
+                    line += f"; {more} carry more fairshare points than yours"
+                L.append(line)
+            else:
+                L.append(f"  pending now   sprio lists only your own jobs on {partition}")
+            for p in sorted((p for p in pend if p["user"] == me),
+                            key=lambda p: -p["priority"])[:3]:
+                ahead = sum(1 for q in pend if q["priority"] > p["priority"])
+                L.append(f"{pad}your job {p['jid']}: priority {p['priority']:.0f}, "
+                         f"{ahead} pending job{'' if ahead == 1 else 's'} above it")
+
+    # ---- how fast it changes -----------------------------------------------
+    hl = fs.get("half_life_min")
+    if hl:
+        L.append(f"  decay         past use counts half after {fmt_walltime(hl)} "
+                 f"(PriorityDecayHalfLife)")
+    elif hl == 0:
+        L.append(f"  decay         none (PriorityDecayHalfLife 0); usage reset: "
+                 f"{fs.get('reset') or '?'}")
+    for n in fs.get("notes", []):
+        L.append(f"  note: {n}")
+    return L
 
 
 # --------------------------------------------------------------------------- #
@@ -944,6 +1253,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--time", dest="wall",
                    help="the walltime the job asks for: minutes, or D-HH:MM:SS")
     p.add_argument("--days", type=int, help="history to read (default 30)")
+    p.add_argument("--account", help="the account for the fairshare (default: the job "
+                   "script's, else yours)")
+    p.add_argument("--no-fairshare", action="store_true",
+                   help="leave out where you stand in the queue's priority now")
     p.add_argument("--mine", action="store_true", help="only your own jobs")
     p.add_argument("--json", default="", help="also write the analysis as JSON here")
     # vasp-relax-loop's call: its own ionic-step estimate and chunk settings.
@@ -959,7 +1272,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     a = p.parse_args(argv)
 
     given = {"partition": a.partition, "nodes": a.nodes, "cpus": a.cpus, "mem_mb": a.mem_mb,
-             "days": a.days}
+             "days": a.days, "account": a.account}
     if a.wall:
         tw = parse_walltime_arg(a.wall)
         if not tw:
@@ -1036,11 +1349,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     past = folder_job_waits(where) if is_calc_folder(where) else []
     if err:
         notes.insert(0, err)
-    print(queue_report(where, val, notes, level, rows, past, maxtime, max_asked, days, len(jobs)))
+    fsh = None if a.no_fairshare else fairshare_study(val["partition"], val.get("account"))
+    print(queue_report(where, val, notes, level, rows, past, maxtime, max_asked, days, len(jobs),
+                       fsh))
     if a.json:
         with open(a.json, "w") as fh:
             json.dump({"inputs": val, "maxtime": maxtime, "level": level, "bands": rows,
-                       "max_asked_min": max_asked, "sacct_error": err}, fh, indent=1, default=str)
+                       "max_asked_min": max_asked, "sacct_error": err, "fairshare": fsh},
+                      fh, indent=1, default=str)
     return 0
 
 
