@@ -49,29 +49,44 @@ About 20 seconds.
 | 4 | 3 jobs per walltime | no proposal, and why; `MaxTime` 150 bounds the candidates and is one |
 | 5 | the chain at 120 min | the same time budget per chunk (6650 s) and the same ramp (3, 6, 11) as the chain |
 | 6 | the chain launched with no `--walltime` | `#SBATCH --time=02:00:00`, source `backfill-study`, the table kept in `wolfpack_chain/backfill_study.txt`; with no data, the profile's 1 h; `--no-queue-study` skips it; `--study` points at `backfill-study` |
-| 7 | `backfill-study` in the folder (4 ranks, 8 GB, `--time=04:00:00`) | the job as written waits **~4 h**; the table: 30 min–1 h **2 h**, 1–2 h **5 min**, 3–4 h **4 h**; no run-time estimate and no recommendation; nothing created or submitted |
+| 7 | `backfill-study` in the folder (4 ranks, 8 GB, `--time=04:00:00`) | in a sentence: about **2.0 h**, from the 24 jobs of its size that asked 1 to 4 h; the table by broad band: up to 1 h **2.0 h** (12 jobs), 1 to 4 h **2.0 h** / 4.0 h (24); "your size" spelled out (1 node, 2–8 cores, 3–23 GB); no run-time estimate and no recommendation; nothing created or submitted |
 | 7 | `test_startup_s="10.4"` | the chain reads **10 s**, not 104, and takes backfill-study's 2 h |
-| 7 | the job on the command line, no folder | the same ~4 h; without `--partition`, the profile's |
+| 7 | the job on the command line, no folder | the same 2.0 h; without `--partition`, the profile's |
 | 7 | no folder and no options; the toolkit's own directory; a folder that does not exist | one message each: not a calculation folder (naming `--nodes --cpus --mem-mb`), or no such folder |
 | 7 | `--machine`, the chain's call | its step estimate in, **2 h** out; with too little data the profile's 60 min; without the step estimate, refused |
-| 8 | the LaMnO3 relaxation (1 × 56 ranks, 46 GB, 7 days; 76 short jobs and 10 similar week-long jobs that waited 35–37 min) | the job waits **~36 min**; the folder's own job waited 12 min; the table has the two ranges with data, each naming what it compared; at most 15 lines |
-| 8 | the same folder without vasp-test's data | the same queue report: it never needed it |
+| 8 | the LaMnO3 relaxation (1 × 56 ranks, 46 GB, 7 days; 76 short 4-core jobs and 10 similar week-long jobs that waited 35–37 min) | about **36 min**, from the 10 jobs of its size that asked 4 to 7 days; the folder's own job waited 12 min; the 4-core jobs are not in the table; at most 15 lines |
+| 8b | Santos Dumont: 1 × 48 cores, 73 GB, 7 days, where nobody asked for more than 4 days; `scontrol` shows no MaxTime | "MaxTime: not shown by scontrol"; "No job asked for more than 4 days … yours asks for 7 days", the commands that show the limit, and **no** wait borrowed from the 4-day jobs |
+| 8b | the same with MaxTime 4 days | "more than the partition's MaxTime of 4 days: it will not start"; the table 60 s, 3.3 h, 31.7 h |
+| 8 | the LaMnO3 folder without vasp-test's data | the same queue report: it never needed it |
 | 8 | `vasp-relax-loop` launched there | its step estimate (263 s × 12 × 1.15) → **96-h** chunks from backfill-study |
 
 ## 5. Obtained results
 
-All thirty-nine as expected. The real case:
+All forty-five as expected. The Santos Dumont case, as it now reads:
 
 ```
-YOUR JOB   slurm_vasptest.sh asks for --time=7-00:00:00
-  expected wait     ~36 min   (3 in 4 within 37 min, 9 in 10 within 37 min; 10 jobs)
-                    jobs of your size (nodes, cores and memory) that asked for 5 days to 7 days
-  already here      job 13276000 asking 7-00:00:00 waited 12 min (RUNNING)
+YOUR JOB
+  No job on fakepart asked for more than 4 days in the last 30 days; yours asks for 7 days.
+  If that is the partition's limit, this job will not start. Check:
+      scontrol show partition fakepart | grep -o 'MaxTime=[^ ]*'
+      sacctmgr show qos format=name,maxwall
 
-WAIT BY WALLTIME ASKED         median    3 in 4   9 in 10   jobs
-  up to 30 min                  2 min     3 min     3 min   76, your node count
-  5 days to 7 days             36 min    37 min    37 min   10, your size
+HOW LONG JOBS OF YOUR SIZE WAITED, BY THE WALLTIME THEY ASKED FOR
+  asked for           half started within   9 in 10 within   jobs
+  1 to 4 h                           60 s             60 s     20
+  4 to 12 h                         3.3 h            3.3 h     20
+  2 to 4 days                      31.7 h           31.7 h     20
+  your size = 1 node, 24-96 cores, 24-219 GB. Bands with fewer than 8 such jobs are not shown.
 ```
+
+**Made readable on 2026-09-24.** A user found the per-walltime table obscure:
+fifteen fine rows, each compared its own way ("your size" beside "your node
+count"), 3-job rows next to 281-job ones, three percentile columns. It now
+opens with the job in sentences, followed by broad bands, one comparison for
+the whole table spelled out in numbers, at least 8 jobs a row, and two
+columns. It also stopped borrowing the 4-day jobs' wait for a 7-day job, and
+it names a MaxTime it cannot read. Against the previous version, 13 of the 45
+assertions fail.
 
 **Simplified on 2026-09-24.** `backfill-study` had grown a second job: a copy
 of the chain's step estimate, readings of a run's OUTCAR, a one-job-or-chain
@@ -95,7 +110,7 @@ change the answer.
 
 ## 7. Verdict
 
-**PASSED** — 39 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 45 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

@@ -534,10 +534,6 @@ OPTION_OF = {"partition": "--partition", "nodes": "--nodes", "cpus": "--cpus",
              "mem_mb": "--mem-mb", "wall_min": "--time"}
 USAGE_BY_HAND = ("backfill-study --partition P --nodes N --cpus RANKS --mem-mb TOTAL_MB "
                  "--time D-HH:MM:SS")
-# The wait of YOUR job is reported from as few as this many similar jobs,
-# flagged as rough below MIN_JOBS: a rough number, said to be rough, is more
-# use than none. The chain's choice between walltimes still needs MIN_JOBS.
-SCRIPT_MIN_JOBS = 3
 
 
 def read_kv(path: str) -> Dict[str, str]:
@@ -575,19 +571,28 @@ def _whole(v, default: int = 0) -> int:
         return default
 
 
-def partition_maxtime_min(partition: str) -> Optional[float]:
-    """The partition's MaxTime in minutes; None when unlimited or unknown."""
+def partition_maxtime(partition: str) -> Tuple[Optional[float], str]:
+    """(MaxTime in minutes or None, "set" | "unlimited" | "unknown").
+    "unknown" is scontrol not answering, which is not the same as no limit:
+    a limit can also live in a QOS, where scontrol does not show it."""
     try:
         p = subprocess.run(["scontrol", "show", "partition", partition],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            universal_newlines=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, "unknown"
     m = re.search(r"MaxTime=(\S+)", p.stdout or "")
-    if not m or m.group(1) in ("UNLIMITED", "INFINITE", "NONE"):
-        return None
+    if not m:
+        return None, "unknown"
+    if m.group(1) in ("UNLIMITED", "INFINITE", "NONE"):
+        return None, "unlimited"
     v = parse_timelimit_min("", m.group(1))
-    return v if v and v > 0 else None
+    return (v, "set") if v and v > 0 else (None, "unknown")
+
+
+def partition_maxtime_min(partition: str) -> Optional[float]:
+    """The partition's MaxTime in minutes; None when unlimited or unknown."""
+    return partition_maxtime(partition)[0]
 
 
 def profile_settings() -> Dict:
@@ -625,6 +630,16 @@ def parse_walltime_arg(v: str) -> Optional[float]:
     if v.isdigit():
         return float(v)
     return parse_timelimit_min("", v)
+
+
+def fmt_walltime(minutes: float) -> str:
+    """A walltime for sentences: 7 days, 8 h, 90 min."""
+    m = int(math.ceil(minutes))
+    if m % 1440 == 0:
+        return f"{m // 1440} day" + ("" if m == 1440 else "s")
+    if m % 60 == 0:
+        return f"{m // 60} h"
+    return fmt_slurm_time(m) if m > 90 else f"{m} min"
 
 
 def fmt_slurm_time(minutes: float) -> str:
@@ -739,21 +754,58 @@ def fmt_h(s: Optional[float]) -> str:
     return f"{s / 86400:.1f} days"
 
 
-def fmt_span(lo_min: float, hi_min: float) -> str:
-    def one(m):
-        return f"{m / 1440:.0f} days" if m >= 2880 else (f"{m / 60:.0f} h" if m >= 60
-                                                          else f"{m:.0f} min")
-    return f"up to {one(hi_min)}" if lo_min <= 0 else f"{one(lo_min)} to {one(hi_min)}"
+# Broad walltime bands for the table people read. Fine bins spread a month of
+# history thin, one noisy row at a time; a few wide bands keep enough jobs in
+# each to mean something.
+BANDS = ((0, 60, "up to 1 h"), (60, 240, "1 to 4 h"), (240, 720, "4 to 12 h"),
+         (720, 1440, "12 h to 1 day"), (1440, 2880, "1 to 2 days"),
+         (2880, 5760, "2 to 4 days"), (5760, 10080, "4 to 7 days"),
+         (10080, float("inf"), "more than 7 days"))
+LEVEL_WORDS = {"nodes + cores + memory": "your size",
+               "nodes + cores": "your node and core count",
+               "nodes": "your node count",
+               "whole partition": "any size"}
 
 
-SHORT_SIZE = {"nodes + cores + memory": "your size",
-              "nodes + cores": "your nodes and cores",
-              "nodes": "your node count",
-              "whole partition": "any size"}
-SIZE_WORDS = {"nodes + cores + memory": "of your size (nodes, cores and memory)",
-              "nodes + cores": "with your node and core count",
-              "nodes": "with your node count",
-              "whole partition": "of any size"}
+def band_of(limit_min: float) -> Optional[Tuple[float, float, str]]:
+    for lo, hi, label in BANDS:
+        if lo < limit_min <= hi:
+            return (lo, hi, label)
+    return None
+
+
+def band_table(jobs: Sequence[Job], nodes: int, cpus: int, mem_mb: float,
+               min_jobs: int = MIN_JOBS) -> Tuple[Optional[str], List[Dict]]:
+    """(level, rows): the waits by broad walltime band, all rows compared the
+    SAME way -- the most specific level at which any band has min_jobs jobs.
+    Bands with fewer jobs are left out."""
+    for lname, un, uc, um in LEVELS:
+        acc: Dict[str, List[float]] = {}
+        for j in jobs:
+            if not is_similar(j, nodes, cpus, mem_mb, un, uc, um):
+                continue
+            b = band_of(j.limit_min)
+            if b:
+                acc.setdefault(b[2], []).append(j.wait_s)
+        rows = [{"label": label, "lo": lo, "hi": hi, "n": len(acc[label]),
+                 "median_s": median(acc[label]), "p90_s": percentile(acc[label], 0.90)}
+                for lo, hi, label in BANDS if len(acc.get(label, [])) >= min_jobs]
+        if rows:
+            return lname, rows
+    return None, []
+
+
+def size_words(level: Optional[str], nodes: int, cpus: int, mem_mb: float) -> str:
+    """What "similar" meant, in numbers."""
+    parts = []
+    if level in ("nodes + cores + memory", "nodes + cores", "nodes"):
+        nb = node_band(nodes)
+        parts.append("1 node" if nb == "1" else f"{nb} nodes")
+    if level in ("nodes + cores + memory", "nodes + cores"):
+        parts.append(f"{max(1, cpus // 2)}-{cpus * 2} cores")
+    if level == "nodes + cores + memory":
+        parts.append(f"{mem_mb / 3 / 1024:.0f}-{mem_mb * 3 / 1024:.0f} GB")
+    return ", ".join(parts) if parts else "any size"
 
 
 def chain_report(res: Dict, partition: str = "", days: int = 0) -> str:
@@ -805,52 +857,67 @@ def machine_line(res: Dict, fallback_min: float) -> str:
             f'level="{res["level"] or ""}" reason="{reason}"')
 
 
-def _wait_cells(est: Optional[Dict]) -> str:
-    if not est:
-        return "--"
-    rough = "   (rough: few jobs)" if est["n"] < MIN_JOBS else ""
-    return (f"~{fmt_h(est['median_s'])}   (3 in 4 within {fmt_h(est['p75_s'])}, "
-            f"9 in 10 within {fmt_h(est['p90_s'])}; {est['n']} jobs){rough}")
-
-
-def queue_report(where: str, val: Dict, notes: List[str], script_est: Optional[Dict],
-                 table: List[Tuple[float, Optional[Dict]]], past: List[Dict],
-                 max_time_min: Optional[float], days: int, n_jobs: int) -> str:
+def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
+                 rows: List[Dict], past: List[Dict], maxtime: Tuple[Optional[float], str],
+                 max_asked_min: Optional[float], days: int, n_jobs: int) -> str:
     L: List[str] = []
-    L.append(f"backfill-study -- {os.path.basename(where) or where}   partition "
-             f"{val['partition']}: {val['nodes']} node(s) x {val['cpus']} cores, "
-             f"{val['mem_mb'] / 1024:.0f} GB"
-             + (f", MaxTime {fmt_slurm_time(max_time_min)}" if max_time_min else ""))
-    L.append(f"({n_jobs} started jobs on '{val['partition']}' in the last {days} days)")
+    part, nodes, cpus, mem = val["partition"], int(val["nodes"]), int(val["cpus"]), val["mem_mb"]
+    mt, mt_state = maxtime
+    wall = val.get("wall_min")
+    mt_txt = {"set": fmt_walltime(mt) if mt else "?", "unlimited": "unlimited",
+              "unknown": "not shown by scontrol"}[mt_state]
+    L.append(f"backfill-study -- {os.path.basename(where) or where}")
+    L.append(f"  partition   {part}   (MaxTime: {mt_txt})")
+    L.append(f"  your job    {nodes} node{'' if nodes == 1 else 's'} x {cpus} cores, {mem / 1024:.0f} GB"
+             + (f", --time={fmt_slurm_time(wall)}" if wall else "")
+             + (f"   ({val['script']})" if val.get("script") else ""))
+    L.append(f"  history     {n_jobs} jobs that started on {part} in the last {days} days")
     L.append("")
-    if val.get("wall_min"):
-        L.append(f"YOUR JOB   {val.get('script') or 'the job'} asks for "
-                 f"--time={fmt_slurm_time(val['wall_min'])}")
-        if script_est:
-            lo, hi = script_est["window"]
-            L.append(f"  expected wait     {_wait_cells(script_est)}")
-            L.append(f"                    jobs {SIZE_WORDS.get(script_est['level'], script_est['level'])}"
-                     f" that asked for {fmt_span(lo, hi)}")
+
+    # ---- the job as written, in sentences --------------------------------
+    L.append("YOUR JOB")
+    if not wall:
+        L.append("  The job script has no --time: see the table for what each walltime waits.")
+    elif mt_state == "set" and mt and wall > mt:
+        L.append(f"  It asks for {fmt_walltime(wall)}, more than the partition's MaxTime of "
+                 f"{fmt_walltime(mt)}: it will not start.")
+    elif max_asked_min and wall > max_asked_min:
+        L.append(f"  No job on {part} asked for more than {fmt_walltime(max_asked_min)} in the "
+                 f"last {days} days; yours asks for {fmt_walltime(wall)}.")
+        L.append(f"  If that is the partition's limit, this job will not start. Check:")
+        L.append(f"      scontrol show partition {part} | grep -o 'MaxTime=[^ ]*'")
+        L.append(f"      sacctmgr show qos format=name,maxwall")
+    else:
+        b = band_of(wall)
+        row = next((r for r in rows if b and r["label"] == b[2]), None)
+        if row:
+            L.append(f"  Expected wait: about {fmt_h(row['median_s'])}. Of the {row['n']} jobs of "
+                     f"{LEVEL_WORDS.get(level, level)} that asked for {row['label']},")
+            L.append(f"  half started within {fmt_h(row['median_s'])}, and 9 in 10 within "
+                     f"{fmt_h(row['p90_s'])}.")
         else:
-            L.append(f"  expected wait     cannot be estimated: fewer than {SCRIPT_MIN_JOBS} "
-                     f"comparable jobs in the last {days} days")
-    else:
-        L.append("YOUR JOB   no --time in the job script: the table below is all there is")
+            L.append(f"  Not enough jobs of {LEVEL_WORDS.get(level, 'your size')} asked for "
+                     f"{b[2] if b else fmt_slurm_time(wall)} to estimate its wait "
+                     f"(fewer than {MIN_JOBS}).")
     for pj in past:
-        lim = f" asking {fmt_slurm_time(pj['limit_min'])}" if pj.get("limit_min") else ""
-        verb = "has been waiting" if pj["pending"] else "waited"
-        L.append(f"  already here      job {pj['jid']}{lim} {verb} {fmt_h(pj['wait_s'])}"
-                 + ("" if pj["pending"] else f" ({pj['state']})"))
+        lim = f"asked for {fmt_walltime(pj['limit_min'])} and " if pj.get("limit_min") else ""
+        if pj["pending"]:
+            L.append(f"  Your job {pj['jid']} here {lim}has been waiting {fmt_h(pj['wait_s'])}.")
+        else:
+            L.append(f"  Your job {pj['jid']} here {lim}waited {fmt_h(pj['wait_s'])}.")
     L.append("")
-    rows = [(w, e) for w, e in table if e]
+
+    # ---- the table ---------------------------------------------------------
     if rows:
-        L.append(f"WAIT BY WALLTIME ASKED{'':<6}{'median':>9}{'3 in 4':>10}{'9 in 10':>10}   jobs")
-        for w, e in rows:
-            lo, _ = e["window"]
-            L.append(f"  {fmt_span(lo, w):<26}{fmt_h(e['median_s']):>9}{fmt_h(e['p75_s']):>10}"
-                     f"{fmt_h(e['p90_s']):>10}   {e['n']}, {SHORT_SIZE.get(e['level'], e['level'])}")
+        L.append(f"HOW LONG JOBS OF {LEVEL_WORDS.get(level, level).upper()} WAITED, "
+                 f"BY THE WALLTIME THEY ASKED FOR")
+        L.append(f"  {'asked for':<18}{'half started within':>21}{'9 in 10 within':>17}{'jobs':>7}")
+        for r in rows:
+            L.append(f"  {r['label']:<18}{fmt_h(r['median_s']):>21}{fmt_h(r['p90_s']):>17}{r['n']:>7}")
+        L.append(f"  {LEVEL_WORDS.get(level, level)} = {size_words(level, nodes, cpus, mem)}."
+                 f" Bands with fewer than {MIN_JOBS} such jobs are not shown.")
     else:
-        L.append(f"WAIT BY WALLTIME ASKED   no walltime range has {SCRIPT_MIN_JOBS}+ comparable jobs")
+        L.append(f"No walltime band has {MIN_JOBS}+ jobs comparable to yours in the last {days} days.")
     for n in notes:
         L.append(f"  note: {n}")
     return "\n".join(L)
@@ -933,9 +1000,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     if a.max_time_min is None:
-        mt = partition_maxtime_min(val["partition"])
+        maxtime = partition_maxtime(val["partition"])
     else:
-        mt = a.max_time_min if a.max_time_min > 0 else None
+        maxtime = ((a.max_time_min, "set") if a.max_time_min > 0 else (None, "unlimited"))
+    mt = maxtime[0]
     cands = candidates_for(mt)
     days = int(val["days"])
     lines, err = run_sacct(val["partition"], days, all_users=not a.mine)
@@ -961,21 +1029,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(machine_line(res, fb))
         return 0 if res["feasible_any"] else 3
 
-    script_est = (wait_estimate(jobs, nodes, cpus, mem, val["wall_min"], cands, SCRIPT_MIN_JOBS)
-                  if val.get("wall_min") else None)
-    # One row per walltime range with jobs of its OWN: a range with none is
-    # left out, not filled from its neighbours.
-    table = [(w, wait_estimate(jobs, nodes, cpus, mem, w, cands, SCRIPT_MIN_JOBS, widen=False))
-             for w in cands]
+    level, rows = band_table(jobs, nodes, cpus, mem)
+    # The longest walltime ANY job on the partition asked for: past it, the
+    # history has nothing to say, and a limit may be why.
+    max_asked = max((j.limit_min for j in jobs), default=None)
     past = folder_job_waits(where) if is_calc_folder(where) else []
     if err:
         notes.insert(0, err)
-    print(queue_report(where, val, notes, script_est, table, past, mt, days, len(jobs)))
+    print(queue_report(where, val, notes, level, rows, past, maxtime, max_asked, days, len(jobs)))
     if a.json:
         with open(a.json, "w") as fh:
-            json.dump({"inputs": val, "script_wait": script_est,
-                       "by_walltime": [{"wall_min": w, "wait": e} for w, e in table],
-                       "sacct_error": err}, fh, indent=1, default=str)
+            json.dump({"inputs": val, "maxtime": maxtime, "level": level, "bands": rows,
+                       "max_asked_min": max_asked, "sacct_error": err}, fh, indent=1, default=str)
     return 0
 
 

@@ -478,22 +478,40 @@ own, and what `vasp-relax-loop` asks at launch. It reads the job from
 time: that is the chain's job, from `vasp-test`'s measurements.
 
 ```
-YOUR JOB   slurm_vasptest.sh asks for --time=7-00:00:00
-  expected wait     ~36 min   (3 in 4 within 37 min, 9 in 10 within 37 min; 10 jobs)
-                    jobs of your size (nodes, cores and memory) that asked for 5 days to 7 days
-  already here      job 13276000 asking 7-00:00:00 waited 12 min (RUNNING)
+backfill-study -- config_01
+  partition   sequana_cpu   (MaxTime: not shown by scontrol)
+  your job    1 node x 48 cores, 73 GB, --time=7-00:00:00   (slurm_vasptest.sh)
+  history     699 jobs that started on sequana_cpu in the last 30 days
 
-WAIT BY WALLTIME ASKED         median    3 in 4   9 in 10   jobs
-  up to 30 min                  2 min     3 min     3 min   76, your node count
-  5 days to 7 days             36 min    37 min    37 min   10, your size
+YOUR JOB
+  No job on sequana_cpu asked for more than 4 days in the last 30 days; yours asks for 7 days.
+  If that is the partition's limit, this job will not start. Check:
+      scontrol show partition sequana_cpu | grep -o 'MaxTime=[^ ]*'
+      sacctmgr show qos format=name,maxwall
+  Your job 11599543 here asked for 8 h and waited 24.3 h.
+
+HOW LONG JOBS OF YOUR SIZE WAITED, BY THE WALLTIME THEY ASKED FOR
+  asked for           half started within   9 in 10 within   jobs
+  up to 1 h                          15 s             74 s     46
+  1 to 4 h                           19 s             59 s    291
+  4 to 12 h                         2.5 h            9.3 h    132
+  12 h to 1 day                    23.8 h         3.2 days     27
+  1 to 2 days                      19.6 h         2.5 days     41
+  2 to 4 days                      35.1 h         7.5 days    162
+  your size = 1 node, 24-96 cores, 24-219 GB. Bands with fewer than 8 such jobs are not shown.
 ```
 
-It compares jobs like yours: the same node band (1, 2–4, 5–16, 17+), cores
-within ×2, memory within ×3. When there are too few, it drops memory, then
-cores, then nodes, and says which comparison it used. The table shows only the
-walltime ranges with jobs of their own; it never fills one from its neighbours.
-Outside a calculation folder, give the job: `--partition --nodes --cpus
---mem-mb --time`.
+(An illustration, from a synthetic history shaped like one partition's.)
+
+First, your job in sentences: its expected wait (half of the similar jobs that
+asked for about as long started within that time, 9 in 10 within the second
+figure). Or why it cannot be estimated: more than the partition's MaxTime, or
+more than anyone asked for in the window. Then the table: broad walltime
+bands, every row compared the same way (jobs of your size, whose meaning is
+spelled out in numbers), and only bands with at least 8 such jobs. If there
+are too few jobs of your exact size, the whole table relaxes to your node and
+core count, then your node count, and says so in its title. Outside a
+calculation folder, give the job: `--partition --nodes --cpus --mem-mb --time`.
 
 It does not simulate the scheduler. It measures what the scheduler actually
 did, backfill included, to jobs like yours. What it cannot see: jobs still

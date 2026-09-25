@@ -173,15 +173,19 @@ must_refuse "vasp-relax-loop --study points at the command that does it now" "ba
 # ===========================================================================
 # In a calculation folder it reads the job from slurm_vasptest.sh -- here 1
 # node, 4 ranks, 8 GB, --time=04:00:00 -- and reports what the queue did to
-# jobs of that shape. Against the history above:
-#   the job as written (4 h): the twelve 4-h jobs waited 4 h
-#   by walltime asked:  30 min to 1 h -> 2 h;  1 h to 2 h -> 5 min;  3 h to 4 h -> 4 h
+# jobs of that shape, in broad walltime bands. Against the history above:
+#   up to 1 h:  the twelve 1-h jobs, all waited 2 h
+#   1 to 4 h:   twelve 2-h jobs (5 min) and twelve 4-h jobs (4 h): median
+#               (5 + 240)/2 min = 2.0 h, 9 in 10 within 4 h
+#   the job as written (4 h) falls in 1 to 4 h: about 2.0 h
 # It estimates no run time: that is vasp-relax-loop's, from vasp-test.
 out=$(ch_backfill "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'asks for --time=04:00:00' <<<\"\$out\" && grep -qE 'expected wait +~4.0 h' <<<\"\$out\"" \
-      "the job as written: 4 h asked, ~4 h expected wait (rc=$rc)"
-ok_if "grep -qE '^  30 min to 1 h +2.0 h' <<<\"\$out\" && grep -qE '^  1 h to 2 h +5 min' <<<\"\$out\" && grep -qE '^  3 h to 4 h +4.0 h' <<<\"\$out\"" \
-      "and the wait at each walltime range the queue has data for: 2 h, 5 min, 4 h"
+ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 2.0 h. Of the 24 jobs of your size that asked for 1 to 4 h' <<<\"\$out\"" \
+      "the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=$rc)"
+ok_if "grep -qE '^  up to 1 h +2.0 h +2.0 h +12\$' <<<\"\$out\" && grep -qE '^  1 to 4 h +2.0 h +4.0 h +24\$' <<<\"\$out\"" \
+      "the table: one row per broad band, half-started and 9-in-10, and how many jobs"
+ok_if "grep -q 'your size = 1 node, 2-8 cores, 3-23 GB' <<<\"\$out\"" \
+      "and it says in numbers what 'your size' means"
 ok_if "! grep -qiE 'ionic|RECOMMENDATION|RUN TIME|NSW' <<<\"\$out\"" \
       "no run-time estimate, no recommendation: the queue only"
 ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "it creates nothing and submits nothing"
@@ -202,13 +206,13 @@ _bf(){ ( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twin
           FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF="${CONF:-/nonexistent}" HOME="$e" \
           "$WP_PY" "$Q" "$@" 2>&1 ); }
 out=$(_bf --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192 --time 04:00:00); rc=$?
-ok_if "(( rc == 0 )) && grep -qE 'expected wait +~4.0 h' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 2.0 h' <<<\"\$out\"" \
       "with no folder, the job given on the command line gets the same answer (rc=$rc)"
 out=$(_bf); rc=$?
 ok_if "(( rc == 2 )) && grep -q 'is not a calculation folder' <<<\"\$out\" && grep -q -- '--time' <<<\"\$out\"" \
       "with neither, it refuses: not a calculation folder, and how to give the job instead (rc=$rc)"
 out=$(CONF="$W/twins.fake/cluster.conf" _bf --nodes 1 --cpus 4 --mem-mb 8192 --time 240); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'partition fakepart' <<<\"\$out\" && grep -qE 'expected wait +~4.0 h' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -qE '^  partition +fakepart' <<<\"\$out\" && grep -q 'Expected wait: about 2.0 h' <<<\"\$out\"" \
       "by hand with no --partition, the profile's is used (rc=$rc)"
 
 # Run where it was first run by hand on a real cluster: in the toolkit's own
@@ -272,14 +276,52 @@ printf '13276000|2026-09-23T18:00:00|2026-09-23T18:00:00|2026-09-23T18:12:00|RUN
     > "$fk/sacct.13276000"
 
 out=$(ch_backfill "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -qE 'expected wait +~36 min' <<<\"\$out\" && grep -q 'your size (nodes, cores and memory) that asked for 5 days to 7 days' <<<\"\$out\"" \
-      "the 7-day job waits ~36 min: the median of the 10 similar week-long jobs"
-ok_if "grep -q 'job 13276000 asking 7-00:00:00 waited 12 min' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 36 min. Of the 10 jobs of your size that asked for 4 to 7 days' <<<\"\$out\"" \
+      "the 7-day job waits about 36 min: the median of the 10 similar week-long jobs"
+ok_if "grep -q 'Your job 13276000 here asked for 7 days and waited 12 min' <<<\"\$out\"" \
       "and it reports what the folder's own job waited"
-ok_if "grep -qE '^  up to 30 min +2 min .* 76, your node count\$' <<<\"\$out\" && grep -qE '^  5 days to 7 days +36 min .* 10, your size\$' <<<\"\$out\"" \
-      "the table has the two walltime ranges the queue has data for, each saying what it compared"
+ok_if "grep -qE '^  4 to 7 days +36 min +37 min +10\$' <<<\"\$out\" && ! grep -q 'up to 1 h' <<<\"\$out\"" \
+      "the table shows jobs of this size only -- the 76 short jobs of 4 cores are not"
 ok_if "(( \$(wc -l <<<\"\$out\") <= 15 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\"" \
       "in $(wc -l <<<"$out") lines, with no machine line"
+
+# ===========================================================================
+# 8b. SANTOS DUMONT: a 7-day job on a partition where nobody asks for more than 4
+# ===========================================================================
+# As seen on sequana_cpu: 1 x 48 cores, 73 GB, --time=7-00:00:00, and in 30
+# days no job asked for more than 4 days. With scontrol showing no MaxTime,
+# the report used to borrow the 4-day jobs' wait for the 7-day job ("~31.8 h,
+# jobs that asked for 4 days to 14 days") and say nothing of the limit.
+s=$(ch_setup sdumont); sf="$s.fake"
+printf '#!/bin/bash\n#SBATCH --partition=fakepart\n#SBATCH --nodes=1\n#SBATCH --ntasks=48\n#SBATCH --mem-per-cpu=1560\n#SBATCH --time=7-00:00:00\n' \
+    > "$s/slurm_vasptest.sh"
+"$WP_PY" - "$sf/history" <<'PY'
+import sys, datetime as dt
+with open(sys.argv[1], "w") as fh:
+    i = 0
+    for lim, wait, n in ((180, 1, 20), (360, 200, 20), (5760, 1900, 20)):
+        for k in range(n):
+            sub = dt.datetime(2026, 9, 1) + dt.timedelta(minutes=17 * i); i += 1
+            sta = sub + dt.timedelta(minutes=wait)
+            fh.write(f"{i}|fakepart|{sub.isoformat()}|{sub.isoformat()}|{sta.isoformat()}|"
+                     f"COMPLETED|x|{lim}|1|48|cpu=48,mem=73G,node=1|\n")
+PY
+printf '#!/bin/bash\nexit 0\n' > "$sf/bin/scontrol"      # shows no MaxTime at all
+sout=$(ch_backfill "$s" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q '(MaxTime: not shown by scontrol)' <<<\"\$sout\"" \
+      "a MaxTime scontrol does not show is said to be unknown, not left out (rc=$rc)"
+ok_if "grep -q 'No job on fakepart asked for more than 4 days in the last 30 days; yours asks for 7 days' <<<\"\$sout\" && ! grep -q 'Expected wait' <<<\"\$sout\"" \
+      "a walltime beyond anything in the history gets that fact, not a wait borrowed from shorter jobs"
+ok_if "grep -q 'sacctmgr show qos format=name,maxwall' <<<\"\$sout\"" "and the commands that show the limit"
+cat > "$sf/bin/scontrol" <<'EOS'
+#!/bin/bash
+echo "PartitionName=fakepart MaxTime=4-00:00:00 State=UP"
+EOS
+sout=$(ch_backfill "$s" 2>&1)
+ok_if "grep -q \"It asks for 7 days, more than the partition's MaxTime of 4 days: it will not start\" <<<\"\$sout\"" \
+      "with MaxTime known, a job above it is said not to start"
+ok_if "grep -qE '^  2 to 4 days +31.7 h' <<<\"\$sout\" && grep -qE '^  1 to 4 h +60 s' <<<\"\$sout\" && grep -qE '^  4 to 12 h +3.3 h' <<<\"\$sout\"" \
+      "and the table gives the bands the history has: 60 s, 3.3 h, 31.7 h"
 
 # The same folder with no timing data at all: the queue answer is the same --
 # it never needed any.
