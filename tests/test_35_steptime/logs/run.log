@@ -1,0 +1,12 @@
+  [32m[ OK ][0m silicon cut at step 8: 8 done + 3 to EDIFF + 2 = 13 (it took 11)
+  [32m[ OK ][0m cut inside the delay (step 5, dE already 7e-7): not read as converged -- NELM, and why
+  [32m[ OK ][0m silicon cut at 8, 9, 10: 13, 14, 14 -- never under the 11 it took (got 13 14 14)
+  [32m[ OK ][0m iron cut at 8-14 (it took 15): 14 16 15 15 15 16 17 -- at worst -1 steps short, within the 2 the margin allows
+  [32m[ OK ][0m an SCF that is not falling: NELM (60), and why
+  [32m[ OK ][0m NELMDL = 0: 3 done + 3 to EDIFF + 2 = 8, no step skipped as a delay
+  [32m[ OK ][0m RMM: and 'CG :' lines are read like DAV:
+  [32m[ OK ][0m chunk 1: 10 s start-up + 2 x 28 s = 66 s (got 66.0)
+  [32m[ OK ][0m walltime: 66 s x 1.15 = 75.9 s -> 2 min + 5 = 7; exactly 60 s -> 1 min + 5 = 6
+  [32m[ OK ][0m the next chunk from a real run: 2.1 s start-up + 28.24 + 10.7 = 41.0 s (got 41.0)
+  [32m[ OK ][0m and it sees VASP's 'reached required accuracy'
+  [32m[ OK ][0m a retry: the completed step measured (16.8 s), the cut one extrapolated (16.8 s), 5 + 16.8 + 16.8 = 38.6 s

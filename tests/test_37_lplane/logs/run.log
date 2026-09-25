@@ -1,0 +1,23 @@
+  [32m[ OK ][0m InfiniBand: the ACTIVE port, with its rate (got infiniband|mlx5_1, 100 Gb/sec (4X EDR), ACTIVE|)
+  [32m[ OK ][0m an hfi1 device is Omni-Path
+  [32m[ OK ][0m an RDMA port whose link layer is Ethernet is RoCE
+  [32m[ OK ][0m a CXI device is Slingshot
+  [32m[ OK ][0m no RDMA device: Ethernet, and its speed (got ethernet|eno1 1000 Mb/s|1000)
+  [32m[ OK ][0m nothing to read: unknown, not a guess
+  [32m[ OK ][0m NGZ 28, NCORE 4: .TRUE. (28 >= 12)
+  [32m[ OK ][0m NGZ 20, NCORE 8: .FALSE. (20 < 24)
+  [32m[ OK ][0m the same on 1 Gbit Ethernet: no LPLANE is allowed (it must be .TRUE.), the layout goes
+  [32m[ OK ][0m 10 Gbit Ethernet is not the page's '1 Gbit' case: the NGZ rule alone
+  [32m[ OK ][0m no grid in the dry run: the VASP default, and it says so
+  [32m[ OK ][0m a tall grid (NGZ 96, NCORE 6): .TRUE., with the reason printed
+  [32m[ OK ][0m and the interconnect it assumed, from the profile
+  [32m[ OK ][0m LPLANE is written into the INCAR (it said .FALSE.) and recorded for vasp-test
+  [32m[ OK ][0m a flat grid (NGZ 12) with NCORE 6 > 4: .FALSE., and it is written
+  [32m[ OK ][0m on 1 Gbit Ethernet the same grid keeps .TRUE.: only band groups of NCORE <= 4 remain (4)
+  [32m[ OK ][0m vasp-test's report has an [LPLANE] block: what the benchmark ran, and what was recommended
+  [32m[ OK ][0m NGZ and NCORE as VASP printed them, and the rule holds: no warning
+  [32m[ OK ][0m with LREAL on, the real-space projectors' max and min per rank, as VASP 6.5.1 prints them
+  [32m[ OK ][0m and the compute node's network next to the profile's
+  [32m[ OK ][0m NGZ 20 with NCORE 4 still holds (20 >= 12)
+  [32m[ OK ][0m LPLANE = .TRUE. run with NGZ 20 < 3 x NCORE 8: a warning quoting the page
+  [32m[ OK ][0m a compute node whose network is not the profile's: said, with the commands to fix it

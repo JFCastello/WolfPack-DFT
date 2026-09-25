@@ -56,9 +56,13 @@ cd "$dir" || exit 1
 # belongs here: there is no prompt to think twice at. A stale marker (node crash,
 # scancel) must not block forever, so the scheduler is asked whether the job is
 # genuinely still there.
-if [[ -f wolfpack_chain/chain.env ]] \
-   && grep -qE '^[[:space:]]*chain_state="?running"?' wolfpack_chain/chain.env 2>/dev/null; then
-    _jid="$(tr -dc '0-9' < wolfpack_chain/RUNNING 2>/dev/null)"
+# Inside one of vasp-relax-loop's chunk directories, the chain is the parent's.
+_croot="."
+_here="$(pwd -P)"
+[[ $_here == */wolfpack_chain*/* ]] && _croot="${_here%%/wolfpack_chain*}"
+if [[ -f "$_croot/wolfpack_chain/chain.env" ]] \
+   && grep -qE '^[[:space:]]*chain_state="?running"?' "$_croot/wolfpack_chain/chain.env" 2>/dev/null; then
+    _jid="$(tr -dc '0-9' < "$_croot/wolfpack_chain/RUNNING" 2>/dev/null)"
     _live=0
     if [[ -n "$_jid" ]]; then
         if command -v squeue >/dev/null 2>&1; then

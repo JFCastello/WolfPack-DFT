@@ -62,7 +62,7 @@ reads as a finding about the toolkit when it is not one.
 | `test_06_clean_nuke` | the two commands that delete: what they must NOT delete |
 | `test_07_dryrun` | stage 1: refusals, and not claiming what it did not measure |
 | `test_08_recommend` | the parallelization rules, judged per regime (DFT vs GW) |
-| `test_09_chain_math` | the chain's refusals: runs that would produce nothing |
+| `test_09_chain_math` | `vasp-scf-loop`'s refusals: runs that would produce nothing |
 | `test_10_magnetic` | magnetic orderings and MAGMOM/POSCAR site alignment |
 | `test_11_uchain` | the linear-response U arithmetic and its refusals |
 | `test_12_slurm_report` | sacct parsing and the three efficiency ratios |
@@ -78,20 +78,19 @@ reads as a finding about the toolkit when it is not one.
 | `test_22_geometry` | nodes × ranks: five invariants over 2025 layouts |
 | `test_23_scaling` | stage 3's extrapolation: measure small, run big |
 | `test_24_alloc_profiles` | whole-nodes vs balanced: n x m = ntasks, exactly |
-| `test_25_chain_structure` | what a CHUNKED relaxation changed, not its last chunk |
+| `test_25_chain_structure` | what a CHAINED relaxation changed, not its last chunk |
 | `test_27_magmom_flag` | --magmom: magnitudes change, orderings do not |
 | `test_28_bench_failed` | a benchmark that died must not size production |
-| `test_29_chain_memory` | every chunk measures its memory and resizes the next |
-| `test_30_chain_oom_resume` | after an OOM, `--resume` alone continues, with more memory |
-| `test_31_chain_step_fit` | a fixed chunk walltime; refusing when one step cannot fit |
-| `test_32_queue_study` | `backfill-study`: the queue wait, and the chain's chunk walltime from it |
-| `test_33_chain_live_e2e` | a real chunked relaxation: VASP, SLURM, memory per chunk |
-| `test_34_chain_nsw_only` | a chunked relaxation's only limit is the user's NSW |
+| `test_32_queue_study` | `backfill-study`: the queue wait, quartiles, fairshare, prediction |
+| `test_33_chain_live_e2e` | `vasp-relax-loop` for real: pipeline, VASP, SLURM; estimate vs time used |
+| `test_35_steptime` | an ionic step measured, or extrapolated from a cut-off SCF |
+| `test_36_relax_loop` | `vasp-relax-loop`: NSW per chunk, walltime per chunk, clean retries |
 
-Tests 29–32 and 34 drive the real `vasp_chain.sh` through `chain_harness.sh`: fake
+test_36 drives the real `vasp_relax_loop.sh` through `chain_harness.sh`: fake
 `sbatch`, `squeue`, `sacct`, `scontrol` and a fake VASP behind `srun`, each
-doing exactly what the test scripts. That is how a chunk can be made to die of
-an OOM, or with its whole job, on demand. test_33 runs the same chain for real.
+doing exactly what the test scripts. That is how a chunk can be made to run out
+of its walltime, die of an OOM, or die with its whole job, on demand. test_33
+runs the same chain for real.
 
 ## Adding one
 

@@ -119,9 +119,9 @@ pass `--purge-repo`.
 | `vasp-recommend-slurm` | `vasp_recommend_slurm.py` | **Pipeline STAGE 2** — read that OUTCAR → KPAR/NCORE + `slurm.sh` (80%-mem, multi-node split) |
 | `vasp-test` | `vasp_test.sh` | **Pipeline STAGE 3** — benchmark of the *fixed* config (job `slurm_benchmark.sh`) → scale measured RAM to production → write the **definitive** `slurm_vasptest.sh` + (GW) `MAXMEM` into the INCAR; prints a **predicted-vs-measured** comparison + validation verdict of the chosen parallelization & node config |
 | `vasp-scf-loop` | `vasp_chain.sh` | Converge a **static SCF as a chain of short jobs** for queues where a long walltime waits a long time. Each job caps its electronic steps to fit the walltime, restarts from the previous one's `WAVECAR`, and submits its own successor. Launch once; it runs until the SCF converges. Needs `vasp-test` to have run |
-| `vasp-relax-loop` | `vasp_chain.sh` | The same for a **structural relaxation**: chunks `NSW`, never `NELM` — a truncated electronic loop gives wrong forces. Validates `CONTCAR` before it becomes the next `POSCAR`, and recovers when an ionic step runs out of `NELM`. Picks the chunk walltime from a study of the queue, resizes each chunk's memory from what the last one used, and continues after an OOM kill with a plain `--resume` |
+| `vasp-relax-loop` | `vasp_relax_loop.sh` | A **structural relaxation as a chain of jobs**, each running the INCAR's `NSW` ionic steps from the geometry the last one reached, each asking the **walltime its own steps are estimated to need** (chunk 1 from `vasp-test --full-size`, later chunks from the chunk before). A chunk killed by its walltime or memory is run again, cleanly and longer. Needs `EDIFFG < 0` and `NSW ≥ 2` |
 | `vasp-diagnose` | `vasp_diagnose.sh` | **Failure + data-salvage** analysis of a run — root cause (OOM / walltime / crash / missing-input), measured peak RAM, layout, **and whether the data is still usable** (FULL / PLOTTABLE / PARTIAL / NOT — e.g. a killed DFT+U run whose occupations/eigenvalues survived). Human report + a machine-readable summary line. Read-only |
-| `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue**: the job script as written, and the same job at other walltimes (quartiles of the wait), from the partition's `sacct` history of jobs shaped like it; and your fairshare now (`sshare`, `sprio`). `vasp-relax-loop` asks it at launch, with its own ionic-step estimate, for the chunk walltime. Estimates no run time; launches nothing |
+| `backfill-study` | `backfill_study.py` | **How long this job will wait in the queue**: the job script as written, and the same job at other walltimes (quartiles of the wait), from the partition's `sacct` history of jobs shaped like it; and your fairshare now (`sshare`, `sprio`). Estimates no run time; launches nothing |
 | `vasp-check` | `vasp_check.sh` | **What a run produced, as data** — parameters, convergence, forces, cell and stress, what the relaxation changed, moments, gap with the VBM/CBM band, spin and k-point, GW quasiparticle energies — plus checks against the run's own NELM/EDIFFG and VASP's rules. No physical interpretation. (Why it died / salvageability → `vasp-diagnose`) |
 | `vasp-slurm-report` | `vasp_slurm_report.sh` | **What every job in a folder actually cost** — the dry-run, the benchmark, the production job and every chunk of a `vasp-relax-loop`/`vasp-scf-loop` chain (older chains too), each labelled with its stage — reads `sacct` for them and turns them into the three ratios that say whether the allocation was earned: CPU efficiency (`TotalCPU / (Elapsed x NCPUS)`, which is what catches a 240-rank job running on 1), memory efficiency (`AveRSS x NCPUS / ReqMem` — *Ave*, not *Max*, because rank 0 is an outlier at high `KPAR`), and time use (`Elapsed / Timelimit`). Flags anything under 50% CPU, anything that ran to its walltime, and any state that is not clean. `--csv` for a machine-readable table. Read-only: it never submits or cancels anything |
 | `vasp-clean` | `vasp_clean.sh` | Selective cleanup of VASP output files (with dry-run) |
@@ -144,8 +144,9 @@ pass `--purge-repo`.
 ### How the toolkit edits your INCAR
 
 Several commands write tags into your INCAR — `vasp-recommend-slurm` sets
-`KPAR`/`NCORE`, `vasp-test` pins the benchmark layout, the chunked runs rewrite
-`NELM`/`NSW` once per chunk, `build-magnetic-configs` sets `ISPIN`/`MAGMOM`.
+`KPAR`/`NCORE`, `vasp-test` pins the benchmark layout, `vasp-scf-loop` rewrites
+`NELM` once per chunk, `vasp-relax-loop` writes `NSW` into its chunks' own copies
+(never into yours), `build-magnetic-configs` sets `ISPIN`/`MAGMOM`.
 All of them go through one library (`wolfpack_incar.py`, and `wolfpack_incar.sh`
 for the tools that run inside a compute job), which follows your file rather
 than imposing a format:
@@ -269,11 +270,49 @@ vasp-configure --alloc-profile balanced     # or: whole-nodes
 vasp-configure --edit                       # or edit WP_ALLOC_PROFILE by hand
 ```
 
+### LPLANE: from the grid, the band group and the network
+
+[The VASP wiki](https://vasp.at/wiki/LPLANE): LPLANE = .TRUE. (the default)
+distributes the real-space grid in z-planes, which cuts the FFT communication
+but can worsen the load balance, and "should only be used if NGZ is at least
+3×(number of nodes)/NPAR". The page predates NCORE. Its "nodes" are MPI ranks:
+the old manual's "NPAR = number of nodes" is today's NPAR default, "available
+ranks". Ranks / NPAR is the band group, the NCORE ranks that share one band's
+FFT (VASP's own OUTCAR line: `distr: one band on NCORE= N cores`). The z-planes
+are shared among those, so for each candidate layout the recommender sets:
+
+| | LPLANE |
+|---|---|
+| `NGZ ≥ 3 × NCORE` | **.TRUE.**, the VASP default |
+| `NGZ < 3 × NCORE` | **.FALSE.**: plane-wise would leave ranks fewer than 3 planes |
+| `NGZ < 3 × NCORE` on 1 Gbit Ethernet | none: there "LPLANE must be set to .TRUE.", so the layout is dropped |
+
+and prefers, among the rest, layouts where `NGZ` is a multiple of NPAR (the
+page's "optimal load balancing"). What the page does not quantify ("very many
+nodes", projector counts that "should not differ too much") is reported, not
+turned into a threshold. The chosen value is printed with its reason and
+written into the INCAR, so vasp-test benchmarks it.
+
+**The network** comes from the cluster profile. `vasp-configure` reads it from
+`/sys` (`wolfpack_hw.sh`): `/sys/class/infiniband` is InfiniBand, Omni-Path
+(`hfi1`) or RoCE (a port whose link layer is Ethernet); `/sys/class/cxi` is
+Slingshot; otherwise Ethernet, with its speed. `vasp-configure --interconnect
+KIND` sets it by hand.
+
+**vasp-test checks it** on what the benchmark really ran, and adds a `[LPLANE]`
+block to its report:
+- NGZ and NCORE as VASP printed them, and the rule;
+- with `LREAL` on, the real-space projectors' max/min per rank, which the page
+  asks you to compare;
+- the compute node's own network, read inside the job, against the profile's.
+  If they differ, it says so and names the commands to fix it.
+
 `slurm.sh` carries:
 
-- the chosen **KPAR/NCORE/NSIM** embedded as comments **and written into your
-  `INCAR`** so STAGE 3 and production match (KPAR + NCORE for GW; KPAR + NCORE +
-  NPAR for DFT; backup at `INCAR.bak`, opt out with `--no-apply-incar`);
+- the chosen **KPAR/NCORE/NSIM/LPLANE** embedded as comments, and **KPAR, NCORE
+  and LPLANE written into your `INCAR`** so STAGE 3 and production match. NPAR is
+  never written: VASP lets it override NCORE. Backup at `INCAR.bak`, opt out with
+  `--no-apply-incar`;
 - a memory request sized to the **≥ 80 % utilisation** rule (see below);
 - **automatic, k-group-aware multi-node splitting** — keeps **whole k-point groups
   on a node** (`nodes = KPAR / g`, never straddling a k-group across the boundary —
@@ -343,6 +382,9 @@ the maximum debug memory (node RAM − the `WP_DEBUG_RESERVE_GB` reserve). Then 
 
 ```bash
 vasp-test               # renders ./slurm_benchmark.sh, submits it, writes slurm_vasptest.sh
+vasp-test --full-size   # the same, at the production rank count (on the production
+                        #   partition when the debug one cannot hold it): what
+                        #   vasp-relax-loop sizes its first chunk from
 # KPAR/NCORE/NPAR are already in your INCAR (applied by vasp-recommend-slurm):
 sbatch slurm_vasptest.sh   # the definitive production job, with measured memory
 ```
@@ -433,49 +475,115 @@ one block to `report.out` and runs `vasp-check` for you.
 
 ### Chunked relaxation — `vasp-relax-loop`
 
-The same chain for a structural relaxation. It chunks `NSW`, never `NELM`,
-because a truncated electronic loop gives wrong forces. Everything above holds,
-plus four things specific to long relaxations on a real cluster.
+A relaxation as a chain of jobs. Every job (a chunk) runs the same number of
+ionic steps — the INCAR's `NSW` — from the geometry the last one reached, and
+asks for the walltime *its* steps are estimated to need, no more.
 
 ```bash
-backfill-study                     # how long this job waits in the queue; launches nothing
-vasp-relax-loop                    # launch: chunk walltime from its step estimate + the queue
-vasp-relax-loop --walltime 120     # launch with a chunk walltime you choose
-vasp-relax-loop --resume           # after a stop, a crash, or an OOM kill
-vasp-relax-loop --fresh            # archive an unfinished chain, start a new one here
+vasp-test --full-size          # once: timings at the production rank count
+vasp-relax-loop                # launch; it runs until VASP says "reached required accuracy"
+vasp-relax-loop --status       # the progress file
+vasp-relax-loop --stop         # finish the running chunk, then stop
+vasp-relax-loop --resume       # after a stop, or after a job that died with the chain
+vasp-relax-loop --fresh        # archive the chain here and start a new one
 ```
 
-**The chunk walltime is chosen once, then fixed.** At launch it comes from
-`--walltime` if you give one (whole minutes). Otherwise it comes from
-**`backfill-study`** (below), and if the study cannot decide, from the profile's
-`WP_CHUNK_WALLTIME_MIN`. It
-is capped at the partition's `MaxTime`; an explicit `--walltime` above `MaxTime`
-is refused, not silently cut. Every chunk of that chain then uses it, and the
-number of ionic steps per chunk adapts to it instead.
+| option | default | |
+|---|---|---|
+| `--nsw N` | 2 | NSW of every chunk when the INCAR has none |
+| `--steps 2,5,7` | — | one job per entry, with that NSW, then stop |
+| `--max-ionic N` | 100 | stop after N distinct geometries |
+| `--max-retries N` | 2 | retries of one chunk after a walltime or memory kill |
+| `--carry-wavecar` | off | carry `WAVECAR` and `CHGCAR` to the next chunk too |
+| `--safety F` | 1.15 | walltime = estimate × F + margin |
+| `--margin-min M` | 5 | minutes added to every walltime (at least 3) |
 
-**A chain that cannot fit one ionic step does not start.** If a single ionic step
-(estimated from `vasp-test`, ×1.5 for a first chunk that starts cold) does not
-fit in the chunk, every chunk would be killed before completing one. The
-launcher refuses, and tells you the shortest walltime that would work:
+All of them are command-line flags; none is read from the cluster profile.
+
+**What one chunk advances.** VASP's `CONTCAR` is the last geometry it
+*computed*: after its last ionic step it does not move the ions (checked with
+VASP 6.5.1, `IBRION` 1, 2 and 3). So `NSW = 1` would compute the same geometry
+forever, and is refused. A chunk of `NSW = N` advances `N − 1` geometries, and
+its first step recomputes the geometry where the chunk before ended. Each chunk
+is also a new optimisation: `IBRION` 1 and 2 choose each step from the history
+of the earlier ones, and a new run has none. A chained relaxation can therefore
+take more ionic steps than a single run.
+
+**The walltime of each chunk** is its estimate × 1.15 + 5 minutes.
+
+- **Chunk 1**, from `vasp-test --full-size`. If the benchmark completed an ionic
+  step, that step's measured time. If it was stopped inside the first one, the
+  electronic steps still missing are extrapolated: VASP stops the SCF when
+  `|dE|` and `|d eps|` are both below `EDIFF`, so `log10 max(|dE|, |d eps|)` of
+  the self-consistent steps (those after the `NELMDL` delay) is fitted against
+  the step number and followed down to `EDIFF`, plus 2 steps. With fewer than
+  three self-consistent steps, or an SCF that is not falling, it takes `NELM`,
+  the most VASP will do, and says so. The margin of 2 was chosen on 46 cut-off
+  points of 10 real VASP runs in this suite (Si, Al, Fe, a magnetic case):
+  without it 14 predictions fell short, by up to 4 steps of 15; with it 3 did,
+  by at most 2.
+- **Chunk n**, from chunk n−1: its start-up, its first ionic step and its later
+  ones, as measured.
+
+**A chunk that runs out of walltime or memory is run again**: in a new directory
+(`wolfpack_chain/NNN.tryK`), from the last *completed* chunk's `CONTCAR` (never
+the failed attempt's files, which may be partial), with a walltime re-estimated
+from what it measured (at least 1.5 × the old one), or 1.5 × the memory.
+
+**It stops** when VASP reports "reached required accuracy", after `--max-ionic`
+geometries, when the `--steps` list is used up, or when a chunk has used up its
+retries. It needs `EDIFFG < 0`: a positive `EDIFFG` compares energies between
+two ionic steps of one run, which VASP cannot do across chunks. And `IBRION` 1,
+2 or 3.
+
+**Where things are.** Your `POSCAR` and `INCAR` are never touched. After every
+chunk its `CONTCAR`, `OUTCAR`, `OSZICAR` and `vasprun.xml` are copied into the
+folder, so `vasp-check` there compares your input with the latest geometry.
+Every chunk has its directory, `wolfpack_chain/001`, `002`, …; only the latest
+keeps its `WAVECAR`. `relax_progress.txt`, rewritten after every chunk. This
+is silicon with one atom displaced, NSW = 2, 4 ranks, on this suite's SLURM
+testbed (test_33):
 
 ```
-[FAIL] not even ONE ionic step fits in a 60-min chunk.
- One step is ~2555.6s (estimated from the benchmark); a first chunk starts cold, so it must hold 1.5 x that: 3834s.
- ...
- The shortest chunk that holds one: 70 min.
- Launch with:   --walltime 70      (or more ranks, for a faster step)
+  chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
+      1   1   2      2     2  11 6                11    0:02:48   0:09   0:04:21      -10.806882  0.5881  ok
+      2   1   2      2     3  11 6                11    0:04:21   0:11   0:02:14      -10.819998  0.1471  ok
+      3   1   2      2     4  11 4                11    0:02:14   0:08   0:01:51      -10.820686  0.0490  ok
+      4   1   2      2     5  11 3                11    0:01:51   0:08   0:02:02      -10.820764  0.0150  ok
+      5   1   2      2     6  11 2                11    0:02:02   0:08   0:01:01      -10.820772  0.0047  CONVERGED
 ```
 
-If steps grow later (a cell relaxation's basis grows with the volume), the chain
-stops before submitting a chunk that cannot complete one. The geometry reached
-so far is kept in `POSCAR`, and the stop names the new chain that would fit:
-`vasp-relax-loop --fresh --walltime 83`.
+Same energy as a single direct run to 1 μeV, same structure to 0.0003 Å, and the
+same 6 geometries (10 SCF runs: each chunk's first step repeats the last
+geometry). The electronic steps were estimated exactly; the time was not,
+because this laptop took 4.4 to 17.1 s for the same electronic step from one
+chunk to the next. The × 1.15 + 5 min absorbed it.
 
-**`backfill-study`: how long a job waits in this queue.** A command of its
-own, and what `vasp-relax-loop` asks at launch. It reads the job from
+`e-steps/ionic` is the electronic steps of each ionic step (`[3]`: one cut off
+after 3); `est.e` what was estimated for the first; `estimate` and `used` the
+chunk's time; `asked` the walltime it asked for.
+
+**Memory is measured every chunk and the next one is resized.** After each chunk
+the chain reads what it used: `MaxRSS`/`AveRSS` from `sacct`, or, where the
+accounting records none, VASP's own `Maximum memory used` from OUTCAR (rank 0,
+applied to every rank). It then rewrites the next chunk's `#SBATCH` lines:
+
+```
+--mem-per-cpu = (MaxRSS + (ranks per node − 1) × AveRSS) / ranks per node × 1.25
+```
+
+This is sized for the heaviest node's total, because that is what SLURM
+enforces (`cgroup.conf`, `ConstrainRAMSpace`), not each task. The largest peak
+ever measured is never forgotten. The **number of ranks never changes**, since
+your KPAR/NCORE were chosen for it. When a node can no longer hold them, they
+are spread over more nodes. This applies to `vasp-scf-loop` too.
+
+### How long a job waits — `backfill-study`
+
+A command of its own. It reads the job from
 `slurm_vasptest.sh` (or `slurm.sh`) and the partition's accounting history
 (`sacct`, last 30 days; `WP_CHAIN_QUEUE_DAYS` changes it). It estimates no run
-time: that is the chain's job, from `vasp-test`'s measurements.
+time.
 
 ```
 backfill-study -- config_01
@@ -565,65 +673,12 @@ What a command cannot tell (no `sshare`, or `PrivateData` hiding the other
 users) is said, not counted as zero. `priority/basic` (FIFO) is said to have no
 fairshare. `--account` picks the account when you have several (default: the
 job script's, else yours); `--no-fairshare` leaves the section and the
-narrowing out. The chain's chunk walltime uses neither.
+narrowing out.
 
 It does not simulate the scheduler. It measures what the scheduler actually
 did, backfill included, to jobs like yours. What it cannot see: jobs still
 waiting (only jobs that started have a wait to measure), and other users' jobs
 if the cluster's `sacct` shows you only your own.
-
-**At launch**, `vasp-relax-loop` estimates the ionic-step time from
-`vasp-test`'s measurements and hands it to `backfill-study`. For each candidate
-walltime, `backfill-study` counts the chunks the relaxation would need (the
-chain's own ramp) and picks the smallest `chunks × (median wait + start-up)`.
-The table is shown at launch and kept in `wolfpack_chain/backfill_study.txt`.
-With too little data the chain uses the profile's walltime;
-`vasp-relax-loop --no-queue-study` skips it.
-
-**Memory is measured every chunk and the next one is resized.** After each chunk
-the chain reads what it used: `MaxRSS`/`AveRSS` from `sacct`, or, where the
-accounting records none, VASP's own `Maximum memory used` from OUTCAR (rank 0,
-applied to every rank). It then rewrites the next chunk's `#SBATCH` lines:
-
-```
---mem-per-cpu = (MaxRSS + (ranks per node − 1) × AveRSS) / ranks per node × 1.25
-```
-
-This is sized for the heaviest node's total, because that is what SLURM
-enforces (`cgroup.conf`, `ConstrainRAMSpace`), not each task. The largest peak
-ever measured is never forgotten; for `ISIF ≥ 3` the request also grows with
-the cell volume. The **number of ranks never changes**, since your KPAR/NCORE
-were chosen for it. When a node can no longer hold them, they are spread over
-more nodes. When one rank alone needs more than a node, the chain stops and says
-what frees memory (a lower KPAR first). `chain.log` shows each chunk's peak next
-to what it was granted. This applies to `vasp-scf-loop` too.
-
-**After an OOM kill: `vasp-relax-loop --resume`, and nothing else.** It works
-out that the chunk was OOM-killed (from `sacct`'s `OUT_OF_MEMORY` or
-`slurmstepd`'s message), then:
-
-- raises the memory: the larger of 1.5 × what was granted
-  (`WP_CHAIN_OOM_FACTOR`) and what the measurements say, spreading over more
-  nodes if needed;
-- keeps the geometry the dead chunk reached (its `CONTCAR` becomes `POSCAR`);
-- counts the ionic steps it completed and adds them to the trajectory, even when
-  the whole job died and the chunk could not record anything itself;
-- sets aside a `WAVECAR` that was cut off while being written
-  (`WAVECAR.partial`), and starts that one chunk cold;
-- refuses, with the way out, when no layout the cluster offers can hold it, and
-  refuses while a chunk of the chain is still queued or running.
-
-A walltime kill is handled the same way: the walltime stays fixed, and the steps
-per chunk come down to what was measured. If not one step completed, it refuses
-and tells you to start a new chain with a longer walltime.
-
-**The only limit is `NSW`.** The chain runs until the relaxation converges or
-your `NSW` is spent, however many chunks, hours or days that takes. To go past
-`NSW`, raise it in `INCAR.chain.bak` (your original INCAR, which a new chain
-reads) and start again with `--fresh`.
-
-`--status` shows the chunk walltime and where it came from, the current
-allocation, the memory measured, and how many OOM kills the chain has survived.
 
 ## 2. VASP run analysis
 
@@ -705,8 +760,9 @@ table per quantity, each value once, with its change.
   periodic images resolved, so the cell's own change is not counted as atoms
   moving.
 
-After a chunked relaxation the "before" column is the geometry chunk 1 started
-from (`chunk-001`), not the POSCAR the chain has been overwriting.
+After a chained relaxation (`vasp-relax-loop`) the "before" column is still
+your `POSCAR`: the chain never overwrites it, and copies the latest `CONTCAR`
+into the folder.
 
 For a static run there is nothing to diff, so it tabulates the geometry that
 was computed: cell, density, space group at each tolerance and the nearest

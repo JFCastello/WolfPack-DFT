@@ -38,7 +38,7 @@ grep -q 'WP_SOMETHING_I_ADDED="keepme"' "$conf" \
     || fail "a hand-added setting was silently deleted by the wizard"
 
 # --- the chunk walltime is reachable from here ------------------------------
-# vasp-relax-loop reads WP_CHUNK_WALLTIME_MIN. If the configuration tool cannot
+# vasp-scf-loop reads WP_CHUNK_WALLTIME_MIN. If the configuration tool cannot
 # set it, the only way to change it is to edit the file -- see the test above
 # for why that used to be a trap.
 timeout 120 bash "$C" --conf "$conf" --non-interactive --chunk-walltime 240 >>"$W/gen.log" 2>&1

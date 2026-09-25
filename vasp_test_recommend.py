@@ -275,6 +275,96 @@ def write_incar_maxmem(path, maxmem):
         return False
 
 
+def _incar_tag(path, key):
+    """A tag's value as VASP reads it: tags may share a line (';'), '!' and
+    '#' start a comment, the last occurrence wins. None when absent."""
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    val = None
+    for line in text.splitlines():
+        line = re.split(r"[!#]", line, 1)[0]
+        for part in line.split(";"):
+            m = re.match(r"\s*" + re.escape(key) + r"\s*=\s*(\S+)", part, re.I)
+            if m:
+                val = m.group(1)
+    return val
+
+
+def _vasp_true(v):
+    return bool(v) and v.strip(".").upper().startswith("T")
+
+
+def lplane_section(text, args):
+    """[LPLANE] -- the rule of https://vasp.at/wiki/LPLANE, checked on what the
+    benchmark actually ran: its NGZ, its band-group size (VASP's own "distr:
+    one band on NCORE= N cores"), its LPLANE and LREAL, and the network of
+    the compute node. Data, and the wiki's rule; no invented thresholds."""
+    out = ["", "[LPLANE]  (https://vasp.at/wiki/LPLANE)"]
+    m = re.search(r"dimension x,y,z NGX =\s*(\d+)\s+NGY =\s*(\d+)\s+NGZ =\s*(\d+)", text)
+    ngz = int(m.group(3)) if m else None
+    m = re.search(r"distr:\s+one band on NCORE=\s*(\d+)\s+cores", text)
+    ncore = int(m.group(1)) if m else (args.test_ncore or None)
+    run_lp = _incar_tag(args.incar_run, "LPLANE")
+    lplane = _vasp_true(run_lp) if run_lp else True          # VASP's default
+    src = (f"the benchmark's INCAR" if run_lp else "not set: VASP's default .TRUE.")
+    out.append(f"  as run           : LPLANE = {'.TRUE.' if lplane else '.FALSE.'}  ({src})"
+               + (f"; recommended {args.lplane}" if args.lplane else ""))
+    if ngz and ncore:
+        need = 3 * ncore
+        rule = "NGZ >= 3 x NCORE" if ngz >= need else "NGZ < 3 x NCORE"
+        out.append(f"  grid and group   : NGZ = {ngz}, NCORE = {ncore} (OUTCAR)  ->  {rule} = {need}")
+        if lplane and ngz < need:
+            out.append(f"  [WARN] LPLANE = .TRUE. with NGZ = {ngz} < {need}: the wiki says plane-wise")
+            out.append(f"         distribution \"should only be used if NGZ is at least 3x\" the ranks")
+            out.append(f"         that share a band's FFT. Re-run vasp-recommend-slurm.")
+        if ngz % max(1, args.test_npar) == 0 and lplane:
+            out.append(f"  load balance     : NGZ = {ngz} is a multiple of NPAR = {args.test_npar}"
+                       f" (the page's \"optimal load balancing\")")
+        elif lplane:
+            out.append(f"  load balance     : NGZ = {ngz} is not a multiple of NPAR = {args.test_npar}")
+    else:
+        out.append("  grid and group   : not in this OUTCAR")
+    # Real-space projectors with LPLANE: the page asks to compare max and min.
+    lreal = _incar_tag(args.incar_run, "LREAL")
+    if lplane and lreal and not lreal.strip(".").upper().startswith("F"):
+        # The wiki calls the block "real space projector functions"; VASP 6.5.1
+        # prints "real space projection operators:" (checked on a Si run with
+        # LREAL = Auto). Either, then "total allocation : 735.12 KBytes" and
+        # "max/ min on nodes : 185.50 182.75".
+        m = re.search(r"real space project(?:or functions|ion operators)\s*:?\s*\n"
+                      r"\s*total allocation\s*:\s*([\d.]+)\s*(\S*)\s*\n"
+                      r"\s*max/\s*min on nodes\s*:\s*([\d.]+)\s+([\d.]+)", text)
+        if m:
+            tot, unit = float(m.group(1)), m.group(2)
+            mx, mn = float(m.group(3)), float(m.group(4))
+            ratio = (mx / mn) if mn > 0 else 0.0
+            out.append(f"  real-space proj. : total {tot:.2f} {unit}, max/min per rank "
+                       f"{mx:.2f} / {mn:.2f}" + (f"  (x{ratio:.3f})" if ratio else ""))
+            out.append("                     the page: \"should not differ too much, otherwise the"
+                       " load balancing might worsen\"")
+        else:
+            out.append(f"  real-space proj. : LREAL = {lreal}, but no allocation lines in the OUTCAR")
+    # The network the recommendation assumed, and the one this node has.
+    node = (args.net_node or "").split("|")
+    node_kind = node[0] if node and node[0] else ""
+    node_detail = node[1] if len(node) > 1 else ""
+    prof = args.net_profile or "unknown"
+    if node_kind:
+        line = f"  interconnect     : profile {prof}; this compute node {node_kind}"
+        line += f" ({node_detail})" if node_detail else ""
+        out.append(line)
+        if prof != node_kind:
+            out.append(f"  [WARN] the recommendation assumed '{prof}'. If the compute nodes are "
+                       f"'{node_kind}':")
+            out.append(f"         vasp-configure --interconnect {node_kind}, then "
+                       f"vasp-recommend-slurm and vasp-test.")
+    return out
+
+
 def main():
     """CLI entry: scale the measured memory to production, update slurm.sh and report.out."""
     p = argparse.ArgumentParser(description="vasp-test STAGE 3: scale + update slurm.sh")
@@ -357,6 +447,16 @@ def main():
                         # predicted-vs-measured section at all.
                         "(vasp-test owns the GW memory directive).")
     p.add_argument("--report", type=Path, default=None)
+    # LPLANE (https://vasp.at/wiki/LPLANE): what the benchmark ran with, and
+    # the network it ran on against the one the recommendation assumed.
+    p.add_argument("--lplane", default="",
+                   help="LPLANE the recommendation wrote (.TRUE./.FALSE.; empty = not written)")
+    p.add_argument("--incar-run", type=Path, default=None,
+                   help="the INCAR the benchmark ran, for LREAL and LPLANE as run")
+    p.add_argument("--net-profile", default="",
+                   help="WP_INTERCONNECT, from the cluster profile")
+    p.add_argument("--net-node", default="",
+                   help="KIND|DETAIL|SPEED from wolfpack_hw.sh on the compute node")
     args = p.parse_args()
 
     text = ""
@@ -764,6 +864,8 @@ def main():
         L.append(f"                     = {_naive * ntpn / 1024.0:.0f} GB/node instead of "
                  f"{mem_per_cpu * ntpn / 1024.0:.0f} GB -- x{_naive/max(mem_per_cpu,1):.1f} "
                  f"over-reservation avoided.")
+
+    L.extend(lplane_section(text, args))
 
     body = "\n".join(L)
 

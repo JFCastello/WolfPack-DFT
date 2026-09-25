@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# test_25_chain_structure -- what a CHUNKED relaxation changed, not what its
-# last chunk changed.
+# test_25_chain_structure -- what a CHAINED relaxation changed: the whole
+# relaxation, not its last chunk.
 #
-# vasp-relax-loop restarts each chunk from its own CONTCAR: at every boundary
-# the chain does `cp CONTCAR POSCAR`. After five chunks the POSCAR in the
-# folder is the geometry chunk five began with, and diffing it against the
-# final CONTCAR reports the last chunk's movement under a heading that claims
-# to describe the whole relaxation.
-#
-# That failure is quiet in the worst way: the number it prints is SMALL, and
-# small is what "converged" looks like. It is smallest exactly when the
-# relaxation has wandered furthest, because a long run means more chunks and a
-# more recent POSCAR.
+# vasp-relax-loop runs each chunk in wolfpack_chain/NNN/ and never overwrites
+# the folder's POSCAR; the latest CONTCAR is copied into the folder. So
+# vasp-check's POSCAR -> CONTCAR is the whole relaxation, and it must not be
+# the last chunk's -- whose number is SMALL, which is what "converged" looks
+# like.
 #
 # The displacements here are INJECTED, so the right answer is known in closed
 # form rather than taken from a previous run of the same code.
@@ -19,7 +14,6 @@ set -uo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 W="$WORK/chainstruct"; rm -rf "$W"; mkdir -p "$W"
 VC="$TK_DIR/vasp_check.sh"
-
 # Si, 2 atoms. a = 5.43 A, so a fractional 0.04 along x is 0.04 * 5.43/2 in
 # Cartesian for this cell -- the test asserts on the fractional displacement
 # the structure report prints, which is what the tool compares.
@@ -38,17 +32,17 @@ Direct
 EOF
 }
 
-# A folder that looks like a finished CHUNKED relaxation:
-#   the original geometry   -> wolfpack_chain/chunk-001/POSCAR.in.gz   (x = 0.25)
-#   what chunk 3 started on -> POSCAR                                  (x = 0.28)
-#   where it ended          -> CONTCAR                                 (x = 0.29)
+# A folder that looks like a finished CHAINED relaxation (vasp-relax-loop):
+#   the input            -> POSCAR, untouched                (x = 0.25)
+#   chunk 3 started from -> wolfpack_chain/003/POSCAR        (x = 0.28)
+#   where it ended       -> CONTCAR, the latest chunk's      (x = 0.29)
 # The whole relaxation moved the atom 0.04; the last chunk moved it 0.01.
-d="$W/chained"; mkdir -p "$d/wolfpack_chain/chunk-001" "$d/wolfpack_chain/chunk-002" \
-                          "$d/wolfpack_chain/chunk-003"
-_poscar 0.2500000000000000 > "$d/wolfpack_chain/chunk-001/POSCAR.in"
-gzip -f "$d/wolfpack_chain/chunk-001/POSCAR.in"
-_poscar 0.2800000000000000 > "$d/POSCAR"
+d="$W/chained"; mkdir -p "$d/wolfpack_chain"/{001,002,003}
+_poscar 0.2500000000000000 > "$d/POSCAR"
 _poscar 0.2900000000000000 > "$d/CONTCAR"
+_poscar 0.2800000000000000 > "$d/wolfpack_chain/003/POSCAR"
+cp "$d/CONTCAR" "$d/wolfpack_chain/003/CONTCAR"
+printf 'chain_kind="relax"\nchain_state="converged"\n' > "$d/wolfpack_chain/chain.env"
 cat > "$d/INCAR" <<'EOF'
 PREC = Accurate
 ENCUT = 400
@@ -89,67 +83,32 @@ EOF
 
 out=$(cd "$d" && timeout 300 bash "$VC" 2>&1); echo "$out" > "$d/check.log"
 
-# --- 1. it noticed the chain at all ---------------------------------------
-grep -qiE "chunk|whole chain" <<<"$out" \
-    && pass "vasp-check sees this is a chunked run and says which 'before' it used" \
-    || fail "vasp-check gave no sign it compared against anything but ./POSCAR"
+# --- 1. it says what it compared -------------------------------------------
+ok_if "grep -q 'chained relaxation: POSCAR is the input, CONTCAR the latest of 3 completed chunk(s)' <<<\"\$out\"" \
+      "vasp-check sees the chain and says what POSCAR and CONTCAR are"
 
 # --- 2. THE ASSERTION: the displacement is the WHOLE relaxation's ----------
-# The structure report prints a max displacement. 0.04 fractional along x in
-# this cell is 0.04 * 5.43 * sqrt(0.5) = 0.1536 A; the last chunk alone would
-# be a quarter of that, 0.0384 A. The two are far enough apart that no
-# tolerance can confuse them.
-# Anchored on the "all" row of the ATOMIC DISPLACEMENTS table (its first
-# column is the max), not on the first number in the report -- the cell table
-# prints several, and reading one of those instead is the mistake this suite
-# has made twice before.
+# 0.04 fractional along x in this cell is 0.04 * 5.43 * sqrt(0.5) = 0.1536 A;
+# the last chunk alone would be a quarter of that, 0.0384 A. Anchored on the
+# "all" row of the ATOMIC DISPLACEMENTS table (its first column is the max).
 dmax=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*all[[:space:]]/{print $3; exit}' <<<"$out")
 if [[ -z "$dmax" ]]; then
-    fail "no displacement was reported at all -- cannot tell which 'before' was used"
+    fail "no displacement was reported at all"
 else
     info "    reported max displacement: ${dmax} A"
     near "$dmax" 0.1536 0.02 "the displacement is the WHOLE chain's (0.04 frac), not the last chunk's (0.01)"
 fi
 
-# The "before" column is named after the chunk it came from -- not after the
-# temporary file the archive is unpacked into.
-ok_if "grep -qE '^  CELL +chunk-001 +CONTCAR' <<<\"\$out\" && ! grep -q 'wpcheck_poscar' <<<\"\$out\"" \
-      "the table's 'before' column reads chunk-001, not a temporary file name"
-
-# --- 3. an UNCHAINED relaxation is untouched ------------------------------
-# The mirror image. A folder with no wolfpack_chain/ must still diff its own
-# POSCAR, and the fix must not quietly change what it reports there.
+# --- 3. an UNCHAINED relaxation reads the same way, without the note -------
 d2="$W/plain"; mkdir -p "$d2"
-for f in INCAR KPOINTS OSZICAR OUTCAR CONTCAR; do cp "$d/$f" "$d2/"; done
-_poscar 0.2500000000000000 > "$d2/POSCAR"
+for f in INCAR KPOINTS OSZICAR OUTCAR CONTCAR POSCAR; do cp "$d/$f" "$d2/"; done
 out2=$(cd "$d2" && timeout 300 bash "$VC" 2>&1); echo "$out2" > "$d2/check.log"
-grep -qE "POSCAR -> CONTCAR" <<<"$out2" \
-    && pass "an unchained relaxation still diffs its own POSCAR, with the usual heading" \
-    || fail "the unchained path changed heading or stopped reporting"
-d2max=$(awk '/ATOMIC DISPLACEMENTS/{f=1; next} f && /^[[:space:]]*all[[:space:]]/{print $3; exit}' <<<"$out2")
-[[ -n "$d2max" ]] && near "$d2max" 0.1536 0.02 \
-    "and it reports the same 0.04 when its POSCAR really is the original" \
-    || info "    (no displacement line to cross-check on the unchained path)"
+ok_if "grep -q 'POSCAR -> CONTCAR' <<<\"\$out2\" && ! grep -q 'chained relaxation' <<<\"\$out2\"" \
+      "an unchained relaxation: the same heading, no chain note"
 
-# --- 4. a chain whose archive is missing does not break -------------------
-# Half a chain directory is what a killed run leaves. It must fall back to
-# ./POSCAR and still produce a report, not a broken one.
-d3="$W/halfchain"; mkdir -p "$d3/wolfpack_chain/chunk-001"
-for f in INCAR KPOINTS OSZICAR OUTCAR CONTCAR POSCAR; do cp "$d/$f" "$d3/"; done
-out3=$(cd "$d3" && timeout 300 bash "$VC" 2>&1)
-if grep -qiE "traceback \(most recent" <<<"$out3"; then
-    fail "a chunk directory with no archived POSCAR crashes vasp-check"
-elif grep -qE "What the relaxation changed" <<<"$out3"; then
-    pass "a chunk directory with nothing archived falls back to ./POSCAR and still reports"
-else
-    fail "a chunk directory with nothing archived produced no structure section"
-fi
-
-# --- 4b. THE CONTROL: the two answers really are distinguishable ----------
-# Everything above would also pass if the displacement happened to be the same
-# either way. Same POSCAR (0.28) and CONTCAR (0.29) as the chained folder, but
-# no chain -- so this is literally "what the last chunk moved", measured. If it
-# came out 0.1536 too, the assertion above would be proving nothing.
+# --- 4. THE CONTROL: the two answers really are distinguishable ------------
+# Literally what the last chunk moved (0.28 -> 0.29). If it came out 0.1536
+# too, the assertion above would be proving nothing.
 d4="$W/lastchunk"; mkdir -p "$d4"
 for f in INCAR KPOINTS OSZICAR OUTCAR CONTCAR; do cp "$d/$f" "$d4/"; done
 _poscar 0.2800000000000000 > "$d4/POSCAR"
@@ -161,9 +120,5 @@ else
     info "    last chunk alone would report: ${d4max} A"
     near "$d4max" 0.0384 0.005 "the last-chunk answer is a different number (0.01 frac), so the check above discriminates"
 fi
-
-# --- 5. no temporary file is left behind ----------------------------------
-ok_if "[[ -z \"\$(ls /tmp/wpcheck_poscar0.* 2>/dev/null)\" ]]" \
-      "the decompressed original is cleaned up, not left in /tmp"
 
 exit $(( FAIL_N > 0 ))

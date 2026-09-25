@@ -226,6 +226,19 @@ clean_dir() {
     #
     # -f does NOT override. -f suppresses the confirmation prompt, which is a
     # convenience; this is a correctness guard, and the two must not share a flag.
+    # A chunk directory of vasp-relax-loop (wolfpack_chain/NNN, NNN.tryK) holds
+    # the running VASP and the restart files of the next chunk: it belongs to
+    # the chain, and is refused while that chain is live.
+    local _real _root
+    _real="$(readlink -f "$d")"
+    if [[ $_real == */wolfpack_chain*/* ]]; then
+        _root="${_real%%/wolfpack_chain*}"
+        if (( ! ALLOW_RUNNING_CHAIN )) && chain_is_running "$_root"; then
+            echo "${YELLOW}!${RESET} ${BOLD}$d${RESET}: a directory of a live chunked run; refusing." >&2
+            return 0
+        fi
+    fi
+
     if (( ! ALLOW_RUNNING_CHAIN )) && chain_is_running "$d"; then
         local _jid; _jid="$(tr -dc '0-9' < "$d/wolfpack_chain/RUNNING" 2>/dev/null)"
         echo "${YELLOW}!${RESET} ${BOLD}$d${RESET}: a chunked run is live here (job ${_jid}); refusing." >&2
@@ -285,10 +298,12 @@ process_path() {
     fi
 
     if [[ $RECURSIVE -eq 1 ]]; then
-        # iterate every subdirectory; clean_dir will filter non-VASP ones
+        # iterate every subdirectory; clean_dir will filter non-VASP ones. A
+        # chain's own directories (wolfpack_chain*/) are left to the chain: it
+        # keeps only what the next chunk needs.
         while IFS= read -r -d '' sub; do
             clean_dir "$sub"
-        done < <(find "$p" -type d -print0)
+        done < <(find "$p" \( -type d -name 'wolfpack_chain*' -prune \) -o \( -type d -print0 \))
     else
         clean_dir "$p"
     fi

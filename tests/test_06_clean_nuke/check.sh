@@ -22,9 +22,13 @@ _survives(){ local d="$1" label="$2"; shift 2
 
 # --- vasp-clean: the inputs and the user's own files are untouchable --------
 d="$W/clean"; _populate "$d"
-( cd "$d" && timeout 60 bash "$TK_DIR/vasp_clean.sh" -y >clean.log 2>&1 ) || true
+( cd "$d" && timeout 60 bash "$TK_DIR/vasp_clean.sh" -f >clean.log 2>&1 ) || true
 _survives "$d" "vasp-clean leaves every VASP INPUT in place" $INPUTS
 _survives "$d" "vasp-clean leaves the user's own files alone" notes.txt run_me.sh
+# and it ran: -f is its no-prompt flag. With an unknown one it prints its help
+# and touches nothing, and every "survives" above would pass for that reason.
+[[ -e "$d/WAVECAR" ]] && fail "vasp-clean did not remove WAVECAR -- did it run at all?" \
+    || pass "vasp-clean removed the WAVECAR (it really ran)"
 
 # --- vasp-nuke: same promise, bigger blast radius --------------------------
 d="$W/nuke"; _populate "$d"
@@ -68,6 +72,17 @@ else
 fi
 _survives "$d" "the live run's restart objects survive the refusal" WAVECAR CONTCAR
 
+# vasp-relax-loop runs each chunk in wolfpack_chain/NNN.tryK: the running VASP
+# and the next chunk's restart files live there, not in the folder.
+c="$d/wolfpack_chain/003.try1"; mkdir -p "$c"
+for f in INCAR POSCAR OUTCAR WAVECAR CHGCAR; do echo x > "$c/$f"; done
+( timeout 60 bash "$TK_DIR/vasp_clean.sh" -f -r "$W" >rec.log 2>&1 ) || true
+_survives "$c" "vasp-clean -r leaves a chain's own directories alone" WAVECAR CHGCAR OUTCAR
+( timeout 60 bash "$TK_DIR/vasp_clean.sh" -f "$c" >chunk.log 2>&1 ) || true
+_survives "$c" "vasp-clean on a chunk directory of a live chain refuses" WAVECAR CHGCAR OUTCAR
+out=$(cd "$c" && timeout 60 bash "$TK_DIR/vasp_nuke.sh" 2>&1); rc=$?
+ok_if "(( rc != 0 )) && [[ -e '$c/WAVECAR' ]]" "vasp-nuke inside a chunk directory of a live chain refuses (rc=$rc)"
+
 # The mirror image: the SAME chain.env, but the job is gone. A stale "running"
 # must not block a cleanup forever.
 scancel "$_jid" 2>/dev/null
@@ -99,7 +114,7 @@ echo "an important document" > "$d/thesis.tex"
 echo "some data" > "$d/results.csv"
 ( cd "$d" && timeout 60 bash "$TK_DIR/vasp_nuke.sh" >n.log 2>&1 ) || true
 _survives "$d" "vasp-nuke in a non-calculation directory touches nothing" thesis.tex results.csv
-( cd "$d" && timeout 60 bash "$TK_DIR/vasp_clean.sh" -y >c.log 2>&1 ) || true
+( cd "$d" && timeout 60 bash "$TK_DIR/vasp_clean.sh" -f >c.log 2>&1 ) || true
 _survives "$d" "vasp-clean in a non-calculation directory touches nothing" thesis.tex results.csv
 
 # --- a directory that does not exist ---------------------------------------

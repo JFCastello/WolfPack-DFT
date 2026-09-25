@@ -1,23 +1,41 @@
 #!/usr/bin/env bash
-# test_33_chain_live_e2e -- a real chunked cell relaxation, on a real
-# scheduler, with a real VASP: the chain launches, each chunk measures its
-# memory and rewrites the next one's, and the relaxation converges.
+# test_33_chain_live_e2e -- vasp-relax-loop on a real scheduler with a real
+# VASP, after the real pipeline: vasp-dry-run, vasp-recommend-slurm,
+# vasp-test --full-size. The chain relaxes silicon in chunks of NSW = 2 until
+# VASP reports "reached required accuracy", and the result is compared with
+# one direct VASP run of the same relaxation.
 #
-# The fake harness (test_29..32) proves the decisions. This proves the
-# plumbing they depend on: that a real OUTCAR, a real srun and a real sacct
-# say what the decisions assume, and that a chunk resubmitting its successor
-# from inside a job works on a real scheduler.
+# The fake harness (test_36) proves the decisions. This proves the plumbing
+# they rest on, and measures what matters most: how close each chunk's
+# walltime estimate came to the time it actually used.
 set -uo pipefail
 source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
+have_vasp      || { skip "no VASP -- the live chain goes untested"; exit 0; }
+have_potcar Si || { skip "no Si POTCAR -- the live chain goes untested"; exit 0; }
+have_slurm     || { skip "no reachable slurmctld -- run tests/slurm_testbed.sh start"; exit 0; }
+export SLURM_CONF="$TESTBED_ROOT/slurm.conf"
 W="$WORK/chainlive"; rm -rf "$W"; mkdir -p "$W"
 
-have_vasp   || { skip "no VASP -- the live chain goes untested"; exit 0; }
-have_potcar Si || { skip "no Si POTCAR -- the live chain goes untested"; exit 0; }
-have_slurm  || { skip "no reachable slurmctld -- the live chain goes untested"; exit 0; }
-export SLURM_CONF="$TESTBED_ROOT/slurm.conf"
-
-d="$W/si"; mkdir -p "$d/.wolfpack"
-# The profile this chain runs under: the testbed's real node, 8 cores, 7 GB.
+# Si with one atom pushed off its site (the case of test_16), 6x6x6 k-points.
+_setup(){ # _setup DIR NSW
+    local d="$1"; mkdir -p "$d"
+    awk 'NR==10 { printf "   0.7700000000  0.7600000000  0.7500000000 Si\n"; next } { print }' \
+        "$CASES/Si/POSCAR" > "$d/POSCAR"
+    printf 'Auto\n0\nGamma\n6 6 6\n0 0 0\n' > "$d/KPOINTS"
+    cat "$WP_POTCAR_DIR/Si/POTCAR" > "$d/POTCAR"
+    cat > "$d/INCAR" <<EOF
+SYSTEM = Si live chain
+PREC   = Accurate
+ENCUT  = 400
+EDIFF  = 1E-6
+EDIFFG = -0.01
+ISMEAR = 0 ; SIGMA = 0.05
+IBRION = 2
+ISIF   = 2
+NSW    = $2
+NELM   = 60
+EOF
+}
 cat > "$W/cluster.conf" <<EOF
 WP_VASP_STD="$WP_VASP"
 WP_VASP_MODULES=""
@@ -25,95 +43,123 @@ WP_MAIN_PARTITION="local"
 WP_DEBUG_PARTITION="local"
 WP_MAIN_CPUS_PER_NODE="8"
 WP_DEBUG_CPUS_PER_NODE="8"
-WP_MAIN_MEM_PER_NODE_MB="7000"
-WP_DEBUG_MEM_PER_NODE_MB="7000"
-WP_MAX_CORES="8"
+WP_MAIN_MEM_PER_NODE_MB="6000"
+WP_DEBUG_MEM_PER_NODE_MB="6000"
+WP_MAX_CORES="4"
+WP_DEBUG_MAX_CORES="4"
+WP_ALLOC_PROFILE="balanced"
+WP_MEM_UTIL="0.81"
+WP_MEM_UTIL_MIN="0.80"
 WP_MAIN_MEM_MARGIN="0.02"
-WP_CHUNK_MARGIN_MIN="5"
-WP_ALLOC_PROFILE="whole-nodes"
+WP_DEBUG_MEM_MARGIN="0.05"
+WP_TEST_WALLTIME_MIN="3"
 EOF
+export WOLFPACK_CLUSTER_CONF="$W/cluster.conf"
 
-# Si, one atom displaced and the cell strained 3 %, so there is a relaxation
-# to do -- the ideal diamond cell would converge in one step and prove nothing.
-# ISYM = 0: as the atom returns, the symmetry would rise and change NKPTS
-# between chunks, which the chain rightly refuses to restart across.
-awk 'NR>=3 && NR<=5 { printf "  %.10f  %.10f  %.10f\n", $1*1.03, $2*1.03, $3*1.03; next }
-     NR==10 { printf "   0.2700000000  0.2600000000  0.2500000000\n"; next } { print }' \
-    "$CASES/Si/POSCAR" > "$d/POSCAR"
-printf 'Auto\n0\nGamma\n4 4 4\n0 0 0\n' > "$d/KPOINTS"
-cat "$WP_POTCAR_DIR/Si/POTCAR" > "$d/POTCAR"
-cat > "$d/INCAR" <<'EOF'
-SYSTEM = Si live chain
-PREC   = Accurate
-ENCUT  = 400
-EDIFF  = 1E-6
-NELM   = 60
-IBRION = 2
-ISIF   = 3
-NSW    = 30
-EDIFFG = -0.01
-ISYM   = 0
-ISMEAR = 0
-SIGMA  = 0.05
-LREAL  = .FALSE.
-EOF
-cat > "$d/slurm_vasptest.sh" <<EOF
-#!/bin/bash
-#SBATCH --job-name=vasp
-#SBATCH --partition=local
-#SBATCH --nodes=1
-#SBATCH --ntasks=4
-#SBATCH --ntasks-per-node=4
-#SBATCH --mem-per-cpu=1000
-#SBATCH --time=00:30:00
-/usr/bin/time -v srun --cpu-bind=cores $WP_VASP
-EOF
-printf 'stage="test"\ntest_avg_loop="0.5"\ntest_ranks="4"\ntest_cpu_eff="90"\ntest_startup_s="10"\ntest_scf_per_ionic="10"\n' \
-    > "$d/.wolfpack/state.env"
+# --- the reference: one direct run ----------------------------------------------
+_setup "$W/direct" 30
+( cd "$W/direct" && OMP_NUM_THREADS=1 timeout 900 mpirun -np 4 "$WP_VASP" > vasp.log 2>&1 )
+e_direct=$(grep -oP 'F= *\K-?[0-9.E+]+' "$W/direct/OSZICAR" | tail -1)
+n_direct=$(grep -c 'F=' "$W/direct/OSZICAR")
+ok_if "grep -q 'reached required accuracy' '$W/direct/OUTCAR'" \
+      "the reference relaxation converged in one run (${n_direct} ionic steps, E = ${e_direct} eV)"
 
-# 8-min chunks: 3 min of VASP after the 5-min margin -- short enough that the
-# relaxation needs more than one chunk.
-out=$(cd "$d" && WOLFPACK_CLUSTER_CONF="$W/cluster.conf" bash "$TK_DIR/vasp_chain.sh" \
-        --mode relax --walltime 8 2>&1); rc=$?
-echo "$out" > "$W/launch.log"
+# --- the pipeline, then the chain ----------------------------------------------------
+d="$W/si"; _setup "$d" 2
+cd "$d" || exit 1
+timeout 300 bash "$TK_DIR/vasp_dry_run.sh" > dry.log 2>&1
+for _ in $(seq 1 60); do [[ -s .wolfpack/dryrun_OUTCAR ]] && break; sleep 2; done
+# 4 ranks, as the reference run: on this 8-core laptop 8 ranks are 5 x slower per step.
+timeout 300 "$WP_PY" "$TK_DIR/vasp_recommend_slurm.py" --min-cores 4 --max-cores 4 > rec.log 2>&1
+ok_if "[[ -s slurm.sh ]]" "stage 2 chose a layout ($(grep -oP '(?<=--ntasks=)\d+' slurm.sh 2>/dev/null | head -1) ranks)"
+[[ -s slurm.sh ]] || exit 1
+timeout 300 bash "$TK_DIR/vasp_test.sh" --full-size > test.log 2>&1
+for _ in $(seq 1 150); do [[ -s .wolfpack/vasptest_OSZICAR && -s slurm_vasptest.sh ]] && break; sleep 2; done
+ok_if "[[ -s .wolfpack/vasptest_OSZICAR && -s .wolfpack/vasptest_OUTCAR ]]" \
+      "vasp-test --full-size kept its OUTCAR and OSZICAR for the chain"
+[[ -s .wolfpack/vasptest_OSZICAR ]] || exit 1
+ok_if "grep -q 'test_full_size=\"1\"' .wolfpack/state.env && [[ \$(grep -oP 'test_ranks=\"\K[0-9]+' .wolfpack/state.env | tail -1) == \$(grep -oP '(?<=--ntasks=)\d+' slurm_vasptest.sh | head -1) ]]" \
+      "and measured at the production rank count"
+_su=$(grep -oP 'test_startup_s="\K[0-9.]+' .wolfpack/state.env | tail -1)
+ok_if "awk -v s='${_su:-0}' 'BEGIN{exit !(s>0)}'" \
+      "its start-up time is no longer clamped to 0 when an ionic step completed (${_su:-?} s)"
+
+out=$(timeout 120 bash "$TK_DIR/vasp_relax_loop.sh" --max-ionic 40 2>&1); rc=$?
+echo "$out" > launch.log
 ok_if "(( rc == 0 ))" "the chain launches on the live scheduler (rc=$rc)"
 (( rc == 0 )) || exit 1
-
-# Wait for it to end, one way or the other.
-deadline=$(( SECONDS + 900 ))
-while (( SECONDS < deadline )); do
-    [[ -f "$d/wolfpack_chain/FINISHED" || -f "$d/wolfpack_chain/STOPPED" ]] && break
-    sleep 10
+state(){ sed -n "s/^$1=\"\(.*\)\"$/\1/p" wolfpack_chain/chain.env | head -1; }
+for _ in $(seq 1 540); do
+    case "$(state chain_state)" in converged|stopped) break ;; esac
+    sleep 5
 done
-# Kept next to the README as evidence. NB: lib.sh no longer defines $LOGS --
-# reading it under `set -u` killed this test silently on its first run.
-mkdir -p "$(dirname "${BASH_SOURCE[0]}")/logs"
-cp -f "$d/wolfpack_chain/chain.log" "$(dirname "${BASH_SOURCE[0]}")/logs/chain.log" 2>/dev/null
+cp relax_progress.txt "$W/progress.txt" 2>/dev/null
+info "$(sed 's/^/    /' relax_progress.txt)"
+ok_if "[[ '$(state chain_state)' == converged ]]" \
+      "the chain converged: VASP's 'reached required accuracy' ($(state chain_state) $(state stop_reason))"
 
-ok_if "[[ -f '$d/wolfpack_chain/FINISHED' ]]" \
-      "the relaxation CONVERGED through the chain ($( [[ -f $d/wolfpack_chain/STOPPED ]] && sed -n 's/^reason *: //p' "$d/wolfpack_chain/STOPPED"))"
-nchunk=$(grep -cE '^  [0-9]+ ' "$d/wolfpack_chain/chain.log" 2>/dev/null)
-ok_if "(( nchunk >= 2 ))" "it took more than one chunk, so a boundary was crossed for real ($nchunk chunks)"
-info "    chain.log:"; sed 's/^/      /' "$d/wolfpack_chain/chain.log" | while IFS= read -r l; do info "$l"; done
+# --- plumbing -----------------------------------------------------------------------
+n=$(ls -d wolfpack_chain/[0-9][0-9][0-9] 2>/dev/null | wc -l)
+bad=0
+for i in $(seq 2 "$n"); do
+    a=$(printf 'wolfpack_chain/%03d' $((i-1))); b=$(printf 'wolfpack_chain/%03d' "$i")
+    cmp -s "$a/CONTCAR" "$b/POSCAR" || bad=$((bad+1))
+done
+ok_if "(( n >= 2 && bad == 0 ))" "each of the ${n} chunks started from the CONTCAR of the one before"
+ok_if "cmp -s POSCAR '$W/direct/POSCAR' && cmp -s CONTCAR \"wolfpack_chain/\$(printf %03d $n)/CONTCAR\"" \
+      "the folder's POSCAR is still the input; its CONTCAR is the last chunk's"
+tmo=$(awk -F'\t' '$12 ~ /TIMEOUT|OOM|DIED/' wolfpack_chain/progress.rows | wc -l)
+ok_if "(( tmo == 0 ))" "no chunk ran out of its walltime or memory (${tmo} did)"
 
-# Every chunk measured its memory, on a real cluster.
-nomem=$(awk '/^  [0-9]+ / && ($9+0) <= 0' "$d/wolfpack_chain/chain.log" 2>/dev/null | wc -l)
-ok_if "(( nomem == 0 ))" "every chunk measured its own memory (peakMB column filled in all $nchunk)"
-src=$(sed -n 's/^last_mem_src="\(.*\)"$/\1/p' "$d/wolfpack_chain/chain.env")
-info "    memory source on this cluster: ${src:-?}"
-ok_if "[[ -n '$src' && '$src' != 'not measured' ]]" "the measurement came from ${src} -- a real one"
+# --- the estimates against what the chunks did -----------------------------------------
+# Two estimates per chunk, of different kinds. The electronic steps of its first
+# ionic step (est.e) is the method's own prediction, and does not depend on the
+# machine. The time is that count times the seconds per electronic step, and
+# inherits however repeatable the machine is -- which is measured here too, from
+# VASP's own LOOP lines, not assumed.
+sec(){ awk -F: '{ print $1*3600 + $2*60 + $3 }' <<<"$1"; }
+info "    chunk  est.e  e-steps  estimate  used  used/estimate"
+worst=0; short=0
+while IFS=$'\t' read -r ch tr ns io ge ne ee es as us en fm re; do
+    [[ $re == ok || $re == CONVERGED ]] || continue
+    first=${ne%% *}
+    (( ee - first < -2 )) && short=$((short+1))
+    e=$(sec "$es"); u=$(sec "$us")
+    r=$(awk -v u="$u" -v e="$e" 'BEGIN{ printf "%.2f", (e > 0 ? u/e : 0) }')
+    info "    $(printf '%5s %6s %8s %8ss %5ss %8s' "$ch" "$ee" "$first" "$e" "$u" "$r")"
+    awk -v r="$r" -v w="$worst" 'BEGIN{exit !(r > w)}' && worst=$r
+done < wolfpack_chain/progress.rows
+ok_if "(( short == 0 ))" \
+      "the electronic steps of each chunk's first ionic step were never under-estimated by more than the 2-step margin"
+spread=$(cat wolfpack_chain/[0-9][0-9][0-9]/OUTCAR | awk '/LOOP:/{ k = split($0, a, "real time"); v = a[2] + 0
+             if (mn == "" || v < mn) mn = v; if (v > mx) mx = v } END{ printf "%.1f-%.1f", mn, mx }')
+info "    seconds per electronic step on this machine, across the chunks (VASP's LOOP): ${spread}"
+info "    the largest used/estimate: ${worst} -- what the walltime's x 1.15 + 5 min has to absorb"
 
-# The request was rewritten from it. Si with 4 ranks uses a few hundred MB per
-# rank, so 1000 MB/cpu comes DOWN to what was measured plus headroom.
-mem=$(sed -n 's/^chain_mem_per_cpu="\(.*\)"$/\1/p' "$d/wolfpack_chain/chain.env")
-peak=$(sed -n 's/^mem_peak_max_mb="\(.*\)"$/\1/p' "$d/wolfpack_chain/chain.env")
-ok_if "[[ -n '$mem' ]] && (( mem != 1000 ))" \
-      "the chunk allocation was rewritten from the measurement: 1000 -> ${mem} MB/cpu (peak ${peak} MB/rank)"
-ok_if "(( ${mem:-0} >= ${peak:-1} ))" "and never below the largest peak measured (${mem} >= ${peak})"
+# --- the answer against the direct run ------------------------------------------------
+e_chain=$(grep -oP 'F= *\K-?[0-9.E+]+' OSZICAR | tail -1)
+de=$(awk -v a="$e_chain" -v b="$e_direct" 'BEGIN{d=a-b; if(d<0)d=-d; printf "%.6f", d}')
+ok_if "awk -v d='$de' 'BEGIN{exit !(d < 0.002)}'" \
+      "the chain and the direct run agree in energy (|dE| = ${de} eV; chain ${e_chain}, direct ${e_direct})"
+dr=$("$WP_PY" - "$W/direct/CONTCAR" CONTCAR <<'PY'
+import sys
+def frac(p):
+    L = open(p).read().split("\n"); s = float(L[1].split()[0])
+    lat = [[float(x) * s for x in L[i].split()[:3]] for i in (2, 3, 4)]
+    n = sum(int(x) for x in L[6].split())
+    return lat, [[float(x) for x in L[8 + i].split()[:3]] for i in range(n)]
+la, a = frac(sys.argv[1]); _, b = frac(sys.argv[2])
+m = 0
+for p, q in zip(a, b):
+    d = [((x - y + 0.5) % 1) - 0.5 for x, y in zip(p, q)]
+    c = [sum(d[k] * la[k][j] for k in range(3)) for j in range(3)]
+    m = max(m, sum(v * v for v in c) ** 0.5)
+print("%.4f" % m)
+PY
+)
+ok_if "awk -v d='${dr:-9}' 'BEGIN{exit !(d < 0.01)}'" \
+      "and in structure (max |dr| = ${dr} A)"
+geoms=$(state geoms_done); scfs=$(state scf_total)
+info "    the direct run: ${n_direct} ionic steps; the chain: ${n} chunks, ${geoms} geometries, ${scfs} SCF runs"
 
-# The structure record vasp-check relies on.
-ok_if "[[ -s '$d/wolfpack_chain/chunk-001/POSCAR.in.gz' ]]" \
-      "chunk-001/POSCAR.in.gz holds the original geometry for vasp-check's whole-chain diff"
-
-scancel -u "$USER" 2>/dev/null || true
 exit $(( FAIL_N > 0 ))

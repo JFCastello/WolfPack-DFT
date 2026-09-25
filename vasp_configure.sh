@@ -49,8 +49,9 @@
 #   --main-cpus N          --debug-cpus N
 #   --main-mem MB          --debug-mem MB           --max-cores N
 #   --debug-max-cores N       (core cap for the vasp-test benchmark job)
-#   --chunk-walltime MIN      (walltime of ONE chunk of a chained relax/SCF;
-#                              vasp-relax-loop --walltime overrides it per run)
+#   --chunk-walltime MIN      (walltime of ONE chunk of a chained SCF;
+#                              vasp-scf-loop --walltime overrides it per run.
+#                              vasp-relax-loop estimates its own, per chunk)
 #   --chunk-margin MIN        (minutes kept at the end of a chunk so VASP can
 #                              close its ionic step; raised to 8% of the
 #                              walltime when that is larger)
@@ -88,6 +89,7 @@ WP_MAIN_PARTITION=""; WP_DEBUG_PARTITION=""
 WP_MAIN_CPUS_PER_NODE=""; WP_DEBUG_CPUS_PER_NODE=""
 WP_MAIN_MEM_PER_NODE_MB=""; WP_DEBUG_MEM_PER_NODE_MB=""
 WP_MAIN_NUMA_CORES=""; WP_MAX_CORES=""
+WP_INTERCONNECT=""; WP_INTERCONNECT_DETAIL=""; WP_ETH_SPEED_MBS=""   # the network (LPLANE)
 # Pipeline policy (asked in section 7; not hardcoded in the stage scripts).
 WP_TEST_WALLTIME_MIN=""    # debug/test partition walltime cap (min); VASP runs this minus the analysis margin
 WP_CHUNK_WALLTIME_MIN=""   # walltime of ONE chunk of a chained relax/SCF (min)
@@ -186,6 +188,10 @@ while [[ $# -gt 0 ]]; do
         --debug-mem)        _cli_int WP_DEBUG_MEM_PER_NODE_MB "${2:?}" "--debug-mem"; shift 2 ;;
         --max-cores)        _cli_int WP_MAX_CORES "${2:?}" "--max-cores"; shift 2 ;;
         --alloc-profile)    _cli_profile WP_ALLOC_PROFILE "${2:?}" "--alloc-profile"; shift 2 ;;
+        --interconnect)     case "${2:-}" in
+                                infiniband|omnipath|roce|slingshot|ethernet|unknown) _cli WP_INTERCONNECT "$2" ;;
+                                *) echo "vasp-configure: --interconnect is one of infiniband, omnipath, roce, slingshot, ethernet, unknown; got '${2:-}'." >&2; exit 2 ;;
+                            esac; shift 2 ;;
         --test-walltime)    _cli_int WP_TEST_WALLTIME_MIN "${2:?}" "--test-walltime"; shift 2 ;;
         --chunk-walltime)   _cli_int WP_CHUNK_WALLTIME_MIN "${2:?}" "--chunk-walltime"; shift 2 ;;
         --chunk-margin)     _cli_int WP_CHUNK_MARGIN_MIN "${2:?}" "--chunk-margin"; shift 2 ;;
@@ -940,6 +946,30 @@ case "${WP_ALLOC_PROFILE,,}" in
 esac
 echo
 
+# ---- 5b. the interconnect -------------------------------------------------
+# The VASP wiki's LPLANE page recommends different settings for "a LINUX
+# cluster linked by Infiniband" and "a LINUX cluster linked by 1 Gbit
+# Ethernet" (https://vasp.at/wiki/LPLANE). Read from this node's /sys: the
+# login node normally carries the same network as the compute nodes, and
+# vasp-test reads it again inside its job, on a compute node, and says so if
+# it differs.
+_wp_hw="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/wolfpack_hw.sh"
+if [[ -z $WP_INTERCONNECT && -r $_wp_hw ]]; then
+    # shellcheck source=/dev/null
+    source "$_wp_hw"
+    IFS='|' read -r WP_INTERCONNECT WP_INTERCONNECT_DETAIL WP_ETH_SPEED_MBS < <(wp_interconnect)
+    note "  WP_INTERCONNECT=${WP_INTERCONNECT}  <- /sys on $(hostname -s 2>/dev/null): ${WP_INTERCONNECT_DETAIL:-no detail}"
+fi
+: "${WP_INTERCONNECT:=unknown}"
+ask WP_INTERCONNECT "Interconnect (infiniband | omnipath | roce | slingshot | ethernet | unknown)" "$WP_INTERCONNECT" \
+    "The network between the compute nodes. vasp-recommend-slurm reads it for LPLANE: on a cluster linked by 1 Gbit Ethernet the VASP wiki says LPLANE must be .TRUE. Detected from /sys/class/infiniband (InfiniBand, Omni-Path, RoCE), /sys/class/cxi (Slingshot), else /sys/class/net (Ethernet and its speed)."
+case "${WP_INTERCONNECT,,}" in
+    infiniband|omnipath|roce|slingshot|ethernet|unknown) WP_INTERCONNECT="${WP_INTERCONNECT,,}" ;;
+    *) warn "unknown interconnect '$WP_INTERCONNECT' -- recorded as unknown."; WP_INTERCONNECT="unknown" ;;
+esac
+echo
+
+
 # ---- 5b. DEBUG/test job cap ----
 # The test benchmark runs on the DEBUG configuration.  When the DEBUG partition IS
 # the MAIN one (a cluster with no separate debug queue), this cap is what still keeps
@@ -1002,9 +1032,9 @@ fi
 ask WP_TEST_WALLTIME_MIN  "DEBUG/test walltime cap (min)" "$WP_TEST_WALLTIME_MIN" \
     "Walltime of the vasp-test benchmark job. VASP gets this minus about 90 s, which is what the in-job memory analysis needs to read sacct and write the report."
 ask WP_CHUNK_WALLTIME_MIN "Chunk walltime (min)" "$WP_CHUNK_WALLTIME_MIN" \
-    "Walltime of ONE chunk when a long relaxation or SCF is split by vasp-relax-loop / vasp-scf-loop. Shorter chunks backfill into the queue sooner; longer ones mean fewer queue waits and fewer restarts. Asking for N minutes is a ceiling, not a duration: a chunk ends as soon as its step budget is spent."
+    "Walltime of ONE chunk when a long SCF is split by vasp-scf-loop. Shorter chunks backfill into the queue sooner; longer ones mean fewer queue waits and fewer restarts. (vasp-relax-loop does not use it: it estimates each chunk's walltime from what the last one measured.)"
 ask WP_CHUNK_MARGIN_MIN   "Chunk end margin (min)" "$WP_CHUNK_MARGIN_MIN" \
-    "Time kept free at the end of each chunk so VASP can finish the ionic step it is on and write its WAVECAR before SLURM kills the job. Raised to 8% of the chunk walltime when that is larger."
+    "Time kept free at the end of each vasp-scf-loop chunk so VASP can leave its electronic loop and write its WAVECAR before SLURM kills the job. Raised to 8% of the chunk walltime when that is larger."
 ask WP_MEM_UTIL_MIN       "Minimum memory-utilisation policy (fraction)"                    "$WP_MEM_UTIL_MIN" \
     "Your site's rule for how much of the RAM a job requests it must actually use. Memory requests are sized so measured usage lands at or above this."
 ask WP_MAIN_MEM_MARGIN    "MAIN  node memory margin (fraction left free)"           "$WP_MAIN_MEM_MARGIN" \
@@ -1040,7 +1070,7 @@ WP_DEBUG_PARTITION WP_MAIN_CPUS_PER_NODE WP_DEBUG_CPUS_PER_NODE \
 WP_MAIN_MEM_PER_NODE_MB WP_DEBUG_MEM_PER_NODE_MB WP_MAIN_NUMA_CORES WP_MAX_CORES \
 WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN WP_MEM_UTIL_MIN \
 WP_MEM_UTIL WP_GW_NODE_FRAC WP_ALLOC_PROFILE WP_DEBUG_MAX_CORES \
-WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN "
+WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN WP_INTERCONNECT WP_INTERCONNECT_DETAIL WP_ETH_SPEED_MBS "
     while IFS= read -r _line; do
         [[ "$_line" =~ ^[[:space:]]*(WP_[A-Za-z0-9_]+)=(.*)$ ]] || continue
         _k="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
@@ -1065,7 +1095,8 @@ fi
              WP_TEST_WALLTIME_MIN WP_CHUNK_WALLTIME_MIN WP_CHUNK_MARGIN_MIN \
              WP_MEM_UTIL_MIN WP_MEM_UTIL \
              WP_GW_NODE_FRAC \
-             WP_DEBUG_MAX_CORES WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN; do
+             WP_DEBUG_MAX_CORES WP_MAIN_MEM_MARGIN WP_DEBUG_MEM_MARGIN \
+             WP_INTERCONNECT WP_INTERCONNECT_DETAIL WP_ETH_SPEED_MBS; do
         # WP_EXTRA_ENV may carry a literal $LD_LIBRARY_PATH -> single-quote it.
         if [[ "$k" == WP_EXTRA_ENV ]]; then printf "%s='%s'\n" "$k" "${!k}"
         else printf '%s="%s"\n' "$k" "${!k}"; fi
@@ -1095,6 +1126,7 @@ echo "    VASP modules    : ${WP_VASP_MODULES:-(none)}  [$WP_MODULE_CMD]"
 echo "    main partition  : $WP_MAIN_PARTITION  (${WP_MAIN_CPUS_PER_NODE} cores, ${WP_MAIN_MEM_PER_NODE_MB} MB/node)"
 echo "    debug partition : $WP_DEBUG_PARTITION  (${WP_DEBUG_CPUS_PER_NODE} cores, ${WP_DEBUG_MEM_PER_NODE_MB} MB/node)"
 echo "    max cores/job   : $WP_MAX_CORES"
+echo "    interconnect    : ${WP_INTERCONNECT}${WP_INTERCONNECT_DETAIL:+  (${WP_INTERCONNECT_DETAIL})}"
 echo "    test walltime   : ${WP_TEST_WALLTIME_MIN} min   mem policy: >=${WP_MEM_UTIL_MIN} (target ${WP_MEM_UTIL})"
 echo "    chunk walltime  : ${WP_CHUNK_WALLTIME_MIN} min (margin ${WP_CHUNK_MARGIN_MIN} min)   -- one chunk of a chained relax/SCF"
 echo "    mem margins     : main ${WP_MAIN_MEM_MARGIN} (=$(awk -v m=$WP_MAIN_MEM_MARGIN 'BEGIN{printf "%.0f", (1-m)*100}')% usable)"\

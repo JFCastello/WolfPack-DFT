@@ -45,11 +45,10 @@ COMMAND_MAP=(
     "vasp-test|vasp_test.sh"
     "vasp-recommend-slurm|vasp_recommend_slurm.py"
     "vasp-diagnose|vasp_diagnose.sh"
-    # One implementation, two entry points: the script picks its mode from the
-    # name it was invoked as.
+    # Chained jobs: an SCF cut on NELM, a relaxation cut on a fixed NSW.
     "vasp-scf-loop|vasp_chain.sh"
-    "vasp-relax-loop|vasp_chain.sh"
-    # The queue study vasp-relax-loop runs at launch, as a command of its own.
+    "vasp-relax-loop|vasp_relax_loop.sh"
+    # How long a job waits in this queue, and your fairshare.
     "backfill-study|backfill_study.py"
     "vasp-check|vasp_check.sh"
     "vasp-slurm-report|vasp_slurm_report.sh"

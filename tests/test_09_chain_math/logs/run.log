@@ -1,9 +1,7 @@
   [32m[ OK ][0m vasp-scf-loop refuses a RELAXATION INCAR
-  [32m[ OK ][0m vasp-relax-loop refuses a STATIC INCAR
+  [32m[ OK ][0m vasp_chain.sh refuses the relax mode and names vasp-relax-loop
   [32m[ OK ][0m a molecular-dynamics run is refused, not chunked
-  [32m[ OK ][0m a CELL relaxation at too low an ENCUT is refused (Pulay)
   [32m[ OK ][0m a walltime with no room to compute is refused
   [32m[ OK ][0m a chain refuses to size itself without a MEASURED per-step time
   [32m[ OK ][0m a chain refuses when stage 2 never produced a job script
   [32m[ OK ][0m a chain refuses outside a calculation folder
-  [32m[ OK ][0m invoked under an unknown name, it refuses instead of guessing

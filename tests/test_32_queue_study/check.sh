@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# test_32_queue_study -- the chunk walltime chosen from what the queue has
-# actually done to jobs shaped like this one.
+# test_32_queue_study -- backfill-study: how long a job waits, from what the
+# queue has actually done to jobs shaped like it; and the user's fairshare.
 #
 # A fake accounting history is used on purpose: the right answer is then
 # arithmetic chosen here, not something computed by the code under test.
@@ -52,124 +52,30 @@ print(int(j[0].wait_s))")
 ok_if "[[ '$held' == 60 ]]" "a job held 10 h by a dependency and started 1 min after is a 60 s wait (got ${held} s)"
 
 # ===========================================================================
-# 2. THE DECISION, ON A HISTORY WITH A KNOWN ANSWER
+# 2. A HISTORY WITH A KNOWN ANSWER
 # ===========================================================================
-# The job: 1 node, 4 cores, 8 GB; ~25.6 s per ionic step; 20 steps to do.
-# At every candidate walltime the chain needs the same 3 chunks (3, 6, 11:
-# the calibration chunk, then the cap may only double), so the WAIT decides:
-#     requests <= 1 h wait 2 h;  1-2 h wait 5 min;  2-4 h wait 4 h
-# The answer is 2 h.
+# Jobs of 1 node, 4 cores, 8 GB: requests <= 1 h waited 2 h; 1-2 h, 5 min;
+# 2-4 h, 4 h -- twelve of each.
 H="$W/hist.txt"; : > "$H"
 _hist "$H" 60 120 12
 _hist "$H" 120 5 12
 _hist "$H" 240 240 12
-res=$("$WP_PY" -c "
-import sys, json; sys.path.insert(0, '$TK_DIR')
-import backfill_study as Q
-jobs = Q.load_jobs(open('$H').read().splitlines())
-r = Q.study(jobs, nodes=1, cpus=4, mem_mb=8192, t_ion_s=25.6, startup_s=10,
-            margin_cfg_min=5, steps=20, max_time_min=None, default_wall_min=60)
-print(r['chosen_min'], r['source'], r['level'])
-print(' '.join(str(x['chunks']) for x in r['rows'] if x['n']))")
-ok_if "[[ '$(sed -n 1p <<<"$res" | cut -d' ' -f1-2)' == '120.0 study' ]]" \
-      "the study picks the walltime with the shortest expected time: $(sed -n 1p <<<"$res" | cut -d' ' -f1) min (expected 120)"
-ok_if "[[ '$(sed -n 2p <<<"$res")' == '3 3 3' ]]" \
-      "and it replays the chain's ramp: 3 chunks at every candidate (got: $(sed -n 2p <<<"$res"))"
-ok_if "grep -q 'nodes + cores + memory' <<<\"\$res\"" "the comparison is against jobs similar on nodes, cores AND memory"
+d=$(ch_setup lookonly); cp "$H" "$W/lookonly.fake/history"
+t=$(ch_setup twins); cp "$H" "$W/twins.fake/history"
 
-# ===========================================================================
-# 3. THE COMPARISON RELAXES, AND SAYS SO
-# ===========================================================================
-# Only jobs of a very different core count: the cores axis cannot be kept.
-H2="$W/hist2.txt"; : > "$H2"
-_hist "$H2" 60 120 12 1 64 8G
-_hist "$H2" 120 5 12 1 64 8G
+# Only 64-core jobs, for a 4-core job: no job of its size or core count, so the
+# whole table is compared on the node count alone -- and its title says so.
+H2="$W/hist64.txt"; : > "$H2"
+_hist "$H2" 60 30 10 1 64 100G
 lvl=$("$WP_PY" -c "
 import sys; sys.path.insert(0, '$TK_DIR')
 import backfill_study as Q
-r = Q.study(Q.load_jobs(open('$H2').read().splitlines()), nodes=1, cpus=4, mem_mb=8192,
-            t_ion_s=25.6, startup_s=10, margin_cfg_min=5, steps=20, max_time_min=None,
-            default_wall_min=60)
-print(r['level'])")
-ok_if "[[ '$lvl' == nodes ]]" "with no job of a similar size, it compares on nodes alone -- and reports that level ('$lvl')"
+lv, rows = Q.band_table(Q.load_jobs(open('$H2').read().splitlines()), 1, 4, 8192)
+print(lv, rows[0]['n'] if rows else 0)")
+ok_if "[[ '$lvl' == 'nodes 10' ]]" "with no job of a similar size or core count, the table compares on the node count ('$lvl')"
 
 # ===========================================================================
-# 4. NOT ENOUGH DATA: NO PROPOSAL, NOT A GUESS
-# ===========================================================================
-H3="$W/hist3.txt"; : > "$H3"
-_hist "$H3" 60 120 3
-_hist "$H3" 120 5 3
-fb=$("$WP_PY" -c "
-import sys; sys.path.insert(0, '$TK_DIR')
-import backfill_study as Q
-r = Q.study(Q.load_jobs(open('$H3').read().splitlines()), nodes=1, cpus=4, mem_mb=8192,
-            t_ion_s=25.6, startup_s=10, margin_cfg_min=5, steps=20, max_time_min=None,
-            default_wall_min=60)
-print(r['source'], '|', r['reason'])")
-ok_if "grep -q '^fallback | fewer than two' <<<\"\$fb\"" \
-      "three jobs per walltime are not evidence: no proposal, and it says why"
-
-# MaxTime bounds the candidates, and is itself one.
-mt=$("$WP_PY" -c "
-import sys; sys.path.insert(0, '$TK_DIR')
-import backfill_study as Q
-r = Q.study([], nodes=1, cpus=4, mem_mb=8192, t_ion_s=25.6, startup_s=10, margin_cfg_min=5,
-            steps=20, max_time_min=150, default_wall_min=60)
-print(max(x['wall_min'] for x in r['rows']), 150.0 in [x['wall_min'] for x in r['rows']])")
-ok_if "[[ '$mt' == '150.0 True' ]]" "no candidate exceeds the partition's MaxTime, and MaxTime itself is a candidate"
-
-# ===========================================================================
-# 5. THE CHAIN'S ARITHMETIC AND THE STUDY'S ARE THE SAME ARITHMETIC
-# ===========================================================================
-# The study replays the chain to count chunks. If the two drifted, it would be
-# optimising a chain that does not exist.
-d=$(ch_setup same)
-ch_run "$d" --walltime 120 >/dev/null 2>&1
-tw_chain=$(ch_state "$d" t_work_s)
-tw_study=$("$WP_PY" -c "
-import sys; sys.path.insert(0, '$TK_DIR')
-import backfill_study as Q
-print(int(Q.chunk_budget(120, 5, 10)))")
-ok_if "[[ '$tw_chain' == '$tw_study' ]]" "the study's time budget per chunk equals the chain's (${tw_study} s vs ${tw_chain} s)"
-ramp=$("$WP_PY" -c "
-import sys; sys.path.insert(0, '$TK_DIR')
-import backfill_study as Q
-print(Q.replay_chunks(60, 30, 10, 5, 20))")
-ok_if "[[ '$ramp' == '(True, 95, 3)' ]]" \
-      "the study's ramp is the chain's: a calibration chunk of 3, then doubling, capped by what remains -- 3, 6, 11 -> 3 chunks for 20 steps ($ramp)"
-
-# ===========================================================================
-# 6. IN THE CHAIN: the study decides the walltime at launch
-# ===========================================================================
-d=$(ch_setup chosen)
-cp "$H" "$W/chosen.fake/history"
-out=$(ch_run "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && [[ '$(ch_job "$d" time)' == 02:00:00 ]]" \
-      "launched with no --walltime, the chain uses the study's choice ($(ch_job "$d" time))"
-ok_if "[[ '$(ch_state "$d" chain_wall_source)' == 'backfill-study' ]]" "and records that it was backfill-study's"
-ok_if "grep -q 'PROPOSED CHUNK' <<<\"\$out\" && [[ -s '$d/wolfpack_chain/backfill_study.txt' ]]" \
-      "the study is shown at launch and kept in wolfpack_chain/backfill_study.txt"
-
-# No accounting data: the profile's default, and the reason.
-d=$(ch_setup nodata)
-out=$(ch_run "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && [[ '$(ch_job "$d" time)' == 01:00:00 ]]" \
-      "with no accounting data the profile's default is used ($(ch_job "$d" time))"
-ok_if "grep -q 'could not decide' <<<\"\$(ch_state '$d' chain_wall_source)\"" "and the state says why the study could not decide"
-
-# --no-queue-study skips it.
-d=$(ch_setup nostudy); cp "$H" "$W/nostudy.fake/history"
-ch_run "$d" --no-queue-study >/dev/null 2>&1
-ok_if "[[ '$(ch_job "$d" time)' == 01:00:00 && ! -f '$d/wolfpack_chain/backfill_study.txt' ]]" \
-      "--no-queue-study uses the profile's walltime and runs no study"
-
-# The study is not the chain's any more: --study points at the command.
-d=$(ch_setup lookonly); cp "$H" "$W/lookonly.fake/history"
-must_refuse "vasp-relax-loop --study points at the command that does it now" "backfill-study" \
-    ch_run "$d" --study
-
-# ===========================================================================
-# 7. backfill-study, STANDING ALONE: the queue, and nothing else
+# 3. THE REPORT, IN A CALCULATION FOLDER
 # ===========================================================================
 # In a calculation folder it reads the job from slurm_vasptest.sh -- here 1
 # node, 4 ranks, 8 GB, --time=04:00:00 -- and reports what the queue did to
@@ -180,7 +86,6 @@ must_refuse "vasp-relax-loop --study points at the command that does it now" "ba
 #           Q1 at rank 5.75 = 5 min, Q2 (5 + 240)/2 min = 2.0 h,
 #           Q3 at rank 17.25 = 4.0 h
 #   the job as written (4 h) falls in 1-4 h: about 2.0 h
-# It estimates no run time: that is vasp-relax-loop's, from vasp-test.
 out=$(ch_backfill "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && grep -q 'from the 24 jobs of your size that asked for 1 to 4 h.\$' <<<\"\$out\" && grep -q '^  Fairshare not used: ' <<<\"\$out\"" \
       "the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=$rc)"
@@ -195,16 +100,6 @@ ok_if "grep -q 'your size = jobs that asked for 1 node, 2-8 cores, 3-23 GB (your
 ok_if "! grep -qiE 'ionic|RECOMMENDATION|RUN TIME|NSW' <<<\"\$out\"" \
       "no run-time estimate, no recommendation: the queue only"
 ok_if "[[ ! -d '$d/wolfpack_chain' && '$(ch_nsub "$d")' == 0 ]]" "it creates nothing and submits nothing"
-
-# The start-up time vasp-test writes has a decimal; the chain used to strip
-# the point and read "10.4" as 104 s.
-d=$(ch_setup twins); cp "$H" "$W/twins.fake/history"
-sed -i 's/test_startup_s="10"/test_startup_s="10.4"/' "$d/.wolfpack/state.env"
-ch_run "$d" >/dev/null 2>&1
-ok_if "[[ '$(ch_state "$d" t_startup_s)' == 10 ]]" \
-      "a start-up written as 10.4 s is read as 10 s, not 104 (the chain read $(ch_state "$d" t_startup_s))"
-ok_if "[[ '$(ch_state "$d" chain_wall_min)' == 120 ]]" \
-      "and the chain, with its own step estimate, takes backfill-study's 2 h (got $(ch_state "$d" chain_wall_min) min)"
 
 # No folder at all: the job on the command line.
 e="$W/nofolder"; mkdir -p "$e"
@@ -233,22 +128,8 @@ ok_if "grep -q 'still missing: --nodes --cpus --mem-mb\$' <<<\"\$out\"" \
 out=$( "$WP_PY" "$Q" "$W/does-not-exist" 2>&1 ); rc=$?
 ok_if "(( rc == 2 )) && grep -q 'no such folder' <<<\"\$out\"" "a folder that does not exist is named as such"
 
-# vasp-relax-loop's call (--machine): its own step estimate in, a chunk
-# walltime out. Too little data: the profile's walltime (60 min here), not a
-# built-in 600.
-out=$(CONF="$W/twins.fake/cluster.conf" _bf --machine --partition fakepart --nodes 1 --cpus 4 \
-        --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10)
-ok_if "grep -q 'PROPOSED CHUNK   : 2 h' <<<\"\$out\" && grep -q '^WP_BACKFILL_STUDY wall_min=120 source=study' <<<\"\$out\"" \
-      "--machine: the chain's step estimate in, its chunk walltime out (2 h)"
-out=$(CONF="$W/twins.fake/cluster.conf" _bf --machine --partition fakepart --nodes 1 --cpus 4 \
-        --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10 --min-jobs 1000)
-ok_if "grep -q '^WP_BACKFILL_STUDY wall_min=60 source=fallback' <<<\"\$out\"" \
-      "with too little data, the chain falls back to the profile's walltime (60 min)"
-out=$(_bf --machine --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192); rc=$?
-ok_if "(( rc == 2 ))" "--machine without the chain's step estimate is refused (rc=$rc)"
-
 # ===========================================================================
-# 8. A REAL CASE: the LaMnO3 relaxation on Leftraru
+# 4. A REAL CASE: the LaMnO3 relaxation on Leftraru
 # ===========================================================================
 # 1 node x 56 ranks, 46 GB, --time=7-00:00:00, NSW = 120. The queue: 76 short
 # jobs, and 10 week-long jobs of this size that waited 35-37 min (median 36).
@@ -296,7 +177,7 @@ ok_if "(( \$(wc -l <<<\"\$out\") <= 23 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"
       "in $(wc -l <<<"$out") lines, fairshare included, with no machine line"
 
 # ===========================================================================
-# 8b. SANTOS DUMONT: a 7-day job on a partition where nobody asks for more than 4
+# 5. SANTOS DUMONT: a 7-day job on a partition where nobody asks for more than 4
 # ===========================================================================
 # As seen on sequana_cpu: 1 x 48 cores, 73 GB, --time=7-00:00:00, and in 30
 # days no job asked for more than 4 days. With scontrol showing no MaxTime,
@@ -340,18 +221,8 @@ out2=$(ch_backfill "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && [[ \"\$out2\" == \"\$out\" ]]" \
       "without vasp-test's data the queue report is unchanged (rc=$rc)"
 
-# vasp-relax-loop there: IT estimates the step from vasp-test (263 s x 12 x
-# 1.15 = 3634.6 s), hands that to backfill-study, and takes the chunk walltime
-# back. 96, 120 and 168 h all need 6 chunks at that step; the shortest wins.
-printf 'stage="test"\ntest_avg_loop="263.377"\ntest_ranks="56"\ntest_cpu_eff="100"\ntest_startup_s="889"\ntest_scf_per_ionic="0"\n' \
-    > "$d/.wolfpack/state.env"
-rm -f "$d"/VASP-13276000.*
-ch_run "$d" >/dev/null 2>&1
-ok_if "[[ '$(ch_state "$d" chain_wall_min)' == 5760 && '$(ch_state "$d" chain_wall_source)' == backfill-study ]]" \
-      "vasp-relax-loop, from vasp-test's data and backfill-study's waits, picks 96-h chunks ($(ch_state "$d" chain_wall_min) min)"
-
 # ===========================================================================
-# 9. FAIRSHARE NOW: where the user stands in today's priority order
+# 6. FAIRSHARE NOW: where the user stands in today's priority order
 # ===========================================================================
 # From scontrol show config, sshare -a and sprio, as SLURM defines them:
 # priority = sum of weight x factor; the age factor reaches 1 at
@@ -459,13 +330,12 @@ ok_if "(( rc == 0 )) && [[ \$(sed -n '/^FAIRSHARE NOW/,\$p' <<<\"\$fout\" | wc -
 fout=$(_fs --no-fairshare)
 ok_if "! grep -q 'FAIRSHARE' <<<\"\$fout\"" "--no-fairshare leaves it out"
 _fscfg "" 5000; cp "$ff/sshare.all" "$ff/sshare"; cp "$ff/sprio.all" "$ff/sprio"
-fout=$(USER=alice ch_backfill "$fd" --machine --partition fakepart --nodes 1 --cpus 4 \
-        --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10 2>&1)
-ok_if "! grep -q 'FAIRSHARE' <<<\"\$fout\" && grep -q '^WP_BACKFILL_STUDY' <<<\"\$fout\"" \
-      "the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime"
+# The chain no longer calls backfill-study: its --machine mode is gone.
+must_refuse "backfill-study has no chain mode any more (--machine)" "unrecognized arguments: --machine" \
+    ch_backfill "$fd" --machine --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192
 
 # ===========================================================================
-# 10. THE PREDICTION: the table's column, narrowed by fairshare
+# 7. THE PREDICTION: the table's column, narrowed by fairshare
 # ===========================================================================
 # The job: 1 node, 4 cores, 8 GB, 3 h -> the 1-4 h column. Its 33 jobs of
 # that size, and their owners' fairshare today:

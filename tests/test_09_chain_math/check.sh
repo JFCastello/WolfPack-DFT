@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vasp-relax-loop / vasp-scf-loop: the guards that stop a chain from starting
+# vasp-scf-loop: the guards that stop a chain from starting
 # when it cannot possibly work. Every one of these is a run that would consume
 # queue time and produce nothing, so refusing early IS the feature.
 set -uo pipefail
@@ -11,11 +11,7 @@ _calc(){ # _calc DIR "INCAR body"   -- a folder that looks like a finished stage
     local d="$W/$1"; mkdir -p "$d/.wolfpack"
     cp "$CASES/Si/POSCAR" "$d/POSCAR"
     printf 'Auto\n0\nGamma\n4 4 4\n0 0 0\n' > "$d/KPOINTS"
-    # A REAL POTCAR. The Pulay guard compares ENCUT against 1.3 x ENMAX, and
-    # ENMAX is read from the POTCAR -- with an empty one the guard cannot fire
-    # and the test silently passes a chain that should have been refused.
-    if have_potcar Si; then cat "$WP_POTCAR_DIR/Si/POTCAR" > "$d/POTCAR"
-    else printf '   ENMAX  =  245.345; ENMIN  =  184.009 eV\n' > "$d/POTCAR"; fi
+    printf '  TITEL  = synthetic test fixture -- not a VASP potential\n' > "$d/POTCAR"
     cat > "$d/INCAR"
     cat > "$d/slurm_vasptest.sh" <<EOS
 #!/bin/bash
@@ -49,14 +45,14 @@ EOF
 must_refuse "vasp-scf-loop refuses a RELAXATION INCAR" "relaxation, not a static|NSW" \
     bash -c "cd '$d' && '$CH' --mode scf </dev/null"
 
-d=$(_calc scf_to_relax <<'EOF'
+# A relaxation is vasp-relax-loop's, a different script: vasp_chain.sh is the
+# SCF chain only.
+d=$(_calc relax_mode <<'EOF'
 NSW = 0
 NELM = 200
-EDIFF = 1E-6
-ENCUT = 520
 EOF
 )
-must_refuse "vasp-relax-loop refuses a STATIC INCAR" "no relaxation to chunk|NSW" \
+must_refuse "vasp_chain.sh refuses the relax mode and names vasp-relax-loop" "vasp-relax-loop" \
     bash -c "cd '$d' && '$CH' --mode relax </dev/null"
 
 # --- molecular dynamics cannot be chunked ----------------------------------
@@ -71,70 +67,49 @@ ENCUT = 520
 EOF
 )
 must_refuse "a molecular-dynamics run is refused, not chunked" "molecular dynamics|velocit" \
-    bash -c "cd '$d' && '$CH' --mode relax </dev/null"
-
-# --- a cell relaxation at a low cutoff is a Pulay trap ---------------------
-# Every chunk boundary rebuilds the plane-wave basis, so the Pulay stress error
-# is paid once per chunk instead of once.
-d=$(_calc pulay <<'EOF'
-NSW = 50
-IBRION = 2
-ISIF = 3
-NELM = 60
-ENCUT = 240
-EOF
-)
-must_refuse "a CELL relaxation at too low an ENCUT is refused (Pulay)" "ENCUT|Pulay|1.3" \
-    bash -c "cd '$d' && '$CH' --mode relax </dev/null"
+    bash -c "cd '$d' && '$CH' --mode scf </dev/null"
 
 # --- the walltime must leave room to compute -------------------------------
 d=$(_calc tiny <<'EOF'
-NSW = 50
-IBRION = 2
-ISIF = 2
-NELM = 60
+NSW = 0
+NELM = 200
+EDIFF = 1E-6
 ENCUT = 520
 EOF
 )
 must_refuse "a walltime with no room to compute is refused" "no room to compute|walltime" \
-    bash -c "cd '$d' && '$CH' --mode relax --walltime 5 </dev/null"
+    bash -c "cd '$d' && '$CH' --mode scf --walltime 5 </dev/null"
 
 # --- the measured rate is required, not guessed ----------------------------
 d=$(_calc nomeasure <<'EOF'
-NSW = 50
-IBRION = 2
-ISIF = 2
-NELM = 60
+NSW = 0
+NELM = 200
+EDIFF = 1E-6
 ENCUT = 520
 EOF
 )
 printf 'stage="test"\n' > "$d/.wolfpack/state.env"     # no test_avg_loop
 must_refuse "a chain refuses to size itself without a MEASURED per-step time" \
     "no measured per-step|vasp-test" \
-    bash -c "cd '$d' && '$CH' --mode relax </dev/null"
+    bash -c "cd '$d' && '$CH' --mode scf </dev/null"
 
 # --- the pipeline must have run ---------------------------------------------
 d=$(_calc noslurm <<'EOF'
-NSW = 50
-IBRION = 2
-ISIF = 2
-NELM = 60
+NSW = 0
+NELM = 200
+EDIFF = 1E-6
 ENCUT = 520
 EOF
 )
 rm -f "$d/slurm_vasptest.sh"
 must_refuse "a chain refuses when stage 2 never produced a job script" "slurm|pipeline first" \
-    bash -c "cd '$d' && '$CH' --mode relax </dev/null"
+    bash -c "cd '$d' && '$CH' --mode scf </dev/null"
 
 # --- not a calculation directory -------------------------------------------
 mkdir -p "$W/empty"
 must_refuse "a chain refuses outside a calculation folder" "no INCAR" \
-    bash -c "cd '$W/empty' && '$CH' --mode relax </dev/null"
+    bash -c "cd '$W/empty' && '$CH' --mode scf </dev/null"
 
-# --- invoked without a mode -------------------------------------------------
-must_refuse "invoked under an unknown name, it refuses instead of guessing" \
-    "cannot tell which mode|unknown mode" \
-    bash -c "cd '$W/empty' && bash '$CH' </dev/null"
 # Anything that slipped past a guard may have queued a chain. Do not leave it.
 command -v scancel >/dev/null 2>&1 && \
     SLURM_CONF="$TESTBED_ROOT/slurm.conf" scancel -u "$USER" 2>/dev/null || true

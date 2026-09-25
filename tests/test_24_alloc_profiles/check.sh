@@ -191,6 +191,8 @@ fi
 # 5. A LIVE SCHEDULER ACCEPTS BOTH
 # ===========================================================================
 if have_slurm; then
+    # As every live test does: sbatch must not depend on the caller's shell.
+    export SLURM_CONF="$TESTBED_ROOT/slurm.conf"
     bad=0; n_checked=0; examples=""
     for prof in A B; do
         c=$([[ $prof == A ]] && echo "$CONF_A" || echo "$CONF_B")

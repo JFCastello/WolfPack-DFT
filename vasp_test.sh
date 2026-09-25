@@ -44,6 +44,11 @@
 #   vasp-test -n 3                   # benchmark row 3 of vasp-recommend-slurm's
 #                                    #   [TOP CANDIDATES] table instead of the best
 #
+#   vasp-test --full-size            # benchmark at the PRODUCTION rank count, on the
+#                                    #   production partition when the debug one cannot
+#                                    #   hold it. vasp-relax-loop needs this: it sizes
+#                                    #   its first chunk from these timings.
+#
 #   -n N, --candidate N, or just a bare number: which row of the
 #   [TOP CANDIDATES] table to benchmark. Default: whatever the pipeline is
 #   currently set to, which is row 1 (the best) unless you asked for another.
@@ -77,7 +82,7 @@
 # --- Allow `vasp-test --help` to work outside of SLURM (handled in the parser
 #     below too; this early check keeps --help working before set -u) ---------
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    sed -n '2,55p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'
+    awk 'NR == 1 { next } /^#####/ { if (++n == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
     exit 0
 fi
 
@@ -193,9 +198,11 @@ DEBUG_MEM_MARGIN="${VASP_TEST_DEBUG_MEM_MARGIN:-${WP_DEBUG_MEM_MARGIN:-}}"
 DEBUG_RESERVE_GB_LEGACY="${WP_DEBUG_RESERVE_GB:-}"
 
 WANT_PICK=""          # empty = use whatever the pipeline is already set to
+FULL_SIZE="${WP_VASPTEST_FULL_SIZE:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help) sed -n '2,66p' "${BASH_SOURCE[0]}" | grep -v '^#####' | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --full-size) FULL_SIZE=1; shift ;;
+        -h|--help) awk 'NR == 1 { next } /^#####/ { if (++n == 2) exit; next } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         -n|--candidate)
             [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "vasp-test: $1 needs a row number, e.g. $1 3" >&2; exit 2; }
             WANT_PICK="$2"; shift 2 ;;
@@ -252,6 +259,7 @@ fi
 
 FIX_KPAR="${kpar:-1}"; FIX_NCORE="${ncore:-1}"; FIX_NPAR="${npar:-1}"
 FIX_NSIM="${nsim:-4}"; PROD_RANKS="${ranks:-0}"
+FIX_LPLANE="${lplane:-}"          # empty: a recommendation from before LPLANE was written
 PROD_PARTITION="${prod_partition:-${WP_MAIN_PARTITION:-main}}"
 PROD_CPN="${prod_cpn:-${WP_MAIN_CPUS_PER_NODE:-256}}"
 PROD_NODE_MEM="${node_mem_mb:-${WP_MAIN_MEM_PER_NODE_MB:-256000}}"
@@ -323,7 +331,23 @@ if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
     part="${WP_DEBUG_PARTITION:-debug}"
     cpn="${WP_DEBUG_CPUS_PER_NODE:-48}"
     memnode="${WP_DEBUG_MEM_PER_NODE_MB:-360000}"
-    if [[ "$part" == "${WP_MAIN_PARTITION:-}" ]]; then
+    if (( FULL_SIZE )); then
+        # --full-size: the timings must be the production job's own, so the
+        # benchmark runs at exactly the production rank count -- on the debug
+        # partition when its core cap and nodes can hold it (same hardware
+        # assumed there by the profile), else on the production partition.
+        (( PROD_RANKS > 0 )) || { echo "ERROR: --full-size needs the production rank count from vasp-recommend-slurm." >&2; exit 2; }
+        _dbg_cap="${VASP_TEST_MAX_CORES:-${WP_DEBUG_MAX_CORES:-$(( cpn * 2 ))}}"
+        if (( PROD_RANKS > _dbg_cap )) || [[ "$part" == "${WP_MAIN_PARTITION:-}" ]]; then
+            part="$PROD_PARTITION"; cpn="$PROD_CPN"; memnode="$PROD_NODE_MEM"
+            DEBUG_MEM_MARGIN="${WP_MAIN_MEM_MARGIN:-0.02}"
+            echo "STAGE 3: --full-size -- benchmarking ${PROD_RANKS} ranks on the production partition '$part'." >&2
+        else
+            echo "STAGE 3: --full-size -- benchmarking ${PROD_RANKS} ranks on '$part' (it holds them)." >&2
+        fi
+        VASP_TEST_MAX_CORES="$PROD_RANKS"
+    fi
+    if [[ "$part" == "${WP_MAIN_PARTITION:-}" ]] && (( ! FULL_SIZE )); then
         echo "STAGE 3: DEBUG partition == MAIN ('$part') -- the test runs there but is" >&2
         echo "         sized by the DEBUG limits (cores + memory margin)." >&2
     fi
@@ -457,6 +481,7 @@ if [[ -z "${WP_VASPTEST_JOB:-}" ]]; then
         _wp_module_block
         echo ""
         echo "export VASP_TEST_WALLTIME_MIN='${WALLTIME_MIN}'"
+        echo "export WP_VASPTEST_FULL_SIZE='${FULL_SIZE}'"
         echo "export WP_MODULES_PRELOADED=1"
         # The job re-execs this script on a COMPUTE node, where it re-reads the
         # cluster profile -- so the profile has to be reachable from there. It
@@ -571,7 +596,7 @@ TEST_NPAR=$(( NTASKS / (FIX_KPAR * FIX_NCORE) )); (( TEST_NPAR < 1 )) && TEST_NP
 # occurrence of a repeated tag -- which works, but leaves a file nobody can read
 # and which no longer resembles the INCAR it came from.
 for _kv in "KPAR=${FIX_KPAR}" "NCORE=${FIX_NCORE}" "NSIM=${FIX_NSIM}" \
-           "LWAVE=.FALSE." "LCHARG=.FALSE."; do
+           ${FIX_LPLANE:+"LPLANE=${FIX_LPLANE}"} "LWAVE=.FALSE." "LCHARG=.FALSE."; do
     wp_incar_set INCAR "${_kv%%=*}" "${_kv#*=}" "benchmark (vasp-test)"
 done
 
@@ -749,21 +774,28 @@ avg_loop="${avg_loop:-0}"
 # overlap and neither needs to exclude the other (verified: 38 vs 1 on a real
 # OUTCAR, zero overlap).
 #
-# The residual  Elapsed - sum(LOOP:) - sum(LOOP+:)  is everything that is NOT a
-# step: process start-up, FFT planning, POTCAR/WAVECAR I/O. A chunked run pays
-# that once per chunk, so it has to be budgeted separately from the per-step
-# rate rather than smeared into it.
-sum_loop=$(awk '/LOOP:/{ k=split($0,a,"real time"); if(k>1) s+=a[2]+0 }
-                END{ printf "%.2f", s+0 }' "$OUTCAR")
+# Everything that is NOT a step -- process start-up, FFT planning, POTCAR and
+# WAVECAR I/O -- is  wall - (the completed ionic steps) - (the electronic steps
+# of the ionic step still running when VASP was stopped). A chunked run pays it
+# once per chunk, so it is budgeted separately from the per-step rate.
+#
+# A LOOP+ line times the WHOLE ionic step, its own electronic steps included
+# (checked on a VASP 6.5.1 OUTCAR: 28.24 s against 26.98 s summed over its 11
+# LOOPs). Subtracting sum(LOOP:) and sum(LOOP+:) both counted every completed
+# step twice, and clamped the start-up to 0 whenever one had completed.
 sum_loopplus=$(awk '/LOOP\+:/{ k=split($0,a,"real time"); if(k>1) s+=a[2]+0 }
                     END{ printf "%.2f", s+0 }' "$OUTCAR")
+# the electronic steps after the last completed ionic step
+sum_open=$(awk '/LOOP:/{ k=split($0,a,"real time"); if(k>1) s+=a[2]+0 }
+                /LOOP\+:/{ s=0 }
+                END{ printf "%.2f", s+0 }' "$OUTCAR")
 nionic=$(grep -c 'LOOP+:' "$OUTCAR" 2>/dev/null); nionic="${nionic//[^0-9]/}"; nionic="${nionic:-0}"
 # Mean electronic steps per ionic step -- 0 when the benchmark never completed an
 # ionic step, which callers must read as "no estimate available".
 scf_per_ionic=$(awk -v n="$nscf" -v i="$nionic" \
     'BEGIN{ if(i>0) printf "%.2f", n/i; else printf "0" }')
-startup_s=$(awk -v w="$wall" -v e="$sum_loop" -v p="$sum_loopplus" \
-    'BEGIN{ r=w-e-p; if(r<0) r=0; printf "%.1f", r }')
+startup_s=$(awk -v w="$wall" -v p="$sum_loopplus" -v o="$sum_open" \
+    'BEGIN{ r=w-p-o; if(r<0) r=0; printf "%.1f", r }')
 
 if posq "$maxrss_mb" && [[ -n "$RAW" ]]; then
     node_avail_gb=$(awk -v m="$NODE_MEM_MB" 'BEGIN{printf "%.0f", m/1024.0}')
@@ -900,6 +932,15 @@ if [[ -z "$bench_why" ]]; then
 fi
 mkdir -p "$SUBMIT_DIR/.wolfpack"
 HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
+# The interconnect of THIS node (a compute node), to compare with the profile's,
+# which vasp-configure read on the login node. See wolfpack_hw.sh.
+NODE_NET=""
+_wp_hw="$SELF_DIR/wolfpack_hw.sh"
+if [[ -r $_wp_hw ]]; then
+    # shellcheck source=/dev/null
+    source "$_wp_hw"
+    NODE_NET="$(wp_interconnect)"
+fi
 "$PY" "$HELPER" "$OUTCAR" \
     --maxrss-mb "$maxrss_mb" --averss-mb "$averss_mb" --ntasks-test "$NTASKS" \
     --test-kpar "$FIX_KPAR" --test-ncore "$FIX_NCORE" --test-npar "$TEST_NPAR" \
@@ -913,6 +954,8 @@ HOUT="$SUBMIT_DIR/.wolfpack/helper.out"
     --pred-mem-per-cpu "${mem_per_cpu:-0}" --pred-nodes "${pred_nodes:-0}" --pred-ntpn "${pred_ntpn:-0}" \
     --cpu-eff "$cpu_eff" --avg-loop "$avg_loop" --nscf "$nscf" --wall "$wall" \
     --bench-failed "$bench_why" \
+    --lplane "${FIX_LPLANE:-}" --incar-run "$RUNDIR/INCAR" \
+    --net-profile "${WP_INTERCONNECT:-unknown}" --net-node "${NODE_NET:-}" \
     $( ((IS_GW)) && printf -- '--gw --gw-node-frac %s --incar %s' "${WP_GW_NODE_FRAC:-0.67}" "$SUBMIT_DIR/INCAR" ) \
     $( [[ -z "$bench_why" ]] && printf -- '--update-slurm %s' "$DEFINITIVE" ) \
     --report "$SUBMIT_DIR/report.out" 2>&1 | tee "$HOUT"
@@ -957,6 +1000,9 @@ elif (( _rc == 0 )); then
     # Tidy: keep the folder clean -- the benchmark run dir lives under .wolfpack.
     if [[ -d "$RUNDIR" ]]; then
         cp -f "$OUTCAR" "$SUBMIT_DIR/.wolfpack/vasptest_OUTCAR" 2>/dev/null || true
+        # vasp-relax-loop extrapolates the first ionic step's electronic
+        # convergence from it (dE and d eps per step).
+        cp -f "$RUNDIR/OSZICAR" "$SUBMIT_DIR/.wolfpack/vasptest_OSZICAR" 2>/dev/null || true
         rm -rf "$RUNDIR"
     fi
     # Persist what the benchmark MEASURED, not just that it ran. These numbers are
@@ -979,6 +1025,8 @@ elif (( _rc == 0 )); then
         echo "test_startup_s=\"${startup_s}\""
         echo "test_cpu_eff=\"${cpu_eff}\""
         echo "test_ranks=\"${NTASKS}\""
+        echo "test_full_size=\"${WP_VASPTEST_FULL_SIZE:-0}\""
+        echo "test_interconnect=\"${NODE_NET%%|*}\""
         # NOT $part: that is set in the launcher branch, which ends at `exec sbatch`
         # and never reaches this code. Inside the job it is unset, and with `set -u`
         # referencing it would abort the job outright. SLURM exports the real one.

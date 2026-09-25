@@ -415,6 +415,7 @@ class Candidate:
     nomegapar: Optional[int] = None    # low-scaling: imaginary-frequency grid groups
     recommend_maxmem: bool = False     # whether the INCAR snippet should set MAXMEM
     kpar_reachable: Optional[int] = None  # largest KPAR the hard rules allow here
+    lplane_why: str = ""                  # the LPLANE rule's reason (lplane_for)
 
     @property
     def sort_key(self) -> Tuple[float, int, int, int]:
@@ -1705,26 +1706,18 @@ def score_candidate(
         else:
             parts["kgroup_straddles_node_boundary"] = -8.0
 
-    # ---- 5. LPLANE / NGZ rule -------------------------------------------
-    if ngz and candidate.npar > 0:
-        threshold = 3.0 * candidate.nodes / candidate.npar
-        if candidate.lplane:
-            if ngz >= threshold:
-                parts["lplane_TRUE_satisfies_ngz_rule"] = 3.0
-            else:
-                parts["lplane_TRUE_violates_ngz_rule_(PENALTY)"] = -10.0
-            if ngz % candidate.npar == 0:
-                parts["lplane_perfect_load_balance"] = 3.0
-            if candidate.nodes >= 16:
-                parts["lplane_TRUE_many_nodes_penalty"] = -3.0
-        else:
-            if candidate.nodes >= 16 or ngz < threshold:
-                parts["lplane_FALSE_appropriate_for_layout"] = 3.0
-            else:
-                parts["lplane_FALSE_unnecessary_(SMALL_PENALTY)"] = -1.5
-    else:
-        # Default-on LPLANE is the VASP-wiki default.
-        parts["lplane_default_preference"] = 1.5 if candidate.lplane else -1.5
+    # ---- 5. LPLANE -----------------------------------------------------------
+    # Not a choice being scored: it follows from NGZ and NCORE (lplane_for).
+    # What the page adds for plane-wise distribution is the load balance:
+    # "optimal load balancing is achieved if NGZ = n x NPAR".
+    if ngz and candidate.lplane and candidate.npar > 0 and ngz % candidate.npar == 0:
+        parts["lplane_load_balance_NGZ_multiple_of_NPAR"] = 3.0
+    # And between two layouts, the one that can keep .TRUE.: it "reduces the
+    # communication band width during the FFT's" -- the page's recipe for a
+    # cluster on InfiniBand is .TRUE. A small preference, as .FALSE. is not
+    # wrong where the rule sets it.
+    if ngz and not candidate.lplane:
+        parts["lplane_FALSE_more_FFT_communication"] = -1.5
 
     # ---- 6. NSIM ---------------------------------------------------------
     if candidate.nsim == 4:
@@ -1819,6 +1812,52 @@ def explain_contributions(parts: Dict[str, float], top: int = 10) -> List[str]:
 # ============================================================================
 
 
+# ============================================================================
+# LPLANE -- https://vasp.at/wiki/LPLANE
+# ============================================================================
+# The network between the nodes, from the cluster profile (vasp-configure).
+NETWORK: Dict[str, object] = {"kind": "unknown", "detail": "", "speed_mbs": None}
+
+
+def slow_network() -> bool:
+    """The wiki's "LINUX cluster linked by 1 Gbit Ethernet": Ethernet whose
+    speed is known and at most 1 Gbit/s. Faster Ethernet, or Ethernet of
+    unknown speed, is a case the page does not cover."""
+    sp = NETWORK.get("speed_mbs")
+    return NETWORK.get("kind") == "ethernet" and isinstance(sp, int) and 0 < sp <= 1000
+
+
+def lplane_for(ngz: Optional[int], ncore: int) -> Tuple[Optional[bool], str]:
+    """(LPLANE, why) for a band group of NCORE ranks; (None, why) when no
+    setting is allowed and the candidate must go.
+
+    The page: "LPLANE=.TRUE. should only be used if NGZ is at least 3x(number
+    of nodes)/NPAR". It dates from before NCORE, and its "nodes" are MPI
+    ranks: the old manual's "NPAR = number of nodes" is today's NPAR default,
+    "available ranks" (vasp.at/wiki/NPAR). Ranks / NPAR is the band group --
+    NCORE ranks that "collaborate on a single band, parallelizing the FFTs for
+    that band" (vasp.at/wiki/NCORE; OUTCAR: "distr: one band on NCORE= N
+    cores"). The z-planes are shared among those, so: NGZ >= 3 x NCORE.
+
+    "On a LINUX cluster linked by a relatively slow network, LPLANE must be
+    set to .TRUE." -- so there, a band group too large for plane-wise
+    distribution is not a layout at all.
+
+    What the page does not quantify ("very many nodes", "significantly
+    smaller", max/min projectors that "should not differ too much") is not
+    turned into a threshold here."""
+    if not ngz:
+        return True, "NGZ unknown (no dry-run grid): the VASP default"
+    need = 3 * max(1, ncore)
+    if ngz >= need:
+        return True, f"NGZ = {ngz} >= 3 x NCORE = {need}: plane-wise, the VASP default"
+    if slow_network():
+        return None, (f"NGZ = {ngz} < 3 x NCORE = {need}, and on 1 Gbit Ethernet "
+                      f"LPLANE must be .TRUE.")
+    return False, (f"NGZ = {ngz} < 3 x NCORE = {need}: plane-wise would leave ranks "
+                   f"with fewer than 3 planes")
+
+
 def build_candidates(
     *,
     summary: DryRunSummary,
@@ -1848,6 +1887,7 @@ def build_candidates(
     part_mem_per_cpu = int(partition_info["mem_per_cpu_mb"])  # type: ignore[arg-type]
 
     irr_k = summary.irr_kpoints or summary.nkpts
+    ngz_dry = (summary.coarse_fft or summary.fine_fft or (0, 0, 0))[2] or None
 
     layout_profile = layout_profile or ALLOC_PROFILE
     rank_choices = suggest_total_ranks(
@@ -1978,8 +2018,13 @@ def build_candidates(
                     safety_factor=safety_factor,
                 )
 
+                # LPLANE follows from NGZ and the band group, and on a slow
+                # network it must be .TRUE.: see lplane_for().
+                _lp, _lp_why = lplane_for(ngz_dry, ncore)
+                if _lp is None:
+                    continue
                 for nsim in nsim_choices:
-                    for lplane in (True, False):
+                    for lplane in (_lp,):
                         cand = Candidate(
                             score=0.0,
                             total_ranks=total_ranks,
@@ -1996,6 +2041,7 @@ def build_candidates(
                             cpu_bind="cores",
                             memory=memory,
                             kpar_reachable=kpar_reachable,
+                            lplane_why=_lp_why,
                         )
                         # D4 is "choose NCORE as a factor of the cores per
                         # node TO AVOID COMMUNICATING BETWEEN NODES FOR THE
@@ -3139,7 +3185,13 @@ def print_best_candidate(
         print(f"NPAR (derived)          : {candidate.npar}"
               "    (do NOT set both NCORE and NPAR)")
         print(f"NSIM                    : {candidate.nsim}")
-        print(f"LPLANE                  : {format_bool(candidate.lplane)}")
+        print(f"LPLANE                  : {format_bool(candidate.lplane)}"
+              f"    ({candidate.lplane_why or 'the VASP default'})")
+        _nd = NETWORK.get("detail") or ""
+        print(f"interconnect            : {NETWORK.get('kind')}"
+              + (f"  ({_nd})" if _nd else "")
+              + ("  -- 1 Gbit Ethernet: LPLANE must be .TRUE." if slow_network() else "")
+              + "   [cluster profile]")
         # NBANDS is RAISED by VASP to a multiple of NPAR -- it does not warn,
         # it just does it, and the padded bands cost memory and time like any
         # other. Show what VASP will actually use.
@@ -3625,6 +3677,15 @@ def apply_cluster_profile(prof: Dict[str, str]) -> None:
     if _ap in (WHOLE_NODES, BALANCED):
         ALLOC_PROFILE = _ap
 
+    # The interconnect, as vasp-configure detected it (wolfpack_hw.sh). It
+    # decides one LPLANE rule: on 1 Gbit Ethernet it "must be .TRUE.".
+    _net = prof.get("WP_INTERCONNECT", "").strip().lower()
+    if _net:
+        NETWORK["kind"] = _net
+        NETWORK["detail"] = prof.get("WP_INTERCONNECT_DETAIL", "").strip()
+        _sp = prof.get("WP_ETH_SPEED_MBS", "").strip()
+        NETWORK["speed_mbs"] = int(_sp) if _sp.isdigit() else None
+
     _apply("main", "WP_MAIN_PARTITION",
            "WP_MAIN_CPUS_PER_NODE", "WP_MAIN_MEM_PER_NODE_MB")
     _apply("debug", "WP_DEBUG_PARTITION",
@@ -3745,7 +3806,7 @@ def _comment_out_incar_flag(text: str, key: str, why: str) -> str:
 
 
 def apply_parallel_to_incar(path: Path, kpar: int, ncore: int, npar: int,
-                            is_gw: bool) -> Optional[List[str]]:
+                            is_gw: bool, lplane: bool = True) -> Optional[List[str]]:
     """Write the recommended PARALLELISATION into the user's INCAR (backup once at
     INCAR.bak). KPAR + NCORE only -- NEVER NPAR. These are parallelisation, not physics.
 
@@ -3771,7 +3832,10 @@ def apply_parallel_to_incar(path: Path, kpar: int, ncore: int, npar: int,
             bak.write_text(t)
         except OSError:
             pass
-    flags = [("KPAR", kpar), ("NCORE", ncore)]
+    # LPLANE too: when it must be .FALSE. an INCAR without it would benchmark
+    # and run VASP's default, and an INCAR that says .FALSE. where .TRUE. is
+    # right would do the same the other way.
+    flags = [("KPAR", kpar), ("NCORE", ncore), ("LPLANE", format_bool(lplane))]
     for k, v in flags:
         t = _set_incar_flag(t, k, v)
     t = _comment_out_incar_flag(
@@ -4068,6 +4132,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "ranks": best.total_ranks,
         "kpar": best.kpar, "ncore": best.ncore, "npar": best.npar,
         "nsim": best.nsim,
+        "lplane": format_bool(best.lplane),
+        "ngz": (summary.coarse_fft or summary.fine_fft or (0, 0, 0))[2] or 0,
+        "interconnect": NETWORK.get("kind") or "unknown",
         "prod_partition": partition_info.get("slurm_name", args.partition),
         "prod_cpn": cpus_per_node,
         "node_mem_mb": node_mem,
@@ -4106,7 +4173,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # production run use it (KPAR/NCORE always; NPAR for DFT). Backup INCAR.bak.
     if not args.no_apply_incar:
         applied = apply_parallel_to_incar(Path("INCAR"), best.kpar, best.ncore,
-                                          best.npar, best.calc_type != "DFT")
+                                          best.npar, best.calc_type != "DFT",
+                                          lplane=best.lplane)
         if applied:
             print(f"[FILES] applied to INCAR        -> {' '.join(applied)}"
                   f"  (backup: INCAR.bak)")

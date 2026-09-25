@@ -1,122 +1,102 @@
 # test_33_chain_live_e2e
 
-> a real chunked cell relaxation: real VASP, real scheduler, memory measured per chunk
+> vasp-relax-loop for real: the pipeline, a real VASP, a real SLURM; each chunk's estimate against the time it used
 
 ## 1. Definition
 
-Runs a short chunked relaxation of silicon, with a real VASP, on the suite's
-real SLURM testbed, from launch to convergence. Then checks that the chain
-crossed a chunk boundary, that every chunk measured its own memory, and that
-the next chunk's request was rewritten from that measurement.
+Relaxes silicon with one atom displaced, twice: once in a single direct VASP run
+(the reference), and once through the whole pipeline — `vasp-dry-run`,
+`vasp-recommend-slurm`, `vasp-test --full-size`, then `vasp-relax-loop` with
+NSW = 2 per chunk on the suite's SLURM testbed, until VASP reports "reached
+required accuracy". It compares the two results, checks the plumbing between
+chunks, and records how close each chunk's estimate came to what it used.
 
 ## 2. Purpose
 
-Tests 29–32 prove the chain's **decisions**, against a fake scheduler and a
-fake VASP that say exactly what the test tells them to. This test proves the
-**plumbing** those decisions depend on:
+test_36 proves the chain's decisions against a fake scheduler and a fake VASP.
+This proves what those decisions rest on: that a real OUTCAR and OSZICAR say
+what the estimator reads, that a real vasp-test leaves the files the chain
+needs, that a chunk can submit its successor from inside a real job, and that
+chaining changes the answer by nothing.
 
-- that a real OUTCAR contains the memory line the chain reads;
-- that a real `sacct` answers the way the chain expects, or fails in a way it
-  handles;
-- that a chunk can edit its successor's job script and submit it from inside
-  a running job, on a real scheduler.
-
-A fake cannot catch a wrong assumption about any of those, because the fake
-was written with the same assumption.
+It also measures the thing the design is for: the walltime each chunk asks for,
+against the time it actually took.
 
 ## 3. How it is executed
 
 ```
 bash tests/slurm_testbed.sh start
-export SLURM_CONF=/tmp/wpslurm/slurm.conf
 tests/run_all.sh test_33_chain_live_e2e
 ```
 
-Needs VASP (`$WP_VASP`), the Si POTCAR from `$WP_POTCAR_DIR`, and the
-testbed's `slurmctld`; it skips cleanly without any of them. It takes about two
-minutes.
-
-The input is Si in the diamond cell, strained 3 % and with one atom displaced,
-so there is something to relax. The INCAR is `ISIF = 3`, `IBRION = 2`,
-`EDIFFG = −0.01`, `ENCUT = 400`, and `ISYM = 0`: as the atom returns, the
-symmetry would rise and change NKPTS between chunks, which the chain rightly
-refuses to restart across. The run uses 4 ranks and starts at 1000 MB/cpu.
-Chunks are 8 min long, which leaves 3 min of VASP after the 5-min margin: short
-enough that the relaxation needs more than one chunk.
+Needs VASP, the Si POTCAR (`$WP_POTCAR_DIR`) and the testbed; skips without them.
+Si, 2 atoms, atom 2 at (0.77, 0.76, 0.75), 6×6×6 k-points, IBRION = 2,
+EDIFFG = −0.01, 4 ranks (as the reference; on this 4-core laptop 8 ranks are
+5× slower per step). About 20 minutes.
 
 ## 4. Expected results
 
 | check | expected |
 |---|---|
-| launch | exit 0 |
-| outcome | `wolfpack_chain/FINISHED` (converged), within 15 min |
-| chunk boundaries | at least 2 chunks in `chain.log` |
-| memory measured | the `peakMB` column filled for every chunk |
-| where it came from | a real source (`sacct` or OUTCAR), not "not measured" |
-| request rewritten | `chain_mem_per_cpu ≠ 1000` |
-| never below the peak | `chain_mem_per_cpu ≥ mem_peak_max_mb` |
-| structure record | `chunk-001/POSCAR.in.gz` (the whole-chain diff of `vasp-check` reads it) |
-
-What the memory should come down *to* is not asserted: it depends on the VASP
-build, the MPI library and the machine. The rule itself is exercised with exact
-numbers in test_29.
+| the reference | converges in one run |
+| stage 2 | a layout (4 ranks) |
+| vasp-test --full-size | keeps its OUTCAR and OSZICAR; measured at the production rank count; its start-up time not clamped to 0 |
+| the chain | launches, and converges on VASP's "reached required accuracy" |
+| plumbing | every chunk starts from the CONTCAR of the one before; the folder's POSCAR is the input, its CONTCAR the last chunk's; no chunk runs out of walltime or memory |
+| the estimate | the electronic steps of each chunk's first ionic step never under-estimated by more than the 2-step margin |
+| the answer | the chain and the direct run agree: \|ΔE\| < 2 meV, max \|Δr\| < 0.01 Å |
 
 ## 5. Obtained results
 
-All eight as expected, on 2026-09-24:
-
 ```
-# idx  jobid  kind   cap  used  t_step  elapsed  frac  peakMB  reqMB verdict    detail
-  1    1562   RELAX    3     3    15.7       52  0.29      72   1000 CONTINUE   3/3 ionic steps, max|F|=0.2218
-  2    1563   RELAX    6     5    10.1       52  0.29      72    300 CONVERGED  reached required accuracy after 5 ionic step(s)
+  chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
+      1   1   2      2     2  11 6                11    0:02:48   0:09   0:04:21      -10.806882  0.5881  ok
+      2   1   2      2     3  11 6                11    0:04:21   0:11   0:02:14      -10.819998  0.1471  ok
+      3   1   2      2     4  11 4                11    0:02:14   0:08   0:01:51      -10.820686  0.0490  ok
+      4   1   2      2     5  11 3                11    0:01:51   0:08   0:02:02      -10.820764  0.0150  ok
+      5   1   2      2     6  11 2                11    0:02:02   0:08   0:01:01      -10.820772  0.0047  CONVERGED
 ```
 
-- **Memory source: OUTCAR (rank 0).** The testbed's `sacct` lists the job
-  steps as `COMPLETED` but with `MaxRSS` and `AveRSS` empty, so the chain fell
-  back to VASP's own figure: 72 MB for rank 0. Why the testbed records no RSS
-  was not established. Its `slurm.conf` does set
-  `JobAcctGatherType=jobacct_gather/linux`, but it runs unprivileged with
-  `proctrack/pgid`. Real clusters differ, which is why the chain handles both.
-- **Request: 1000 → 300 MB/cpu.** 72 × 1.25 = 90 MB is below the chain's
-  floor of 256 MB, and rounding up to 50 MB gives 300. With OUTCAR alone,
-  every rank is assumed to be as heavy as rank 0.
-- **Converged in 2 chunks,** 8 ionic steps in total.
+- **The answer:** \|ΔE\| = 1×10⁻⁶ eV, max \|Δr\| = 0.0003 Å against the direct run.
+- **The cost:** the direct run took 6 ionic steps. The chain computed 6 distinct
+  geometries in 5 chunks, 10 SCF runs, because each chunk's first step repeats
+  the last geometry. In this case NSW = 2 did not add ionic steps.
+- **The electronic-step estimate was exact:** 11 estimated, 11 taken, for every
+  chunk's first ionic step.
+- **The time estimate** is that count times the seconds per electronic step, and
+  this laptop does not repeat itself. VASP's own LOOP lines give **4.4 to 17.1 s
+  per electronic step** across the chunks for the same work (vasp-test measured
+  6.9). Chunk 1 used 1.55 × its estimate, chunk 2 0.51 ×. The walltime's
+  × 1.15 + 5 min absorbed it: no chunk ran out. An estimate from the chunk before
+  can be no more precise than the machine is repeatable. On a cluster with
+  dedicated nodes this should be much tighter, but it was not measured here.
 
-Two package problems were found by this test and fixed:
+The first version of this test asserted "used ≤ estimate × 1.15". It failed on
+chunk 1 because of the machine, not the method, and it now asserts what the
+method controls (the electronic-step count) and reports the time.
 
-1. **Every chunk waited 45 s for accounting data that would never come.** The
-   chain polled `sacct` for `MaxRSS` for up to 45 s. Where steps are recorded
-   without memory, as on this testbed, the answer never changes, and every
-   chunk paid the full wait. The chain now stops polling as
-   soon as all steps are in a finished state: a step's usage is reported
-   together with its completion, so a finished step with no `MaxRSS` does not
-   get one later. On the testbed, `MaxRSS` was still empty 20 minutes after the job
-   ended. Were that ever wrong on some cluster, the cost is small: the chain
-   uses OUTCAR's rank-0 figure for every rank instead, which errs toward more
-   (rank 0 is normally the heaviest). `job_mem_evidence` on the first run's job went from 45 s to 0 s.
-   The fake `sacct` of tests 29–32 now answers like this testbed when a test
-   gives it no data.
-2. **The progress message counted the wrong steps.** A relaxation chunk
-   reported `not converged yet (25/60 steps)`: electronic steps over NELM, in
-   a run with NSW = 30. It now reports ionic steps against NSW; in this run:
-   `not converged yet (3 ionic step(s) in this chunk, 3 of 30 done)`.
+**A package bug this test found, that the fake harness could not.**
+`vasp_relax_loop.sh` was created without its execute bit. The job it renders
+ran it with `exec '…/vasp_relax_loop.sh' --chunk-body`, so the first real chunk
+died with `Permission denied`, and the chain stalled "queued". The job now
+runs it through `bash`, and the file is executable. test_36's harness now runs
+the submitted job script itself (it used to call the chain directly). Against
+the old line and mode it fails 31 of 49.
 
 ## 6. Pass / fail criterion
 
-Convergence within the deadline, and the inequalities above. The values
-themselves are machine-dependent and are reported, not asserted.
+The plumbing, exactly. The electronic-step estimate, within the 2-step margin
+it adds by design. Energy within 2 meV and structure within 0.01 Å of the direct
+run: far outside the EDIFF/EDIFFG noise (1e-6 eV, 0.01 eV/Å), far inside any
+real difference.
 
 ## 7. Verdict
 
-**PASSED** — 8 assertions, 0 failed. See `logs/run.log` and `logs/chain.log`.
+See `logs/run.log`.
 
 ## Sources
 
-- OUTCAR's memory lines are rank 0's (VASP labels them "MPI-rank0") —
-  <https://vasp.at/wiki/OUTCAR>
-- `MaxRSS`/`AveRSS` come from the `JobAcctGatherType` plugin —
-  <https://slurm.schedmd.com/slurm.conf.html#OPT_JobAcctGatherType>
-- `ISYM = 0` switches symmetry off, so NKPTS cannot change as the structure
-  becomes more symmetric — <https://vasp.at/wiki/ISYM>
-- `ISIF = 3` relaxes ions, cell shape and cell volume —
-  <https://vasp.at/wiki/ISIF>
+- EDIFFG < 0: stop when all forces are below |EDIFFG| — <https://vasp.at/wiki/EDIFFG>
+- CONTCAR is the last geometry computed: measured here with VASP 6.5.1 (see
+  test_36)
+- `sbatch --signal`: <https://slurm.schedmd.com/sbatch.html#OPT_signal>

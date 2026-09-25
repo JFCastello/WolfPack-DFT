@@ -1,38 +1,19 @@
   [32m[ OK ][0m ReqMem per-CPU, per-node and total spellings, and ReqTRES, all read as the same 48000 MB
   [32m[ OK ][0m requested walltimes parse from TimelimitRaw and from D-HH:MM:SS; UNLIMITED is no number
   [32m[ OK ][0m a job held 10 h by a dependency and started 1 min after is a 60 s wait (got 60 s)
-  [32m[ OK ][0m the study picks the walltime with the shortest expected time: 120.0 min (expected 120)
-  [32m[ OK ][0m and it replays the chain's ramp: 3 chunks at every candidate (got: 3 3 3)
-  [32m[ OK ][0m the comparison is against jobs similar on nodes, cores AND memory
-  [32m[ OK ][0m with no job of a similar size, it compares on nodes alone -- and reports that level ('nodes')
-  [32m[ OK ][0m three jobs per walltime are not evidence: no proposal, and it says why
-  [32m[ OK ][0m no candidate exceeds the partition's MaxTime, and MaxTime itself is a candidate
-  [32m[ OK ][0m the study's time budget per chunk equals the chain's (6650 s vs 6650 s)
-  [32m[ OK ][0m the study's ramp is the chain's: a calibration chunk of 3, then doubling, capped by what remains -- 3, 6, 11 -> 3 chunks for 20 steps ((True, 95, 3))
-  [32m[ OK ][0m launched with no --walltime, the chain uses the study's choice (02:00:00)
-  [32m[ OK ][0m and records that it was backfill-study's
-  [32m[ OK ][0m the study is shown at launch and kept in wolfpack_chain/backfill_study.txt
-  [32m[ OK ][0m with no accounting data the profile's default is used (01:00:00)
-  [32m[ OK ][0m and the state says why the study could not decide
-  [32m[ OK ][0m --no-queue-study uses the profile's walltime and runs no study
-  [32m[ OK ][0m vasp-relax-loop --study points at the command that does it now
+  [32m[ OK ][0m with no job of a similar size or core count, the table compares on the node count ('nodes 10')
   [32m[ OK ][0m the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=0)
   [32m[ OK ][0m and its three quartiles, in words: 5 min, 2.0 h, 4.0 h
   [32m[ OK ][0m the table: the quartiles down, one column per walltime band, and how many jobs
   [32m[ OK ][0m and it says in numbers what 'your size' means
   [32m[ OK ][0m no run-time estimate, no recommendation: the queue only
   [32m[ OK ][0m it creates nothing and submits nothing
-  [32m[ OK ][0m a start-up written as 10.4 s is read as 10 s, not 104 (the chain read 10)
-  [32m[ OK ][0m and the chain, with its own step estimate, takes backfill-study's 2 h (got 120 min)
   [32m[ OK ][0m with no folder, the job given on the command line gets the same answer (rc=0)
   [32m[ OK ][0m with neither, it refuses: not a calculation folder, and how to give the job instead (rc=2)
   [32m[ OK ][0m by hand with no --partition, the profile's is used (rc=0)
   [32m[ OK ][0m in the toolkit's own folder: one message, not four (rc=2)
   [32m[ OK ][0m naming what a wait estimate cannot do without, less --partition, which the profile gives
   [32m[ OK ][0m a folder that does not exist is named as such
-  [32m[ OK ][0m --machine: the chain's step estimate in, its chunk walltime out (2 h)
-  [32m[ OK ][0m with too little data, the chain falls back to the profile's walltime (60 min)
-  [32m[ OK ][0m --machine without the chain's step estimate is refused (rc=2)
   [32m[ OK ][0m the 7-day job waits about 36 min: the median of the 10 similar week-long jobs
   [32m[ OK ][0m and it reports what the folder's own job waited
   [32m[ OK ][0m the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not
@@ -43,7 +24,6 @@
   [32m[ OK ][0m with MaxTime known, a job above it is said not to start
   [32m[ OK ][0m and the table gives the bands the history has: 60 s, 3.3 h, 31.7 h
   [32m[ OK ][0m without vasp-test's data the queue report is unchanged (rc=0)
-  [32m[ OK ][0m vasp-relax-loop, from vasp-test's data and backfill-study's waits, picks 96-h chunks (5760 min)
   [32m[ OK ][0m Fair Tree: her factor, her account, and what 1.000 means (rc=0)
   [32m[ OK ][0m 5 of the 6 user associations rank above her
   [32m[ OK ][0m shares against use, for her account among its siblings and for her within it
@@ -60,7 +40,7 @@
   [32m[ OK ][0m without it, her default account, and a note that there are two
   [32m[ OK ][0m with no scheduler to ask: one line saying so, and why (rc=0)
   [32m[ OK ][0m --no-fairshare leaves it out
-  [32m[ OK ][0m the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime
+  [32m[ OK ][0m backfill-study has no chain mode any more (--machine)
   [32m[ OK ][0m fairshare 0.85: about 60 s, from the jobs of the one user near her (carla, 0.90) (rc=0)
   [32m[ OK ][0m and it says whose jobs those were, next to the whole column's 3.0 h
   [32m[ OK ][0m one association above her: 'has', not 'have'
