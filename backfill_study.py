@@ -7,8 +7,10 @@ fairshare: scontrol show config, sshare, sprio). Nothing else: it estimates
 no run time.
 
     cd <calc folder>        # reads the job from slurm_vasptest.sh (or slurm.sh)
-    backfill-study          # its expected wait, the quartiles of the waits at
-                            # each walltime, and your fairshare now
+    backfill-study          # its predicted wait (its column, narrowed to the
+                            # jobs of users with a fairshare like yours), the
+                            # quartiles of the waits at each walltime, and
+                            # your fairshare now
 
     backfill-study --partition main --nodes 1 --cpus 40 --mem-mb 80000 --time 2-00:00:00
 
@@ -117,7 +119,7 @@ CANDIDATES_MIN = (30, 60, 120, 180, 240, 360, 480, 600, 720, 960,
 MIN_JOBS = 8                 # below this a bin's median is anecdote, not data
 
 SACCT_FIELDS = ("JobID,Partition,Submit,Eligible,Start,State,Timelimit,"
-                "TimelimitRaw,NNodes,NCPUS,ReqTRES,ReqMem")
+                "TimelimitRaw,NNodes,NCPUS,ReqTRES,ReqMem,User,Account")
 
 LEVELS = (
     ("nodes + cores + memory", True, True, True),
@@ -224,14 +226,16 @@ def parse_mem_mb(reqtres: str, reqmem: str, ncpus: int, nnodes: int) -> Optional
 
 
 class Job:
-    __slots__ = ("wait_s", "limit_min", "nodes", "cpus", "mem_mb")
+    __slots__ = ("wait_s", "limit_min", "nodes", "cpus", "mem_mb", "user", "account")
 
-    def __init__(self, wait_s, limit_min, nodes, cpus, mem_mb):
+    def __init__(self, wait_s, limit_min, nodes, cpus, mem_mb, user="", account=""):
         self.wait_s = wait_s
         self.limit_min = limit_min
         self.nodes = nodes
         self.cpus = cpus
         self.mem_mb = mem_mb
+        self.user = user
+        self.account = account
 
 
 def load_jobs(lines: Sequence[str]) -> List[Job]:
@@ -259,7 +263,9 @@ def load_jobs(lines: Sequence[str]) -> List[Job]:
             cpus = max(1, int(nc or 1))
         except ValueError:
             continue
-        out.append(Job(wait, limit, nodes, cpus, parse_mem_mb(tres, rmem, cpus, nodes)))
+        user, acct = (f[12].strip(), f[13].strip()) if len(f) >= 14 else ("", "")
+        out.append(Job(wait, limit, nodes, cpus, parse_mem_mb(tres, rmem, cpus, nodes),
+                       user, acct))
     return out
 
 
@@ -811,6 +817,53 @@ def band_table(jobs: Sequence[Job], nodes: int, cpus: int, mem_mb: float,
     return None, []
 
 
+# The prediction: the table's column for your walltime, narrowed to the jobs
+# whose owners' fairshare TODAY is closest to yours. Measured, not modelled:
+# if fairshare orders this queue, those jobs waited the way yours will; if it
+# does not, they are a sample of the same column and say the same thing.
+# The owners' factors are today's; what they were when those jobs ran is not
+# recorded anywhere sacct or sshare can show.
+FS_WINDOWS = (0.05, 0.10, 0.20, 0.30)
+
+
+def predict_wait(jobs: Sequence[Job], nodes: int, cpus: int, mem_mb: float,
+                 level: Optional[str], wall_min: float, fs: Optional[Dict],
+                 min_jobs: int = MIN_JOBS) -> Dict:
+    """The quartiles of the fairshare neighbours' waits, with who they are;
+    or {"why": ...} when fairshare cannot narrow the column."""
+    if fs is None:
+        return {"why": "--no-fairshare"}
+    if fs.get("type") == "priority/basic":
+        return {"why": "priority/basic starts jobs in submission order"}
+    W = fs.get("weights")
+    if W and W["fairshare"] == 0:
+        return {"why": "it does not count here (PriorityWeightFairshare 0)"}
+    row = fs.get("mine")
+    if not row or row["factor"] is None:
+        return {"why": fs.get("sshare_error") or "your factor is unknown"}
+    mine, band = row["factor"], band_of(wall_min)
+    lvl = next((x for x in LEVELS if x[0] == level), None)
+    if band is None or lvl is None:
+        return {"why": "no comparable jobs"}
+    factors = fs.get("factors", {})
+    cand = [(j, factors[(j.account, j.user)]) for j in jobs
+            if band_of(j.limit_min) == band and (j.account, j.user) in factors
+            and is_similar(j, nodes, cpus, mem_mb, *lvl[1:])]
+    if not cand:
+        return {"why": "none of those jobs' owners is visible in sshare"}
+    for w in FS_WINDOWS:
+        sel = [(j, f) for j, f in cand if abs(f - mine) <= w + 1e-9]
+        if len(sel) >= min_jobs:
+            ws = [j.wait_s for j, _ in sel]
+            return {"n": len(sel), "users": len({j.user for j, _ in sel}), "window": w,
+                    "own": sum(1 for j, _ in sel if j.user == fs.get("user")),
+                    "f_lo": min(f for _, f in sel), "f_hi": max(f for _, f in sel),
+                    "mine": mine, "p25_s": percentile(ws, 0.25), "median_s": median(ws),
+                    "p75_s": percentile(ws, 0.75)}
+    return {"why": f"fewer than {min_jobs} of them are by users within "
+                   f"{FS_WINDOWS[-1]:.2f} of your fairshare ({mine:.3f})"}
+
+
 def size_words(level: Optional[str], nodes: int, cpus: int, mem_mb: float) -> str:
     """What "similar" meant, in numbers."""
     parts = []
@@ -876,7 +929,7 @@ def machine_line(res: Dict, fallback_min: float) -> str:
 def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
                  rows: List[Dict], past: List[Dict], maxtime: Tuple[Optional[float], str],
                  max_asked_min: Optional[float], days: int, n_jobs: int,
-                 fairshare: Optional[Dict] = None) -> str:
+                 fairshare: Optional[Dict] = None, pred: Optional[Dict] = None) -> str:
     L: List[str] = []
     part, nodes, cpus, mem = val["partition"], int(val["nodes"]), int(val["cpus"]), val["mem_mb"]
     mt, mt_state = maxtime
@@ -908,10 +961,30 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
         b = band_of(wall)
         row = next((r for r in rows if b and r["label"] == b[2]), None)
         if row:
-            L.append(f"  Expected wait: about {fmt_h(row['median_s'])}. Of the {row['n']} jobs of "
-                     f"{LEVEL_WORDS.get(level, level)} that asked for {row['label']},")
-            L.append(f"  a quarter started within {fmt_h(row['p25_s'])}, half within "
-                     f"{fmt_h(row['median_s'])}, three quarters within {fmt_h(row['p75_s'])}.")
+            # The prediction: the column, narrowed by fairshare when it can be.
+            near = pred if pred and pred.get("n") else None
+            q = near or row
+            size = f"jobs of {LEVEL_WORDS.get(level, level)} that asked for {row['label']}"
+            L.append(f"  Predicted wait: about {fmt_h(q['median_s'])}   (Q1 {fmt_h(q['p25_s'])}, "
+                     f"Q3 {fmt_h(q['p75_s'])})")
+            if near and near["own"] == near["n"]:
+                L.append(f"  from {near['n']} of your own {size} (your fairshare today "
+                         f"{near['mine']:.3f}).")
+                L.append(f"  All {row['n']} such jobs, any user: about {fmt_h(row['median_s'])}.")
+            elif near:
+                who = f"{near['users']} user{'' if near['users'] == 1 else 's'}"
+                if near["own"]:
+                    who += ", you among them"
+                span = (f"{near['f_lo']:.2f}" if near["f_lo"] == near["f_hi"]
+                        else f"{near['f_lo']:.2f}-{near['f_hi']:.2f}")
+                L.append(f"  from {near['n']} {size}, by {who}, whose fairshare")
+                L.append(f"  today is {span} (yours {near['mine']:.3f}). All {row['n']} such jobs, "
+                         f"any fairshare: about {fmt_h(row['median_s'])}.")
+            else:
+                why = (pred or {}).get("why", "")
+                L.append(f"  from the {row['n']} {size}.")
+                if why:
+                    L.append(f"  Fairshare not used: {why}.")
         else:
             L.append(f"  Not enough jobs of {LEVEL_WORDS.get(level, 'your size')} asked for "
                      f"{b[2] if b else fmt_slurm_time(wall)} to estimate its wait "
@@ -933,10 +1006,12 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
         for name, key in QUARTILES:
             L.append(f"  {name:<19}" + "".join(f"{fmt_cell(r[key]):>9}" for r in rows))
         L.append(f"  {'jobs':<19}" + "".join(f"{r['n']:>9}" for r in rows))
-        L.append(f"  {LEVEL_WORDS.get(level, level)} = {size_words(level, nodes, cpus, mem)}. "
-                 f"Q1, Q2, Q3: a quarter, half and three quarters")
-        L.append(f"  of those jobs had started within that time. Walltimes with fewer than "
-                 f"{MIN_JOBS} such jobs are not shown.")
+        what = ("every job on the partition" if level == "whole partition"
+                else f"jobs that asked for {size_words(level, nodes, cpus, mem)}")
+        L.append(f"  {LEVEL_WORDS.get(level, level)} = {what} (yours: {cpus} cores, "
+                 f"{mem / 1024:.0f} GB).")
+        L.append("  Q1, Q2, Q3: a quarter, half and three quarters of them had started within that time.")
+        L.append(f"  Walltimes with fewer than {MIN_JOBS} such jobs are not shown.")
     else:
         L.append(f"No walltime band has {MIN_JOBS}+ jobs comparable to yours in the last {days} days.")
     if fairshare is not None:
@@ -1079,6 +1154,8 @@ def fairshare_study(partition: str, account: Optional[str] = None) -> Dict:
         fs["reset"] = cfg.get("priorityusageresetperiod", "")
 
     rows, fs["sshare_error"] = sshare_rows()
+    fs["factors"] = {(r["account"], r["user"]): r["factor"] for r in rows
+                     if r["user"] and r["factor"] is not None}
     mine = [r for r in rows if r["user"] == me]
     if rows and not mine:
         fs["sshare_error"] = f"sshare shows no association for {me or 'you'}"
@@ -1140,7 +1217,7 @@ def fairshare_report(fs: Dict, partition: str) -> List[str]:
                  + (f"; {scale}" if scale else ""))
         if fs.get("others_visible"):
             L.append(f"  above you     {fs['n_above']} of the {fs['n_users']} user associations "
-                     f"(user + account) have a higher factor")
+                     f"(user + account) {'has' if fs['n_above'] == 1 else 'have'} a higher factor")
         else:
             L.append("  above you     not visible: sshare shows only your own associations")
         ar, share = fs.get("account_row"), []
@@ -1350,12 +1427,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if err:
         notes.insert(0, err)
     fsh = None if a.no_fairshare else fairshare_study(val["partition"], val.get("account"))
+    pred = (predict_wait(jobs, nodes, cpus, mem, level, val["wall_min"], fsh)
+            if val.get("wall_min") and level else None)
     print(queue_report(where, val, notes, level, rows, past, maxtime, max_asked, days, len(jobs),
-                       fsh))
+                       fsh, pred))
     if a.json:
         with open(a.json, "w") as fh:
             json.dump({"inputs": val, "maxtime": maxtime, "level": level, "bands": rows,
-                       "max_asked_min": max_asked, "sacct_error": err, "fairshare": fsh},
+                       "max_asked_min": max_asked, "sacct_error": err, "prediction": pred,
+                       "fairshare": {k: v for k, v in (fsh or {}).items() if k != "factors"}},
                       fh, indent=1, default=str)
     return 0
 

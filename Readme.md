@@ -480,14 +480,13 @@ time: that is the chain's job, from `vasp-test`'s measurements.
 ```
 backfill-study -- config_01
   partition   sequana_cpu   (MaxTime: not shown by scontrol)
-  your job    1 node x 48 cores, 73 GB, --time=7-00:00:00   (slurm_vasptest.sh)
+  your job    1 node x 48 cores, 73 GB, --time=3-00:00:00   (slurm_vasptest.sh)
   history     699 jobs that started on sequana_cpu in the last 30 days
 
 YOUR JOB
-  No job on sequana_cpu asked for more than 4 days in the last 30 days; yours asks for 7 days.
-  If that is the partition's limit, this job will not start. Check:
-      scontrol show partition sequana_cpu | grep -o 'MaxTime=[^ ]*'
-      sacctmgr show qos format=name,maxwall
+  Predicted wait: about 29.3 h   (Q1 19.2 h, Q3 2.2 days)
+  from 15 of your own jobs of your size that asked for 2 to 4 days (your fairshare today 0.600).
+  All 162 such jobs, any user: about 35.1 h.
   Your job 11599543 here asked for 8 h and waited 24.3 h.
 
 HOW LONG JOBS OF YOUR SIZE WAITED, BY THE WALLTIME THEY ASKED FOR
@@ -496,8 +495,9 @@ HOW LONG JOBS OF YOUR SIZE WAITED, BY THE WALLTIME THEY ASKED FOR
   Q2  (50 % within)       15 s     19 s    2.5 h   23.8 h   19.6 h   35.1 h
   Q3  (75 % within)       42 s     33 s    5.6 h   43.6 h   40.1 h    3.4 d
   jobs                      46      291      132       27       41      162
-  your size = 1 node, 24-96 cores, 24-219 GB. Q1, Q2, Q3: a quarter, half and three quarters
-  of those jobs had started within that time. Walltimes with fewer than 8 such jobs are not shown.
+  your size = jobs that asked for 1 node, 24-96 cores, 24-219 GB (yours: 48 cores, 73 GB).
+  Q1, Q2, Q3: a quarter, half and three quarters of them had started within that time.
+  Walltimes with fewer than 8 such jobs are not shown.
 
 FAIRSHARE NOW   (Fair Tree)
   your factor   0.600   jdoe in account fisica; 1.000 is the top-ranked user
@@ -513,17 +513,34 @@ FAIRSHARE NOW   (Fair Tree)
 ```
 
 (An illustration, from a synthetic history and fairshare shaped like one
-partition's.)
+partition's; the jobs' owners were drawn at random.)
 
-First, your job in sentences: its expected wait, and the quartiles of the
-waits of similar jobs that asked for about as long. Or why it cannot be
-estimated: more than the partition's MaxTime, or more than anyone asked for in
-the window. Then the table: the quartiles down (Q1, Q2 = the median, Q3), broad
-walltime bands across. Every column is compared the same way (jobs of your
-size, whose meaning is spelled out in numbers), and only bands with at least 8
-such jobs are shown. If there are too few jobs of your exact size, the whole
-table relaxes to your node and core count, then your node count, and says so
-in its title. Outside a calculation folder, give the job: `--partition --nodes
+**Jobs of your size** are the partition's jobs from the window that started
+and asked for about what yours asks: the same node band (1, 2–4, 5–16, 17+),
+between half and twice your cores, and between a third and three times your
+memory. The table's footer puts that in numbers. If no walltime has 8 such
+jobs, the comparison drops memory, then cores, then nodes, and the title says
+which one it used.
+
+**The table** has the quartiles of the wait down (Q1: a quarter of those jobs
+had started by then, Q2 the median: half, Q3: three quarters), and the
+walltime they asked for across. Each column is its own set of jobs, and the
+last row says how many. Only columns with at least 8 are shown.
+
+**The prediction** (YOUR JOB) is your column, narrowed by fairshare: the
+jobs in it whose owners' fairshare today is closest to yours. It takes those
+within 0.05 of your factor, then 0.10, 0.20 and 0.30, until there are 8 of
+them. Your own jobs have your factor, so with 8 of them they are the answer.
+If fairshare orders this queue, those jobs waited the way yours will. If it
+does not, they are a sample of the same column, and the prediction says what
+the column says. The whole column's median is printed next to it for
+comparison. The owners' factors are today's: what they were when those jobs
+ran is not recorded anywhere `sacct` or `sshare` can show. When fairshare
+cannot narrow the column (no `sshare`, owners hidden by `PrivateData`, a
+weight of 0, fewer than 8 jobs within 0.30), the prediction is the whole
+column, and the reason is given. Or it says why there is no estimate at all:
+more than the partition's MaxTime, or more than anyone asked for in the
+window. Outside a calculation folder, give the job: `--partition --nodes
 --cpus --mem-mb --time`.
 
 Last, **where you stand today**. The table is what the queue did, over weeks,
@@ -547,8 +564,8 @@ priority, and your part of it is your fairshare. From `scontrol show config`,
 What a command cannot tell (no `sshare`, or `PrivateData` hiding the other
 users) is said, not counted as zero. `priority/basic` (FIFO) is said to have no
 fairshare. `--account` picks the account when you have several (default: the
-job script's, else yours); `--no-fairshare` leaves the section out. The chain's
-chunk walltime does not use it.
+job script's, else yours); `--no-fairshare` leaves the section and the
+narrowing out. The chain's chunk walltime uses neither.
 
 It does not simulate the scheduler. It measures what the scheduler actually
 did, backfill included, to jobs like yours. What it cannot see: jobs still

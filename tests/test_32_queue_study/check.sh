@@ -182,15 +182,15 @@ must_refuse "vasp-relax-loop --study points at the command that does it now" "ba
 #   the job as written (4 h) falls in 1-4 h: about 2.0 h
 # It estimates no run time: that is vasp-relax-loop's, from vasp-test.
 out=$(ch_backfill "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 2.0 h. Of the 24 jobs of your size that asked for 1 to 4 h' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -q 'from the 24 jobs of your size that asked for 1 to 4 h.\$' <<<\"\$out\" && grep -q '^  Fairshare not used: ' <<<\"\$out\"" \
       "the job as written, in a sentence: about 2.0 h, from the 24 jobs of its size that asked 1 to 4 h (rc=$rc)"
-ok_if "grep -q 'a quarter started within 5 min, half within 2.0 h, three quarters within 4.0 h' <<<\"\$out\"" \
+ok_if "grep -q 'Predicted wait: about 2.0 h   (Q1 5 min, Q3 4.0 h)' <<<\"\$out\"" \
       "and its three quartiles, in words: 5 min, 2.0 h, 4.0 h"
 ok_if "grep -qE '^  walltime asked +0-1 h +1-4 h\$' <<<\"\$out\" && grep -qE '^  Q1  \(25 % within\) +2.0 h +5 min\$' <<<\"\$out\" \
        && grep -qE '^  Q2  \(50 % within\) +2.0 h +2.0 h\$' <<<\"\$out\" && grep -qE '^  Q3  \(75 % within\) +2.0 h +4.0 h\$' <<<\"\$out\" \
        && grep -qE '^  jobs +12 +24\$' <<<\"\$out\"" \
       "the table: the quartiles down, one column per walltime band, and how many jobs"
-ok_if "grep -q 'your size = 1 node, 2-8 cores, 3-23 GB' <<<\"\$out\"" \
+ok_if "grep -q 'your size = jobs that asked for 1 node, 2-8 cores, 3-23 GB (yours: 4 cores, 8 GB)' <<<\"\$out\"" \
       "and it says in numbers what 'your size' means"
 ok_if "! grep -qiE 'ionic|RECOMMENDATION|RUN TIME|NSW' <<<\"\$out\"" \
       "no run-time estimate, no recommendation: the queue only"
@@ -212,13 +212,13 @@ _bf(){ ( cd "$e" && env PATH="$W/twins.fake/bin:/usr/bin:/bin" FAKE_DIR="$W/twin
           FAKE_MAXTIME=UNLIMITED WOLFPACK_CLUSTER_CONF="${CONF:-/nonexistent}" HOME="$e" \
           "$WP_PY" "$Q" "$@" 2>&1 ); }
 out=$(_bf --partition fakepart --nodes 1 --cpus 4 --mem-mb 8192 --time 04:00:00); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 2.0 h' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -q 'Predicted wait: about 2.0 h' <<<\"\$out\"" \
       "with no folder, the job given on the command line gets the same answer (rc=$rc)"
 out=$(_bf); rc=$?
 ok_if "(( rc == 2 )) && grep -q 'is not a calculation folder' <<<\"\$out\" && grep -q -- '--time' <<<\"\$out\"" \
       "with neither, it refuses: not a calculation folder, and how to give the job instead (rc=$rc)"
 out=$(CONF="$W/twins.fake/cluster.conf" _bf --nodes 1 --cpus 4 --mem-mb 8192 --time 240); rc=$?
-ok_if "(( rc == 0 )) && grep -qE '^  partition +fakepart' <<<\"\$out\" && grep -q 'Expected wait: about 2.0 h' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -qE '^  partition +fakepart' <<<\"\$out\" && grep -q 'Predicted wait: about 2.0 h' <<<\"\$out\"" \
       "by hand with no --partition, the profile's is used (rc=$rc)"
 
 # Run where it was first run by hand on a real cluster: in the toolkit's own
@@ -282,7 +282,7 @@ printf '13276000|2026-09-23T18:00:00|2026-09-23T18:00:00|2026-09-23T18:12:00|RUN
     > "$fk/sacct.13276000"
 
 out=$(ch_backfill "$d" 2>&1); rc=$?
-ok_if "(( rc == 0 )) && grep -q 'Expected wait: about 36 min. Of the 10 jobs of your size that asked for 4 to 7 days' <<<\"\$out\"" \
+ok_if "(( rc == 0 )) && grep -q 'Predicted wait: about 36 min' <<<\"\$out\" && grep -q 'from the 10 jobs of your size that asked for 4 to 7 days' <<<\"\$out\"" \
       "the 7-day job waits about 36 min: the median of the 10 similar week-long jobs"
 ok_if "grep -q 'Your job 13276000 here asked for 7 days and waited 12 min' <<<\"\$out\"" \
       "and it reports what the folder's own job waited"
@@ -292,7 +292,7 @@ ok_if "grep -qE '^  walltime asked +4-7 d\$' <<<\"\$out\" && grep -qE '^  Q1  \(
        && grep -qE '^  Q2  \(50 % within\) +36 min\$' <<<\"\$out\" && grep -qE '^  Q3  \(75 % within\) +37 min\$' <<<\"\$out\" \
        && grep -qE '^  jobs +10\$' <<<\"\$out\"" \
       "the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not"
-ok_if "(( \$(wc -l <<<\"\$out\") <= 21 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\"" \
+ok_if "(( \$(wc -l <<<\"\$out\") <= 23 )) && ! grep -q 'WP_BACKFILL_STUDY' <<<\"\$out\"" \
       "in $(wc -l <<<"$out") lines, fairshare included, with no machine line"
 
 # ===========================================================================
@@ -320,7 +320,7 @@ printf '#!/bin/bash\nexit 0\n' > "$sf/bin/scontrol"      # shows no MaxTime at a
 sout=$(ch_backfill "$s" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && grep -q '(MaxTime: not shown by scontrol)' <<<\"\$sout\"" \
       "a MaxTime scontrol does not show is said to be unknown, not left out (rc=$rc)"
-ok_if "grep -q 'No job on fakepart asked for more than 4 days in the last 30 days; yours asks for 7 days' <<<\"\$sout\" && ! grep -q 'Expected wait' <<<\"\$sout\"" \
+ok_if "grep -q 'No job on fakepart asked for more than 4 days in the last 30 days; yours asks for 7 days' <<<\"\$sout\" && ! grep -q 'Predicted wait' <<<\"\$sout\"" \
       "a walltime beyond anything in the history gets that fact, not a wait borrowed from shorter jobs"
 ok_if "grep -q 'sacctmgr show qos format=name,maxwall' <<<\"\$sout\"" "and the commands that show the limit"
 cat > "$sf/bin/scontrol" <<'EOS'
@@ -463,5 +463,129 @@ fout=$(USER=alice ch_backfill "$fd" --machine --partition fakepart --nodes 1 --c
         --mem-mb 8192 --t-ion-s 25.6 --steps 20 --startup-s 10 2>&1)
 ok_if "! grep -q 'FAIRSHARE' <<<\"\$fout\" && grep -q '^WP_BACKFILL_STUDY' <<<\"\$fout\"" \
       "the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime"
+
+# ===========================================================================
+# 10. THE PREDICTION: the table's column, narrowed by fairshare
+# ===========================================================================
+# The job: 1 node, 4 cores, 8 GB, 3 h -> the 1-4 h column. Its 33 jobs of
+# that size, and their owners' fairshare today:
+#   carla (quimica) 0.90  10 jobs, waited 1 min
+#   eva   (fisica)  0.60   3 jobs, waited 30 min
+#   beto  (fisica)  0.45  10 jobs, waited 3 h
+#   dani  (quimica) 0.10  10 jobs, waited 10 h
+# The whole column, sorted (1 x10, 30 x3, 180 x10, 600 x10 min): Q1 at rank 8
+# = 60 s, Q2 at rank 16 = 3.0 h, Q3 at rank 24 = 10.0 h.
+# The prediction takes the jobs by users within 0.05 of alice's factor, then
+# 0.10, 0.20, 0.30, until there are 8:
+#   alice 0.85 -> 0.05: carla's 10               -> 60 s
+#   alice 0.60 -> 0.05 and 0.10: eva's 3 (too few); 0.20: eva + beto, 13 jobs
+#                 (30 x3, 180 x10)               -> 3.0 h, Q1 and Q3 3.0 h
+#   alice 0.275 -> 0.20: beto + dani, 20 jobs     -> Q2 (180+600)/2 = 6.5 h,
+#                 Q1 at rank 4.75 = 3.0 h, Q3 at rank 14.25 = 10.0 h
+pd=$(ch_setup pred); pf="$pd.fake"
+"$WP_PY" - "$pf/history" <<'PY'
+import sys, datetime as dt
+with open(sys.argv[1], "w") as fh:
+    i = 0
+    for user, acct, wait, n in (("carla", "quimica", 1, 10), ("eva", "fisica", 30, 3),
+                                ("beto", "fisica", 180, 10), ("dani", "quimica", 600, 10)):
+        for k in range(n):
+            sub = dt.datetime(2026, 9, 1) + dt.timedelta(minutes=41 * i); i += 1
+            sta = sub + dt.timedelta(minutes=wait)
+            fh.write(f"{i}|fakepart|{sub.isoformat()}|{sub.isoformat()}|{sta.isoformat()}|"
+                     f"COMPLETED|x|180|1|4|cpu=4,mem=8G,node=1||{user}|{acct}\n")
+PY
+cp "$pf/history" "$pf/history.all"
+printf '%s\n' "PriorityDecayHalfLife   = 7-00:00:00" "PriorityFlags           = " \
+    "PriorityMaxAge          = 7-00:00:00" "PriorityType            = priority/multifactor" \
+    "PriorityWeightAge       = 1000" "PriorityWeightFairShare = 10000" "PriorityWeightJobSize   = 0" \
+    "PriorityWeightPartition = 0" "PriorityWeightQOS       = 0" > "$pf/config"
+_pshare(){ # _pshare ALICE_FACTOR -> sshare -a with alice at that factor
+    printf '%s\n' "root|||0.000000|1000||1.000000|" \
+        " fisica||1|0.500000|500|0.500000||1.000000" \
+        "  fisica|alice|1|0.333333|100|0.200000|$1|1.666667" \
+        "  fisica|eva|1|0.333333|100|0.200000|0.600000|1.666667" \
+        "  fisica|beto|1|0.333333|300|0.600000|0.450000|0.555556" \
+        " quimica||1|0.500000|500|0.500000||1.000000" \
+        "  quimica|carla|1|0.500000|100|0.200000|0.900000|2.500000" \
+        "  quimica|dani|1|0.500000|400|0.800000|0.100000|0.625000" > "$pf/sshare"
+}
+_pw(){ USER=alice LOGNAME=alice ch_backfill "$pd" --partition fakepart --nodes 1 --cpus 4 \
+          --mem-mb 8192 --time 180 "$@" 2>&1; }
+
+_pshare 0.850000; pout=$(_pw); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'Predicted wait: about 60 s   (Q1 60 s, Q3 60 s)' <<<\"\$pout\"" \
+      "fairshare 0.85: about 60 s, from the jobs of the one user near her (carla, 0.90) (rc=$rc)"
+ok_if "grep -q '^  from 10 jobs of your size that asked for 1 to 4 h, by 1 user, whose fairshare\$' <<<\"\$pout\" \
+       && grep -q '^  today is 0.90 (yours 0.850). All 33 such jobs, any fairshare: about 3.0 h.\$' <<<\"\$pout\"" \
+      "and it says whose jobs those were, next to the whole column's 3.0 h"
+ok_if "grep -q '^  above you     1 of the 5 user associations (user + account) has a higher factor\$' <<<\"\$pout\"" \
+      "one association above her: 'has', not 'have'"
+ok_if "grep -qE '^  Q2  \\(50 % within\\) +3.0 h\$' <<<\"\$pout\" && grep -qE '^  Q1  \\(25 % within\\) +60 s\$' <<<\"\$pout\" \
+       && grep -qE '^  Q3  \\(75 % within\\) +10.0 h\$' <<<\"\$pout\"" \
+      "the table stays the whole column (60 s, 3.0 h, 10.0 h): the narrowing is the prediction's only"
+_pshare 0.600000; pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 3.0 h   (Q1 3.0 h, Q3 3.0 h)' <<<\"\$pout\" \
+       && grep -q 'from 13 jobs of your size that asked for 1 to 4 h, by 2 users, whose fairshare' <<<\"\$pout\" \
+       && grep -q 'today is 0.45-0.60 (yours 0.600)' <<<\"\$pout\"" \
+      "fairshare 0.60: eva's 3 jobs are too few, so it widens to 0.20 and takes beto's too: 13 jobs, 3.0 h"
+_pshare 0.275000; pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 6.5 h   (Q1 3.0 h, Q3 10.0 h)' <<<\"\$pout\" \
+       && grep -q 'today is 0.10-0.45 (yours 0.275)' <<<\"\$pout\"" \
+      "fairshare 0.275: beto's and dani's 20 jobs, median (3 h + 10 h)/2 = 6.5 h"
+
+# Her own jobs have her own factor: with 8 of them in the column, they are
+# the narrowest window. 8 more, waited 20 min each: 41 jobs (1 x10, 20 x8,
+# 30 x3, 180 x10, 600 x10; the column's median, rank 20, is 30 min). At 0.75
+# nobody else is within 0.05 of her, so the prediction is hers alone. At 0.45
+# she sits with beto: his 10 and her 8, 18 jobs (20 x8, 180 x10) -> median
+# of ranks 8 and 9 = 3.0 h, Q1 at rank 4.25 = 20 min, "you among them".
+cp "$pf/history.all" "$pf/history.mine"
+"$WP_PY" - "$pf/history.mine" <<'PY'
+import sys, datetime as dt
+with open(sys.argv[1], "a") as fh:
+    for k in range(8):
+        sub = dt.datetime(2026, 9, 20) + dt.timedelta(minutes=41 * k)
+        sta = sub + dt.timedelta(minutes=20)
+        fh.write(f"9{k}|fakepart|{sub.isoformat()}|{sub.isoformat()}|{sta.isoformat()}|"
+                 f"COMPLETED|x|180|1|4|cpu=4,mem=8G,node=1||alice|fisica\n")
+PY
+cp "$pf/history.mine" "$pf/history"; _pshare 0.750000; pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 20 min   (Q1 20 min, Q3 20 min)' <<<\"\$pout\" \
+       && grep -q '^  from 8 of your own jobs of your size that asked for 1 to 4 h (your fairshare today 0.750).\$' <<<\"\$pout\" \
+       && grep -q 'All 41 such jobs, any user: about 30 min' <<<\"\$pout\"" \
+      "8 of her own jobs in the column: the prediction is hers (20 min), and it says so"
+_pshare 0.450000; pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 3.0 h   (Q1 20 min, Q3 3.0 h)' <<<\"\$pout\" && grep -q 'by 2 users, you among them, whose fairshare' <<<\"\$pout\"" \
+      "at beto's factor: his jobs and hers, 3.0 h (Q1 20 min), 'you among them'"
+cp "$pf/history.all" "$pf/history"
+
+# When fairshare cannot narrow the column, the prediction is the column, and
+# it says why.
+_pshare 0.600000
+grep -v -e '|beto|' -e '|carla|' "$pf/history.all" > "$pf/history"
+pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 10.0 h' <<<\"\$pout\" \
+       && grep -q 'Fairshare not used: fewer than 8 of them are by users within 0.30 of your fairshare (0.600)' <<<\"\$pout\"" \
+      "too few jobs near her fairshare (eva's 3): the column's 10.0 h, and why"
+cp "$pf/history.all" "$pf/history"
+printf '%s\n' "root|||0.000000|1000||1.000000|" " fisica||1|0.500000|500|0.500000||1.000000" \
+    "  fisica|alice|1|0.333333|100|0.200000|0.600000|1.666667" > "$pf/sshare"
+pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 3.0 h' <<<\"\$pout\" \
+       && grep -q \"Fairshare not used: none of those jobs' owners is visible in sshare\" <<<\"\$pout\"" \
+      "owners hidden by PrivateData: the column's 3.0 h, and why"
+_pshare 0.850000; sed -i 's/^PriorityWeightFairShare = .*/PriorityWeightFairShare = 0/' "$pf/config"
+pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 3.0 h' <<<\"\$pout\" \
+       && grep -q 'Fairshare not used: it does not count here (PriorityWeightFairshare 0)' <<<\"\$pout\"" \
+      "a fairshare weight of 0: nothing to narrow by"
+sed -i 's/^PriorityWeightFairShare = .*/PriorityWeightFairShare = 10000/' "$pf/config"
+pout=$(_pw --no-fairshare)
+ok_if "grep -q 'Predicted wait: about 3.0 h' <<<\"\$pout\" && grep -q 'Fairshare not used: --no-fairshare' <<<\"\$pout\"" \
+      "--no-fairshare: the column, and it says so"
+rm -f "$pf/sshare" "$pf/config"; pout=$(_pw)
+ok_if "grep -q 'Predicted wait: about 3.0 h' <<<\"\$pout\" && grep -q 'Fairshare not used: sshare failed' <<<\"\$pout\"" \
+      "no sshare: the column, and the reason"
 
 exit $(( FAIL_N > 0 ))

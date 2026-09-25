@@ -62,7 +62,7 @@ WolfPack-DFT commands
     vasp-scf-loop           Converge an SCF as a chain of short, self-resubmitting jobs
     vasp-relax-loop         Same for a relaxation: chunks NSW, never NELM
     backfill-study          How long this job waits in the queue, at its walltime and others,
-                            and your fairshare now
+                            predicted with your fairshare; and your fairshare now
                             (vasp-relax-loop asks it at launch for its chunk walltime)
 
   DIAGNOSIS

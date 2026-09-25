@@ -36,7 +36,7 @@
   [32m[ OK ][0m the 7-day job waits about 36 min: the median of the 10 similar week-long jobs
   [32m[ OK ][0m and it reports what the folder's own job waited
   [32m[ OK ][0m the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not
-  [32m[ OK ][0m in 21 lines, fairshare included, with no machine line
+  [32m[ OK ][0m in 23 lines, fairshare included, with no machine line
   [32m[ OK ][0m a MaxTime scontrol does not show is said to be unknown, not left out (rc=0)
   [32m[ OK ][0m a walltime beyond anything in the history gets that fact, not a wait borrowed from shorter jobs
   [32m[ OK ][0m and the commands that show the limit
@@ -61,3 +61,16 @@
   [32m[ OK ][0m with no scheduler to ask: one line saying so, and why (rc=0)
   [32m[ OK ][0m --no-fairshare leaves it out
   [32m[ OK ][0m the chain's call (--machine) is unchanged: fairshare does not enter its chunk walltime
+  [32m[ OK ][0m fairshare 0.85: about 60 s, from the jobs of the one user near her (carla, 0.90) (rc=0)
+  [32m[ OK ][0m and it says whose jobs those were, next to the whole column's 3.0 h
+  [32m[ OK ][0m one association above her: 'has', not 'have'
+  [32m[ OK ][0m the table stays the whole column (60 s, 3.0 h, 10.0 h): the narrowing is the prediction's only
+  [32m[ OK ][0m fairshare 0.60: eva's 3 jobs are too few, so it widens to 0.20 and takes beto's too: 13 jobs, 3.0 h
+  [32m[ OK ][0m fairshare 0.275: beto's and dani's 20 jobs, median (3 h + 10 h)/2 = 6.5 h
+  [32m[ OK ][0m 8 of her own jobs in the column: the prediction is hers (20 min), and it says so
+  [32m[ OK ][0m at beto's factor: his jobs and hers, 3.0 h (Q1 20 min), 'you among them'
+  [32m[ OK ][0m too few jobs near her fairshare (eva's 3): the column's 10.0 h, and why
+  [32m[ OK ][0m owners hidden by PrivateData: the column's 3.0 h, and why
+  [32m[ OK ][0m a fairshare weight of 0: nothing to narrow by
+  [32m[ OK ][0m --no-fairshare: the column, and it says so
+  [32m[ OK ][0m no sshare: the column, and the reason
