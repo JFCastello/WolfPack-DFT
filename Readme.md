@@ -657,6 +657,26 @@ more than the partition's MaxTime, or more than anyone asked for in the
 window. Outside a calculation folder, give the job: `--partition --nodes
 --cpus --mem-mb --time`.
 
+**A job already submitted**, by its id:
+
+```
+backfill-study --job 11599543
+  your job    1 node x 48 cores, 73 GB, --time=3-00:00:00   (job 11599543, COMPLETED)
+  ...
+  Predicted wait: about 29.3 h   (Q1 19.2 h, Q3 2.2 days)
+  ...
+  Job 11599543 asked for 3 days and waited 24.3 h.
+  That is between Q1 and Q3, like half of them.
+```
+
+The partition, nodes, cores, memory, walltime and account come from
+`sacct -j`, which knows pending, running and finished jobs alike. The job
+itself is left out of the history it is compared with. A finished job's wait
+is placed among the quartiles; a pending one says how long it has waited so
+far. An option given (`--time`, `--partition`, …) wins over the job, and the
+job wins over the folder. For someone else's job, the fairshare used is its
+owner's, and the report says so.
+
 Last, **where you stand today**. The table is what the queue did, over weeks,
 to everyone's jobs of your size. What orders the pending jobs now is their
 priority, and your part of it is your fairshare. From `scontrol show config`,

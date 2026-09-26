@@ -55,6 +55,10 @@ test. The fake scheduler is `tests/chain_harness.sh`'s. About 10 seconds.
 | 3 | `backfill-study` in the folder (4 ranks, 8 GB, `--time=04:00:00`) | "Predicted wait: about **2.0 h** (Q1 5 min, Q3 4.0 h)", from the 24 jobs of its size that asked 1 to 4 h, and why fairshare was not used (no `sshare` here); the table with the quartiles down and the bands across: 0-1 h **2.0 / 2.0 / 2.0 h** (12 jobs), 1-4 h **5 min / 2.0 h / 4.0 h** (24); "your size" spelled out (1 node, 2–8 cores, 3–23 GB); no run-time estimate and no recommendation; nothing created or submitted |
 | 3 | the job on the command line, no folder | the same 2.0 h; without `--partition`, the profile's |
 | 3 | no folder and no options; the toolkit's own directory; a folder that does not exist | one message each: not a calculation folder (naming `--nodes --cpus --mem-mb`), or no such folder |
+| 3b | `--job 990001`: in `sacct -j`, 1 node, 4 cores, 8 GB, 4 h, waited 30 min; the same job also in the partition's history | its shape and walltime from `sacct -j`; the same **2.0 h** (Q1 5 min, Q3 4.0 h) from the same **24** jobs, so the job is left out of its own comparison (counted, it would make 25 and a median of 30 min); "Job 990001 asked for 4 h and waited 30 min", "between Q1 and Q3" |
+| 3b | `--job 990002`, pending for 3 h, asking 1 h | the 1-h column's 2.0 h, and "has been waiting 3.0 h so far", not placed among the quartiles |
+| 3b | `--job 990001 --time 01:00:00`; `--job 990002` inside the 4-h folder | the option wins over the job; the job wins over the folder |
+| 3b | someone else's job; a job `sacct` does not know; `--job 12ab` | a note that the fairshare is its owner's; refused, naming `sacct -j`; refused, "a job id is digits" |
 | 4 | the LaMnO3 relaxation (1 × 56 ranks, 46 GB, 7 days; 76 short 4-core jobs and 10 similar week-long jobs that waited 35–37 min) | about **36 min**, from the 10 jobs of its size that asked 4 to 7 days; one column 4-7 d: **35 / 36 / 37 min**, 10 jobs; the folder's own job waited 12 min; the 4-core jobs are not in the table; at most 21 lines, fairshare included |
 | 5 | Santos Dumont: 1 × 48 cores, 73 GB, 7 days, where nobody asked for more than 4 days; `scontrol` shows no MaxTime | "MaxTime: not shown by scontrol"; "No job asked for more than 4 days … yours asks for 7 days", the commands that show the limit, and **no** wait borrowed from the 4-day jobs |
 | 5 | the same with MaxTime 4 days | "more than the partition's MaxTime of 4 days: it will not start"; the median row 60 s, 3.3 h, 31.7 h under 1-4 h, 4-12 h, 2-4 d |
@@ -123,6 +127,9 @@ what `vasp-relax-loop` does at launch, and a test existed only to keep the two
 copies equal. It is gone. The step estimate now lives in one place, the chain,
 and `backfill-study` reports the queue.
 
+**`--job` on 2026-09-25.** The job can be named by its id instead of its
+folder. Nine assertions (3b); the rest unchanged.
+
 Package bugs found along the way and fixed: the chain read vasp-test's
 start-up time "58.3" as 583 s (its `int()` stripped the point); a folder that
 was not a calculation got four complaints, one of them false (`NSW=0 in INCAR`
@@ -141,7 +148,7 @@ against the arithmetic in the check's comments.
 
 ## 7. Verdict
 
-**PASSED** — 56 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 65 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 
@@ -151,6 +158,9 @@ against the arithmetic in the check's comments.
   <https://slurm.schedmd.com/sacct.html>
 - `Eligible` is when the job became eligible to run (after dependencies and
   holds) — <https://slurm.schedmd.com/sacct.html#OPT_Eligible>
+- `sacct --jobs` with no `--state`: the default time window starts at Epoch 0,
+  so a job of any age is found, and non-eligible jobs are shown too —
+  <https://slurm.schedmd.com/sacct.html> (DEFAULT TIME WINDOW, `--jobs`)
 - Backfill scheduling starts lower-priority jobs early only if they do not
   delay higher-priority ones — which depends on their time limit —
   <https://slurm.schedmd.com/sched_config.html>

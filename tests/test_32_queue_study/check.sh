@@ -129,6 +129,52 @@ out=$( "$WP_PY" "$Q" "$W/does-not-exist" 2>&1 ); rc=$?
 ok_if "(( rc == 2 )) && grep -q 'no such folder' <<<\"\$out\"" "a folder that does not exist is named as such"
 
 # ===========================================================================
+# 3b. THE JOB BY ITS ID: --job, from sacct -j
+# ===========================================================================
+# sacct -j answers in the history's own fields (SACCT_FIELDS), for a job
+# pending, running or finished. Job 990001: 1 node, 4 cores, 8 GB, 4 h, and
+# it waited 30 min -- and it is ALSO in the partition's history, where it must
+# not be counted: with it the 1-4 h column would have 25 jobs and other
+# quartiles. Job 990002 asks for 1 h and has been pending 3 h. Job 990003 is
+# someone else's.
+me=$(id -un)
+_jobrec(){ # _jobrec JID SUBMIT START STATE LIMIT_MIN USER
+    printf '%s|fakepart|%s|%s|%s|%s|x|%s|1|4|cpu=4,mem=8G,node=1||%s|fisica\n' \
+        "$1" "$2" "$2" "$3" "$4" "$5" "$6"
+}
+three_h_ago=$(date -d '-3 hours' '+%Y-%m-%dT%H:%M:%S')
+for fk in "$W/twins.fake" "$W/lookonly.fake"; do
+    _jobrec 990001 2026-09-20T10:00:00 2026-09-20T10:30:00 COMPLETED 240 "$me" > "$fk/sacct.990001"
+    _jobrec 990002 "$three_h_ago" Unknown PENDING 60 "$me" > "$fk/sacct.990002"
+    _jobrec 990003 2026-09-20T10:00:00 2026-09-20T10:30:00 COMPLETED 240 otheruser > "$fk/sacct.990003"
+    cat "$fk/sacct.990001" >> "$fk/history"
+done
+out=$(_bf --job 990001); rc=$?
+ok_if "(( rc == 0 )) && grep -qE '^  your job +1 node x 4 cores, 8 GB, --time=04:00:00   \(job 990001, COMPLETED\)\$' <<<\"\$out\"" \
+      "the job's shape and walltime are read from sacct -j (rc=$rc)"
+ok_if "grep -q 'Predicted wait: about 2.0 h   (Q1 5 min, Q3 4.0 h)' <<<\"\$out\" && grep -q 'from the 24 jobs of your size that asked for 1 to 4 h' <<<\"\$out\"" \
+      "the same answer as the folder's, from the same 24 jobs: the job itself is left out of the history"
+ok_if "grep -q '^  Job 990001 asked for 4 h and waited 30 min.\$' <<<\"\$out\" && grep -q '^  That is between Q1 and Q3, like half of them.\$' <<<\"\$out\"" \
+      "and how long it did wait, placed among the quartiles: 30 min, between 5 min and 4.0 h"
+out=$(_bf --job 990002); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'Predicted wait: about 2.0 h   (Q1 2.0 h, Q3 2.0 h)' <<<\"\$out\" && grep -q '^  Job 990002 asked for 1 h and has been waiting 3.0 h so far.\$' <<<\"\$out\" && ! grep -q '^  That is' <<<\"\$out\"" \
+      "a pending job: its column, and how long it has waited so far -- not placed, it is not over (rc=$rc)"
+out=$(_bf --job 990001 --time 01:00:00); rc=$?
+ok_if "(( rc == 0 )) && grep -q -- '--time=01:00:00' <<<\"\$out\" && grep -q 'Predicted wait: about 2.0 h   (Q1 2.0 h, Q3 2.0 h)' <<<\"\$out\"" \
+      "an option given wins over the job: --time 01:00:00 studies the 1-h column (rc=$rc)"
+out=$(ch_backfill "$d" --job 990002 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q '(job 990002, PENDING)' <<<\"\$out\" && grep -q 'asked for up to 1 h' <<<\"\$out\" && ! grep -q 'slurm_vasptest.sh' <<<\"\$out\"" \
+      "and the job wins over the folder it is run in (the folder's script asks for 4 h) (rc=$rc)"
+out=$(_bf --job 990003); rc=$?
+ok_if "(( rc == 0 )) && grep -q \"note: job 990003 is otheruser's: the fairshare and the prediction are for otheruser\" <<<\"\$out\"" \
+      "someone else's job: it says whose fairshare the study uses (rc=$rc)"
+out=$(_bf --job 424242); rc=$?
+ok_if "(( rc == 2 )) && grep -q 'sacct -j 424242 shows no such job' <<<\"\$out\"" \
+      "a job sacct does not know is refused, by name (rc=$rc)"
+out=$(_bf --job 12ab); rc=$?
+ok_if "(( rc == 2 )) && grep -q 'a job id is digits' <<<\"\$out\"" "a job id that is not one is refused (rc=$rc)"
+
+# ===========================================================================
 # 4. A REAL CASE: the LaMnO3 relaxation on Leftraru
 # ===========================================================================
 # 1 node x 56 ranks, 46 GB, --time=7-00:00:00, NSW = 120. The queue: 76 short

@@ -14,6 +14,10 @@ no run time.
 
     backfill-study --partition main --nodes 1 --cpus 40 --mem-mb 80000 --time 2-00:00:00
 
+    backfill-study --job 12345678   # a job already submitted, pending or not:
+                                    # its shape from sacct, and how long it has
+                                    # waited against the prediction
+
 Standard library only, Python 3.6+: it runs on a login node, where nothing
 beyond python3 can be assumed.
 
@@ -438,6 +442,68 @@ def from_folder(folder: str) -> Tuple[Dict, List[str]]:
     return val, notes
 
 
+JOB_ID = re.compile(r"^\d+(_\d+)?$")        # a job, or one task of an array
+
+
+def from_job(jid: str, timeout: int = 30) -> Tuple[Dict, List[str], Optional[Dict]]:
+    """The job as SLURM recorded it: (its shape, notes, its wait so far).
+
+    sacct -j knows pending, running and finished jobs alike, and with --jobs
+    and no --state its window starts at Epoch 0 (sacct(1), DEFAULT TIME
+    WINDOW), so the job's age does not matter. The shape is read with the same
+    fields and the same parsing as the history it is compared with.
+    Returns an empty shape, with the reason in the notes, when sacct does not
+    know the job."""
+    val = profile_settings()
+    try:
+        p = subprocess.run(["sacct", "-X", "-P", "-n", "-j", jid, "-o", SACCT_FIELDS],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=timeout)
+    except FileNotFoundError:
+        return {}, ["sacct is not on PATH"], None
+    except subprocess.TimeoutExpired:
+        return {}, [f"sacct did not answer within {timeout}s"], None
+    rec = next((ln.split("|") for ln in (p.stdout or "").splitlines()
+                if ln.split("|")[0] == jid and len(ln.split("|")) >= 12), None)
+    if rec is None:
+        err = (p.stderr or "").strip().splitlines()
+        return {}, [f"sacct -j {jid} shows no such job" + (f" ({err[-1]})" if err else "")], None
+    _jid, part, sub, eli, sta, state, tl, tlraw, nn, nc, tres, rmem = rec[:12]
+    notes: List[str] = []
+    val["script"] = f"job {jid}, {state.split()[0] if state else '?'}"
+    if part:
+        # A job submitted to several partitions lists them all until it starts.
+        parts = part.split(",")
+        val["partition"], val["partition_from"] = parts[0], f"job {jid}"
+        if len(parts) > 1:
+            notes.append(f"job {jid} was submitted to {part}; the study uses {parts[0]}")
+    nodes, cpus = _whole(nn, 1) or 1, _whole(nc)
+    if cpus > 0:
+        val["nodes"], val["cpus"] = nodes, cpus
+        mem = parse_mem_mb(tres, rmem, cpus, nodes)
+        if mem:
+            val["mem_mb"] = mem
+    limit = parse_timelimit_min(tlraw, tl)
+    if limit and limit > 0:
+        val["wall_min"] = limit
+    if len(rec) >= 14:
+        if rec[13].strip():
+            val["account"] = rec[13].strip()
+        if rec[12].strip():
+            val["job_user"] = rec[12].strip()
+    # Its own wait, counted as the history's are: from Eligible, else Submit.
+    wait = None
+    t_sub, t_eli, t_sta = parse_time(sub), parse_time(eli), parse_time(sta)
+    t0 = t_eli if (t_eli is not None and (t_sub is None or t_eli >= t_sub)) else t_sub
+    if t0 is not None:
+        pending = t_sta is None
+        end = _dt.datetime.now() if pending else t_sta
+        wait = {"jid": jid, "wait_s": max((end - t0).total_seconds(), 0.0),
+                "pending": pending, "state": state.split()[0] if state else "?",
+                "limit_min": limit, "given": True}
+    return val, notes, wait
+
+
 def folder_job_ids(folder: str) -> List[str]:
     """Jobs that ran in the folder itself: SLURM logs <name>-<jobid>.out."""
     ids = set()
@@ -614,6 +680,7 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
                  max_asked_min: Optional[float], days: int, n_jobs: int,
                  fairshare: Optional[Dict] = None, pred: Optional[Dict] = None) -> str:
     L: List[str] = []
+    qref: Optional[Dict] = None
     part, nodes, cpus, mem = val["partition"], int(val["nodes"]), int(val["cpus"]), val["mem_mb"]
     mt, mt_state = maxtime
     wall = val.get("wall_min")
@@ -646,7 +713,7 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
         if row:
             # The prediction: the column, narrowed by fairshare when it can be.
             near = pred if pred and pred.get("n") else None
-            q = near or row
+            q = qref = near or row
             size = f"jobs of {LEVEL_WORDS.get(level, level)} that asked for {row['label']}"
             L.append(f"  Predicted wait: about {fmt_h(q['median_s'])}   (Q1 {fmt_h(q['p25_s'])}, "
                      f"Q3 {fmt_h(q['p75_s'])})")
@@ -674,10 +741,19 @@ def queue_report(where: str, val: Dict, notes: List[str], level: Optional[str],
                      f"(fewer than {MIN_JOBS}).")
     for pj in past:
         lim = f"asked for {fmt_walltime(pj['limit_min'])} and " if pj.get("limit_min") else ""
+        who = f"Job {pj['jid']}" if pj.get("given") else f"Your job {pj['jid']} here"
         if pj["pending"]:
-            L.append(f"  Your job {pj['jid']} here {lim}has been waiting {fmt_h(pj['wait_s'])}.")
+            L.append(f"  {who} {lim}has been waiting {fmt_h(pj['wait_s'])} so far.")
         else:
-            L.append(f"  Your job {pj['jid']} here {lim}waited {fmt_h(pj['wait_s'])}.")
+            L.append(f"  {who} {lim}waited {fmt_h(pj['wait_s'])}.")
+        # Where that falls among the jobs it was compared with. Data, not a
+        # verdict: a wait above Q3 is one a quarter of those jobs also had.
+        if pj.get("given") and qref and not pj["pending"]:
+            w = pj["wait_s"]
+            where_ = ("below Q1: shorter than three quarters of them" if w < qref["p25_s"] else
+                      "above Q3: longer than three quarters of them" if w > qref["p75_s"] else
+                      "between Q1 and Q3, like half of them")
+            L.append(f"  That is {where_}.")
     L.append("")
 
     # ---- the table ---------------------------------------------------------
@@ -816,10 +892,12 @@ def default_account(user: str) -> Optional[str]:
     return first[0].strip() if first and first[0].strip() else None
 
 
-def fairshare_study(partition: str, account: Optional[str] = None) -> Dict:
-    """Where the user stands now. Every piece is optional: what a command
-    cannot tell is recorded as its reason, never guessed."""
-    me = _me()
+def fairshare_study(partition: str, account: Optional[str] = None,
+                    user: Optional[str] = None) -> Dict:
+    """Where the user stands now -- you, or the owner of the job being
+    studied. Every piece is optional: what a command cannot tell is recorded
+    as its reason, never guessed."""
+    me = user or _me()
     fs: Dict = {"user": me, "notes": []}
     cfg, fs["config_error"] = priority_config()
     fs["type"] = cfg.get("prioritytype", "")
@@ -1019,6 +1097,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                    help="leave out where you stand in the queue's priority now")
     p.add_argument("--mine", action="store_true", help="only your own jobs")
     p.add_argument("--json", default="", help="also write the analysis as JSON here")
+    p.add_argument("--job", metavar="JOBID",
+                   help="study this job: its partition, size, walltime and account as "
+                        "sacct -j records them (pending, running or finished), and how "
+                        "long it has waited. Options given win over it.")
     a = p.parse_args(argv)
 
     given = {"partition": a.partition, "nodes": a.nodes, "cpus": a.cpus, "mem_mb": a.mem_mb,
@@ -1032,7 +1114,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         given["wall_min"] = tw
     notes: List[str] = []
     where = os.path.abspath(a.folder)
-    if all(given[k] is not None for k in CORE):
+    job_wait: Optional[Dict] = None
+    jid = (a.job or "").strip()
+    if a.job is not None:
+        if not JOB_ID.match(jid):
+            print(f"backfill-study: --job {a.job!r}: a job id is digits (123456, or "
+                  f"123456_7 for one task of an array)", file=sys.stderr)
+            return 2
+        val, notes, job_wait = from_job(jid)
+        if not val:
+            print(f"backfill-study: {notes[0]}", file=sys.stderr)
+            return 2
+        where = f"job {jid}"
+    elif all(given[k] is not None for k in CORE):
         val = profile_settings()        # the job is given; the folder is not read
     else:
         if not os.path.isdir(where):
@@ -1065,6 +1159,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     maxtime = partition_maxtime(val["partition"])
     days = int(val["days"])
     lines, err = run_sacct(val["partition"], days, all_users=not a.mine)
+    if jid:
+        # The job is left out of the history it is compared with.
+        lines = [ln for ln in lines if ln.split("|", 1)[0] != jid]
     jobs = load_jobs(lines)
     nodes, cpus, mem = int(val["nodes"]), int(val["cpus"]), float(val["mem_mb"])
 
@@ -1072,10 +1169,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # The longest walltime ANY job on the partition asked for: past it, the
     # history has nothing to say, and a limit may be why.
     max_asked = max((j.limit_min for j in jobs), default=None)
-    past = folder_job_waits(where) if is_calc_folder(where) else []
+    if jid:
+        past = [job_wait] if job_wait else []
+    else:
+        past = folder_job_waits(where) if is_calc_folder(where) else []
     if err:
         notes.insert(0, err)
-    fsh = None if a.no_fairshare else fairshare_study(val["partition"], val.get("account"))
+    owner = val.get("job_user") or ""
+    if owner and owner != _me():
+        notes.append(f"job {jid} is {owner}'s: the fairshare and the prediction are for {owner}")
+    fsh = None if a.no_fairshare else fairshare_study(val["partition"], val.get("account"),
+                                                     owner or None)
     pred = (predict_wait(jobs, nodes, cpus, mem, level, val["wall_min"], fsh)
             if val.get("wall_min") and level else None)
     print(queue_report(where, val, notes, level, rows, past, maxtime, max_asked, days, len(jobs),

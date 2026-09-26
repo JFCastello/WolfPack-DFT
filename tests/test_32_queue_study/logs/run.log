@@ -14,6 +14,15 @@
   [32m[ OK ][0m in the toolkit's own folder: one message, not four (rc=2)
   [32m[ OK ][0m naming what a wait estimate cannot do without, less --partition, which the profile gives
   [32m[ OK ][0m a folder that does not exist is named as such
+  [32m[ OK ][0m the job's shape and walltime are read from sacct -j (rc=0)
+  [32m[ OK ][0m the same answer as the folder's, from the same 24 jobs: the job itself is left out of the history
+  [32m[ OK ][0m and how long it did wait, placed among the quartiles: 30 min, between 5 min and 4.0 h
+  [32m[ OK ][0m a pending job: its column, and how long it has waited so far -- not placed, it is not over (rc=0)
+  [32m[ OK ][0m an option given wins over the job: --time 01:00:00 studies the 1-h column (rc=0)
+  [32m[ OK ][0m and the job wins over the folder it is run in (the folder's script asks for 4 h) (rc=0)
+  [32m[ OK ][0m someone else's job: it says whose fairshare the study uses (rc=0)
+  [32m[ OK ][0m a job sacct does not know is refused, by name (rc=2)
+  [32m[ OK ][0m a job id that is not one is refused (rc=2)
   [32m[ OK ][0m the 7-day job waits about 36 min: the median of the 10 similar week-long jobs
   [32m[ OK ][0m and it reports what the folder's own job waited
   [32m[ OK ][0m the table shows jobs of this size only (35, 36, 37 min; 10 jobs) -- the 76 short jobs of 4 cores are not
