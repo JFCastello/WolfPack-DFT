@@ -9,4 +9,5 @@
   [32m[ OK ][0m walltime: 66 s x 1.15 = 75.9 s -> 2 min + 5 = 7; exactly 60 s -> 1 min + 5 = 6
   [32m[ OK ][0m the next chunk from a real run: 2.1 s start-up + 28.24 + 10.7 = 41.0 s (got 41.0)
   [32m[ OK ][0m and it sees VASP's 'reached required accuracy'
+  [32m[ OK ][0m carrying a WAVECAR: the first step as a cold start, 11 x 2.0 + 10.331 = 32.3 s; 45.1 s in all (got 45.1)
   [32m[ OK ][0m a retry: the completed step measured (16.8 s), the cut one extrapolated (16.8 s), 5 + 16.8 + 16.8 = 38.6 s

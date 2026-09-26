@@ -17,6 +17,11 @@
   [32m[ OK ][0m VASP completed no electronic step in 19s -> it is never also called ADEQUATE
   [32m[ OK ][0m VASP completed no electronic step in 19s -> it does not claim to have updated anything
   [32m[ OK ][0m VASP completed no electronic step in 19s -> the production job script is left UNTOUCHED
+  [32m[ OK ][0m VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP -> exit 8, distinct from success and from the GW re-pick (got 8)
+  [32m[ OK ][0m VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP -> the verdict is FAILED
+  [32m[ OK ][0m VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP -> it is never also called ADEQUATE
+  [32m[ OK ][0m VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP -> it does not claim to have updated anything
+  [32m[ OK ][0m VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP -> the production job script is left UNTOUCHED
   [32m[ OK ][0m under FAILED the measured lines are not presented as findings
   [32m[ OK ][0m and it says plainly that nothing below is a measurement of this run
   [32m[ OK ][0m the refusal names KPAR, which duplicates the density per k-group
@@ -25,5 +30,7 @@
   [32m[ OK ][0m and says what to do next
   [32m[ OK ][0m the OOM pattern matches slurmstepd's real message, copied from the incident
   [32m[ OK ][0m and it does not fire on an ordinary benchmark log
+  [32m[ OK ][0m vasp-test reads the ranks VASP itself reports in its OUTCAR
+  [32m[ OK ][0m and reads them right: 1 from a copy started alone, 4 from the job run right (got '1', '4')
   [32m[ OK ][0m vasp_test.sh parses with the detection in it
   [32m[ OK ][0m vasp-test passes the reason to the helper rather than deciding twice

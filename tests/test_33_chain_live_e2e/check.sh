@@ -134,7 +134,11 @@ ok_if "(( short == 0 ))" \
 spread=$(cat wolfpack_chain/[0-9][0-9][0-9]/OUTCAR | awk '/LOOP:/{ k = split($0, a, "real time"); v = a[2] + 0
              if (mn == "" || v < mn) mn = v; if (v > mx) mx = v } END{ printf "%.1f-%.1f", mn, mx }')
 info "    seconds per electronic step on this machine, across the chunks (VASP's LOOP): ${spread}"
-info "    the largest used/estimate: ${worst} -- what the walltime's x 1.15 + 5 min has to absorb"
+_sf=$(grep -oP 'chain_safety="\K[^"]+' wolfpack_chain/chain.env)
+_mg=$(grep -oP 'chain_margin_min="\K[^"]+' wolfpack_chain/chain.env)
+_cw=$(grep -oP 'chain_carry="\K[^"]+' wolfpack_chain/chain.env)
+info "    the largest used/estimate: ${worst} -- what the walltime's x ${_sf} + ${_mg} min has to absorb"
+info "    WAVECAR carried from chunk to chunk: $([[ $_cw == 1 ]] && echo yes || echo no)"
 
 # --- the answer against the direct run ------------------------------------------------
 e_chain=$(grep -oP 'F= *\K-?[0-9.E+]+' OSZICAR | tail -1)

@@ -5,7 +5,7 @@
 #
 #   wolfpack_steptime.sh summary OUTCAR OSZICAR
 #   wolfpack_steptime.sh first   OUTCAR OSZICAR NSW STARTUP_S
-#   wolfpack_steptime.sh next    OUTCAR OSZICAR NSW WALL_S
+#   wolfpack_steptime.sh next    OUTCAR OSZICAR NSW WALL_S [COLD_NEL]
 #   wolfpack_steptime.sh retry   OUTCAR OSZICAR NSW STARTUP_S FALLBACK_TREST_S
 #
 # Every mode prints key=value lines; `first`, `next` and `retry` end with
@@ -173,7 +173,18 @@ st_estimate(){
                      for (i = 2; i <= n; i++) s += a[i]; printf "%.1f", (n > 1 ? s/(n-1) : 0) }'; }
 
     # the first ionic step of a chunk
-    if (( ionic_done >= 1 )); then
+    local nel1=""
+    if [[ $mode == next ]] && (( $(printf '%.0f' "$a6") > 0 )) && awk -v t="$t_e" 'BEGIN{exit !(t>0)}'; then
+        # The next chunk starts from a carried WAVECAR. How much it saves is not
+        # predictable from this chunk: in a live Si chain the first step took 2
+        # electronic steps three chunks running, then 7, from a WAVECAR VASP
+        # wrote for the very CONTCAR it started from (a cold start took 11).
+        # So the first step is taken as a cold one, COLD_NEL steps at this
+        # run's pace: never short for that reason.
+        nel1=$(printf '%.0f' "$a6")
+        t1=$(awk -v n="$nel1" -v t="$t_e" -v o="$overhead" 'BEGIN{ printf "%.1f", n*t + o }')
+        t1_basis="as a cold start: ${nel1} electronic steps (the first of chunk 1) x ${t_e} s + ${overhead} s; a carried WAVECAR saves an unpredictable part of them"
+    elif (( ionic_done >= 1 )); then
         t1=${_st[0]}; t1_basis="measured: ${_sn[0]} electronic steps"
     elif (( open_nel > 0 )); then
         t1=$open_s; t1_basis="${open_total} electronic steps (${open_basis})"
@@ -209,7 +220,7 @@ st_estimate(){
     printf 't1_basis="%s"\n' "$t1_basis"
     printf 'tr_s=%s\n' "$tr"
     printf 'tr_basis="%s"\n' "$tr_basis"
-    printf 'nel_first=%s\n' "$( (( ionic_done >= 1 )) && echo "${_sn[0]}" || echo "$open_total" )"
+    printf 'nel_first=%s\n' "$( [[ -n $nel1 ]] && echo "$nel1" || { (( ionic_done >= 1 )) && echo "${_sn[0]}" || echo "$open_total"; } )"
     printf 'ionic_done=%s\n' "$ionic_done"
     printf 'reached=%s\n' "$reached"
     printf 'est_s=%s\n' "$est"
@@ -224,9 +235,9 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     case "${1:-}" in
         summary) st_summary "${2:?OUTCAR}" "${3:?OSZICAR}" ;;
         first)   st_estimate first "${2:?OUTCAR}" "${3:?OSZICAR}" "${4:?NSW}" "${5:?STARTUP_S}" ;;
-        next)    st_estimate next  "${2:?OUTCAR}" "${3:?OSZICAR}" "${4:?NSW}" "${5:?WALL_S}" ;;
+        next)    st_estimate next  "${2:?OUTCAR}" "${3:?OSZICAR}" "${4:?NSW}" "${5:?WALL_S}" "${6:-0}" ;;
         retry)   st_estimate retry "${2:?OUTCAR}" "${3:?OSZICAR}" "${4:?NSW}" "${5:?STARTUP_S}" "${6:-0}" ;;
-        walltime) st_walltime_min "${2:?EST_S}" "${3:-1.15}" "${4:-5}" ;;
+        walltime) st_walltime_min "${2:?EST_S}" "${3:-1.25}" "${4:-5}" ;;
         *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 fi

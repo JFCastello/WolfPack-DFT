@@ -500,11 +500,29 @@ vasp-relax-loop --fresh        # archive the chain here and start a new one
 | `--steps 2,5,7` | — | one job per entry, with that NSW, then stop |
 | `--max-ionic N` | 100 | stop after N distinct geometries |
 | `--max-retries N` | 2 | retries of one chunk after a walltime or memory kill |
-| `--carry-wavecar` | off | carry `WAVECAR` and `CHGCAR` to the next chunk too |
-| `--safety F` | 1.15 | walltime = estimate × F + margin |
+| `--carry-wavecar` / `--no-carry-wavecar` | carry | carry `WAVECAR` and `CHGCAR` to the next chunk too, or start each chunk from `CONTCAR` alone |
+| `--safety F` | 1.25 | walltime = estimate × F + margin |
 | `--margin-min M` | 5 | minutes added to every walltime (at least 3) |
 
 All of them are command-line flags; none is read from the cluster profile.
+
+**Carrying the WAVECAR** needs `LWAVE = .TRUE.`. With `LWAVE = .FALSE.` there is
+nothing to carry: by default the chain then says so and goes on from `CONTCAR`
+alone, and an explicit `--carry-wavecar` is refused. VASP reads the carried
+files only if the INCAR lets it: `ISTART = 0` begins from scratch and ignores
+the `WAVECAR`, and `ICHARG = 2` starts from atomic charge densities and ignores
+the `CHGCAR` ([ISTART](https://vasp.at/wiki/ISTART),
+[ICHARG](https://vasp.at/wiki/ICHARG)). The launch says so when your INCAR sets
+them, and leaves them as they are.
+
+**When the WAVECAR is carried, each chunk's first ionic step is estimated as
+a cold start**: the electronic steps chunk 1's first step took (it never has
+a WAVECAR), at the pace of the chunk before. A carried WAVECAR saves an
+unpredictable part of them. In the live test, a chunk's first step took 2
+electronic steps three chunks running, then 7, from a WAVECAR VASP wrote for
+that very CONTCAR (11 without one), and estimating from the chunk before fell
+5 steps short. The walltime asked for is then a little more than the chunk
+uses; it never falls short for that reason.
 
 **What one chunk advances.** VASP's `CONTCAR` is the last geometry it
 *computed*: after its last ionic step it does not move the ions (checked with
@@ -515,7 +533,7 @@ is also a new optimisation: `IBRION` 1 and 2 choose each step from the history
 of the earlier ones, and a new run has none. A chained relaxation can therefore
 take more ionic steps than a single run.
 
-**The walltime of each chunk** is its estimate × 1.15 + 5 minutes.
+**The walltime of each chunk** is its estimate × 1.25 + 5 minutes.
 
 - **Chunk 1**, from `vasp-test --full-size`. If the benchmark completed an ionic
   step, that step's measured time. If it was stopped inside the first one, the
@@ -552,18 +570,19 @@ testbed (test_33):
 
 ```
   chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
-      1   1   2      2     2  11 6                11    0:02:48   0:09   0:04:21      -10.806882  0.5881  ok
-      2   1   2      2     3  11 6                11    0:04:21   0:11   0:02:14      -10.819998  0.1471  ok
-      3   1   2      2     4  11 4                11    0:02:14   0:08   0:01:51      -10.820686  0.0490  ok
-      4   1   2      2     5  11 3                11    0:01:51   0:08   0:02:02      -10.820764  0.0150  ok
-      5   1   2      2     6  11 2                11    0:02:02   0:08   0:01:01      -10.820772  0.0047  CONVERGED
+      1   1   2      2     2  11 6                11    0:00:30   0:06   0:00:28      -10.806882  0.5881  ok
+      2   1   2      2     3  2 6                 11    0:00:29   0:06   0:00:17      -10.819997  0.1471  ok
+      3   1   2      2     4  2 4                 11    0:00:32   0:06   0:00:15      -10.820685  0.0491  ok
+      4   1   2      2     5  2 3                 11    0:00:34   0:06   0:00:15      -10.820764  0.0151  ok
+      5   1   2      2     6  7 2                 11    0:00:30   0:06   0:00:15      -10.820772  0.0048  CONVERGED
 ```
 
 Same energy as a single direct run to 1 μeV, same structure to 0.0003 Å, and the
 same 6 geometries (10 SCF runs: each chunk's first step repeats the last
-geometry). The electronic steps were estimated exactly; the time was not,
-because this laptop took 4.4 to 17.1 s for the same electronic step from one
-chunk to the next. The × 1.15 + 5 min absorbed it.
+geometry). Chunk 1, estimated from vasp-test, used 0.93 of its estimate. From
+chunk 2 on, the carried WAVECAR made the first ionic step 2 electronic steps,
+then 7; it is estimated as a cold start (11), so those chunks used about half
+their estimate and none fell short.
 
 `e-steps/ionic` is the electronic steps of each ionic step (`[3]`: one cut off
 after 3); `est.e` what was estimated for the first; `estimate` and `used` the

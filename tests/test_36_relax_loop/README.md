@@ -50,12 +50,12 @@ ionic step after 8 electronic steps of 2.0 s (5 delay, then 1e-1, 1e-2, 1e-3).
 | IBRION = 0; no IBRION (VASP's default is 0 with NSW > 0) | refused |
 | vasp-test at 2 ranks for a 4-rank job; no vasp-test OSZICAR | refused: run `vasp-test --full-size` |
 | `--carry-wavecar` with LWAVE = .FALSE.; `--margin-min 2`; `--safety 0.9` | refused; nothing submitted by any refusal |
-| chunk 1 | 13 electronic steps (8 + 3 + 2) × 2.0 s + 2.0 s = 28 s per step; 10 + 28 + 28 = 66 s → **7 min** |
-| chunk 2, from chunk 1 (22.5 + 12.5 s) | **6 min** (35 s × 1.15 + 5), from chunk 1's CONTCAR (x = 0.7520: moved once) |
+| chunk 1 | 13 electronic steps (8 + 3 + 2) × 2.0 s + 2.0 s = 28 s per step; 10 + 28 + 28 = 66 s; × 1.25 = 82.5 s → **7 min** |
+| chunk 2, from chunk 1 (22.5 + 12.5 s) | **6 min** (35 s × 1.25 + 5), from chunk 1's CONTCAR (x = 0.7520: moved once) |
 | three chunks to "reached required accuracy" | converged; **4 distinct geometries** (2 + 1 + 1), 3 jobs; each chunk in its own directory; the folder's POSCAR untouched, its CONTCAR the latest; only the latest chunk keeps a WAVECAR |
 | relax_progress.txt | one row per chunk: electronic steps per ionic step, the estimated steps and time, the walltime asked; how the chain ended |
 | a walltime warning in chunk 1, ionic step 2 (its CONTCAR at 0.7520) | filed as TIMEOUT, restart files removed; try 2 from the **original POSCAR (0.7500)**, in a new directory, **11 min** (at least 1.5 × 7) |
-| a step 10 × slower than measured (20 s), warned after 8 steps | re-estimated from its own steps: 13 × 20 + 20 = 280 s per step; 570 s × 1.15 → **16 min** |
+| a step 10 × slower than measured (20 s), warned after 8 steps | re-estimated from its own steps: 13 × 20 + 20 = 280 s per step; 570 s × 1.25 = 712.5 s → **17 min** |
 | `--max-retries 1`, two walltime kills | stops (`retries_exhausted`), no third job |
 | chunk 2 killed | its retry starts from chunk 1's CONTCAR (0.7520), not its own (0.7540) |
 | an OOM kill | try 2 at 1.5 × 2000 = **3000 MB/cpu**, same walltime |
@@ -63,12 +63,16 @@ ionic step after 8 electronic steps of 2.0 s (5 delay, then 1e-1, 1e-2, 1e-3).
 | `--max-ionic 3` | stops after 2 + 1 geometries; `--resume --max-ionic 4` continues |
 | `--steps 2,4` | chunk 2's INCAR has NSW = 4, the folder's none; stops after the two jobs |
 | no NSW in the INCAR | 2, and it says so |
-| `--carry-wavecar` / without | chunk 2 starts with chunk 1's WAVECAR / with none |
+| no flag (the default); `--carry-wavecar`; `--no-carry-wavecar` | chunk 2 starts with chunk 1's WAVECAR, "WAVECAR carried yes", walltime factor 1.25 in chain.env; the same; with none, "no (--no-carry-wavecar)" |
+| LWAVE = .FALSE., no flag | runs without carrying, and says so: "no (LWAVE = .FALSE. in the INCAR)"; the INCAR's LWAVE left as it is |
+| ISTART = 0 and ICHARG = 2 in the INCAR | the launch says VASP will read neither the carried WAVECAR nor CHGCAR; both tags left as they are |
+| chunks whose first steps take 11, 2, 7 electronic steps; carrying, then `--no-carry-wavecar` | chunk 3's first step estimated as a cold start, **11** (chunk 1's); without carrying, chunk 2's own **2** |
+| `chain.env`: 40 keys, then two processes writing 60 updates each at the same time | all 40 kept, each writer's last value (60, 60); no error, no temporary file or lock left |
 | `--stop`, then `--resume` | chunk 1 completes, nothing submitted; then chunk 2, sized from chunk 1 (6 min); `--status` shows the progress file |
 
 ## 5. Obtained results
 
-All forty-nine as expected. The progress file after a walltime kill and its retry:
+All fifty-nine as expected. The progress file after a walltime kill and its retry:
 
 ```
   chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
@@ -81,6 +85,17 @@ All forty-nine as expected. The progress file after a walltime kill and its retr
 On the first run three assertions failed, all of them my own mistakes: a hand
 computation and two greps. The code was right each time. See NOTES.
 
+Since 2026-09-26 the WAVECAR is carried by default and the walltime factor is
+1.25 (it was off and 1.15). Eight assertions check the new defaults, what
+happens when the INCAR does not let VASP read the carried files, and that a
+carried chunk's first step is estimated as a cold start (test_33 found why:
+a carried WAVECAR saved 9 electronic steps three chunks running, then 4).
+
+The last two check the state file under two writers at once, as when a chunk
+that completes goes on writing while the next, already started, writes too.
+Without the lock added on 2026-09-26 the same experiment lost all 40 keys; the
+live chain had lost `chain_carry` and `chain_safety` that way.
+
 ## 6. Pass / fail criterion
 
 Exact: walltimes, memory, the geometry each attempt starts from (atom 2's x), the
@@ -88,7 +103,7 @@ directories, the stop reasons, the job counts, the rows of the progress file.
 
 ## 7. Verdict
 
-**PASSED** — 49 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 59 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 
@@ -99,6 +114,7 @@ directories, the stop reasons, the job counts, the rows of the progress file.
   that the ions are not moved after it was measured here with VASP 6.5.1
   (NSW = 1: CONTCAR = POSCAR for IBRION 1, 2, 3; NSW = 2: CONTCAR = the second
   geometry of XDATCAR)
-- ISTART: a WAVECAR present is read by default — <https://vasp.at/wiki/index.php/ISTART>
+- ISTART: a WAVECAR present is read by default; ISTART = 0 "begin from scratch" — <https://vasp.at/wiki/index.php/ISTART>
+- ICHARG = 2: "Take superposition of atomic charge densities" — <https://vasp.at/wiki/index.php/ICHARG>
 - `sbatch --signal`: a warning signal before the time limit —
   <https://slurm.schedmd.com/sbatch.html#OPT_signal>

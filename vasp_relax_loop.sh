@@ -27,7 +27,7 @@
 #   therefore take more ionic steps than a single run.
 #
 # THE WALLTIME OF A CHUNK
-#     estimate x --safety (1.15) + --margin-min (5 min), in whole minutes
+#     estimate x --safety (1.25) + --margin-min (5 min), in whole minutes
 #   The estimate is the start-up, plus the first ionic step, plus NSW-1 later
 #   ones. See wolfpack_steptime.sh for how each is measured or extrapolated.
 #
@@ -44,8 +44,10 @@
 #     --steps 2,5,7     one job per entry, with that NSW (instead of the INCAR's)
 #     --max-ionic N     stop after N distinct geometries (default 100)
 #     --max-retries N   retries of one chunk after a walltime or memory kill (default 2)
-#     --carry-wavecar   also carry WAVECAR and CHGCAR to the next chunk
-#     --safety F        the walltime factor (default 1.15)
+#     --carry-wavecar   carry WAVECAR and CHGCAR to the next chunk (the default;
+#                       without LWAVE = .TRUE. there is nothing to carry, and it says so)
+#     --no-carry-wavecar  each chunk starts from the CONTCAR alone
+#     --safety F        the walltime factor (default 1.25)
 #     --margin-min M    minutes added to every walltime (default 5, at least 3)
 #   vasp-relax-loop --status | --stop [--now] | --resume | --fresh
 #
@@ -290,7 +292,10 @@ stop_chain(){
 
 # ---- walltime of an attempt --------------------------------------------------
 # est_to_wall EST_S -> minutes, within MaxTime when there is one (empty if not)
-est_to_wall(){ st_walltime_min "$1" "${chain_safety:-1.15}" "${chain_margin_min:-5}"; }
+est_to_wall(){ st_walltime_min "$1" "${chain_safety:-1.25}" "${chain_margin_min:-5}"; }
+# The cold-start electronic steps of a first ionic step, when the next chunk
+# carries a WAVECAR (chunk 1's, measured); 0 = estimate it from the last chunk.
+cold_nel(){ [[ ${chain_carry:-0} == 1 ]] && echo "$(int "${chain_cold_nel:-0}")" || echo 0; }
 
 ###############################################################################
 # STATUS / STOP
@@ -429,6 +434,9 @@ if [[ $ACTION == chunk ]]; then
         state_set chunk_ok "$idx" geoms_done "$geoms" scf_total "$(( $(int "${scf_total:-0}") + ionic ))" \
                   last_startup_s "$startup_s" last_t1_s "$t1_s" last_tr_s "$tr_s" \
                   last_wall_s "$wall_s" prev_dir "$dir"
+        # Chunk 1 never has a carried WAVECAR: its first ionic step is the cold
+        # start every later chunk's first step is estimated as, when carrying.
+        (( idx == 1 )) && state_set chain_cold_nel "$(int "${nel%% *}")"
 
         if (( reached )); then
             state_set chain_state converged stop_reason "" \
@@ -459,7 +467,7 @@ if [[ $ACTION == chunk ]]; then
             exit 0
         fi
         (( nnsw - 1 > _left )) && nnsw=$(( _left + 1 ))
-        eval "$(st_estimate next "$dir/OUTCAR" "$dir/OSZICAR" "$nnsw" "$wall_s" | grep -E '^(est_s|nel_first)=')"
+        eval "$(st_estimate next "$dir/OUTCAR" "$dir/OSZICAR" "$nnsw" "$wall_s" "$(cold_nel)" | grep -E '^(est_s|nel_first)=')"
         nwall=$(est_to_wall "$est_s")
         if [[ -n ${chain_maxtime:-} ]] && (( nwall > $(int "$chain_maxtime") )); then
             stop_chain step_exceeds_maxtime "chunk ${nidx} needs ${nwall} min, above the partition's MaxTime of ${chain_maxtime} min" \
@@ -646,9 +654,21 @@ if [[ $ACTION == start || -n $OPT_STEPS || -n $OPT_NSW ]]; then
     fi
 fi
 _lw=$(incar_val LWAVE)
-_carry="${OPT_CARRY:-${chain_carry:-0}}"
+_carry="${OPT_CARRY:-${chain_carry:-1}}"; _carry_no="--no-carry-wavecar"
 if [[ $_carry == 1 ]] && [[ ${_lw^^} == *F* ]]; then
-    die "--carry-wavecar needs the WAVECAR, and the INCAR sets LWAVE = ${_lw}." 2
+    [[ $OPT_CARRY == 1 ]] && die "--carry-wavecar needs the WAVECAR, and the INCAR sets LWAVE = ${_lw}." 2
+    # Carrying is the default, and there is nothing to carry: say so, and go on.
+    _carry=0; _carry_no="LWAVE = ${_lw} in the INCAR"
+    note "LWAVE = ${_lw} in the INCAR: there is no WAVECAR to carry, so each chunk starts from the CONTCAR alone."
+fi
+# Carried files VASP will not read, because of the INCAR's own tags. Said, not
+# changed: the tags are the user's (vasp.at/wiki/ISTART, vasp.at/wiki/ICHARG).
+if [[ $_carry == 1 ]]; then
+    _is=$(incar_val ISTART); _ic=$(incar_val ICHARG)
+    [[ -n $_is && $(int "$_is") == 0 ]] && \
+        note "ISTART = 0 in the INCAR: VASP begins from scratch and does not read the carried WAVECAR."
+    [[ -n $_ic && $(int "$_ic") == 2 ]] && \
+        note "ICHARG = 2 in the INCAR: VASP starts from atomic charge densities and does not read the carried CHGCAR."
 fi
 
 # ---- the job, and vasp-test's measurements ---------------------------------------
@@ -692,7 +712,7 @@ MAXT=$(part_maxtime_min "$PART")
 # START
 ###############################################################################
 if [[ $ACTION == start ]]; then
-    chain_safety="${OPT_SAFETY:-1.15}"; chain_margin_min="${OPT_MARGIN:-5}"
+    chain_safety="${OPT_SAFETY:-1.25}"; chain_margin_min="${OPT_MARGIN:-5}"
     chain_max_ionic="${OPT_MAXION:-100}"; chain_max_retries="${OPT_RETRIES:-2}"
     chain_carry="$_carry"; chain_maxtime="$MAXT"; chain_ediffg="$_eg"
     nsw1=$(nsw_of 1)
@@ -710,7 +730,7 @@ if [[ $ACTION == start ]]; then
     kv "job"                "${NODES} node(s) x ${NTPN} ranks, ${MEMCPU} MB/cpu  (${SRC_SLURM})"
     kv "NSW per chunk"      "$chain_nsw_words"
     kv "stop after"         "${chain_max_ionic} geometries, or VASP's 'reached required accuracy' (EDIFFG ${_eg})"
-    kv "WAVECAR carried"    "$( [[ $chain_carry == 1 ]] && echo yes || echo 'no (--carry-wavecar to carry it)' )"
+    kv "WAVECAR carried"    "$( [[ $chain_carry == 1 ]] && echo "yes (later chunks' first ionic step is estimated as a cold start)" || echo "no (${_carry_no})" )"
     kv "electronic step"    "${t_e} s  (median of vasp-test's, at ${RANKS} ranks)"
     kv "first ionic step"   "${t1_s} s: ${t1_basis}"
     (( nsw1 > 1 )) && kv "later ionic steps" "${tr_s} s: ${tr_basis}"
@@ -811,7 +831,7 @@ case $cause in
         if (( idx != $(int "${cur_chunk:-0}") )) && [[ -n ${last_wall_s:-} ]]; then
             # a clean stop between chunks: the estimate from the last completed one
             eval "$(st_estimate next "$CHDIR/$(dname $(( idx - 1 )))/OUTCAR" "$CHDIR/$(dname $(( idx - 1 )))/OSZICAR" \
-                    "$nsw" "$last_wall_s" | grep -E '^(est_s|nel_first)=')"
+                    "$nsw" "$last_wall_s" "$(cold_nel)" | grep -E '^(est_s|nel_first)=')"
             WALL=$(est_to_wall "$est_s")
         fi ;;
 esac

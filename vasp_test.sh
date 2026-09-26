@@ -801,10 +801,12 @@ nionic=$(grep -c 'LOOP+:' "$OUTCAR" 2>/dev/null); nionic="${nionic//[^0-9]/}"; n
 # ionic step, which callers must read as "no estimate available".
 scf_per_ionic=$(awk -v n="$nscf" -v i="$nionic" \
     'BEGIN{ if(i>0) printf "%.2f", n/i; else printf "0" }')
-# wall_f, not wall: with whole seconds this came out at -0.26 s, clamped to 0,
-# for a Si benchmark whose interval measured 90 s and whose OUTCAR summed to
-# 90.26 s. It includes the step VASP was in when it was stopped, which the
-# OUTCAR never timed, so it is an upper bound on the start-up, never below it.
+# wall_f, not wall: the difference is a few seconds, and a whole-second clock
+# can be off by one. It includes the step VASP was in when it was stopped,
+# which the OUTCAR never timed, so it is an upper bound on the start-up, never
+# below it. (A start-up of 0 on this suite's testbed turned out to be something
+# else: srun ran separate 1-rank copies of VASP whose OUTCAR lines summed to
+# more than the wall time -- now a failed benchmark, see bench_why below.)
 startup_s=$(awk -v w="$wall_f" -v p="$sum_loopplus" -v o="$sum_open" \
     'BEGIN{ r=w-p-o; if(r<0) r=0; printf "%.1f", r }')
 
@@ -931,6 +933,17 @@ elif [[ $rc -ne 0 && $rc -ne 124 && $rc -ne 137 ]]; then
     bench_why="VASP exited with code $rc"
 elif (( nscf == 0 )); then
     bench_why="VASP completed no electronic step in ${wall}s"
+else
+    # How many ranks VASP itself says it ran on. When srun's MPI plugin does not
+    # match VASP's MPI (srun --mpi, the cluster's MpiDefault), srun starts
+    # NTASKS separate copies of VASP, each on 1 rank, all writing the same
+    # OUTCAR. It runs, converges, and measures nothing this job would do:
+    # found on this suite's own testbed, where every srun-launched VASP had
+    # been running that way.
+    _vranks=$(grep -m1 -oP 'running\s+\K[0-9]+(?=\s+mpi-ranks)' "$OUTCAR" 2>/dev/null)
+    if [[ -n $_vranks ]] && (( _vranks != NTASKS )); then
+        bench_why="VASP ran on ${_vranks} MPI rank(s), not the ${NTASKS} srun started: srun launched separate copies of VASP. srun's MPI plugin does not match VASP's MPI -- see  srun --mpi=list  and ask for the one VASP was built with (e.g. #SBATCH / srun --mpi=pmix)"
+    fi
 fi
 
 # vasp-test OUTPUTS a NEW production job (slurm_vasptest.sh) that REFINES recommend's

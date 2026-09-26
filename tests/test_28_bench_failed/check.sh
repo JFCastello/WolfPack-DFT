@@ -73,7 +73,7 @@ ok_if "grep -q 'FILES. updated' '$W/sane.out'" "and it still writes the producti
 ok_if "[[ -s '$sane' ]]" "and the production job script is still produced"
 
 # ===========================================================================
-# 2. THE THREE WAYS A BENCHMARK DIES WHILE LOOKING FINE
+# 2. THE FOUR WAYS A BENCHMARK DIES WHILE LOOKING FINE
 # ===========================================================================
 # Each is passed as the reason vasp-test detected; the helper's job is to treat
 # any of them as "this measured nothing".
@@ -81,7 +81,8 @@ i=0
 for why in \
     "the benchmark was OOM-killed (a task exceeded --mem-per-cpu=3640 MB)" \
     "VASP exited with code 1" \
-    "VASP completed no electronic step in 19s"; do
+    "VASP completed no electronic step in 19s" \
+    "VASP ran on 1 MPI rank(s), not the 4 srun started: srun launched separate copies of VASP"; do
     i=$((i+1))
     # Starts as a copy of the healthy script: the claim is that a FAILED run
     # leaves it ALONE, which cannot be shown with a file that was empty anyway.
@@ -139,6 +140,17 @@ printf 'srun: job 1 queued\n running 95 mpi-ranks, on 1 nodes\n LOOP:  cpu time 
 grep -qiE 'oom[-_]kill|Out Of Memory' "$W/clean.err" \
     && fail "the OOM pattern fires on a log with no OOM in it" \
     || pass "and it does not fire on an ordinary benchmark log"
+
+# The fourth: srun without the MPI wiring VASP was built for starts separate
+# 1-rank copies, all writing one OUTCAR. The line below is copied verbatim from
+# this suite's own testbed, where it happened to every srun-launched VASP until
+# 2026-09-26; the second is the same job run right.
+pat=$(grep -oP "grep -m1 -oP '\K[^']*mpi-ranks[^']*" "$TK_DIR/vasp_test.sh" | head -1)
+ok_if "[[ -n '$pat' ]]" "vasp-test reads the ranks VASP itself reports in its OUTCAR"
+got1=$(printf ' running    1 mpi-ranks, with    1 threads/rank, on    1 nodes\n' | grep -m1 -oP "$pat")
+got4=$(printf ' running    4 mpi-ranks, with    1 threads/rank, on    1 nodes\n' | grep -m1 -oP "$pat")
+ok_if "[[ '$got1' == 1 && '$got4' == 4 ]]" \
+      "and reads them right: 1 from a copy started alone, 4 from the job run right (got '$got1', '$got4')"
 
 # vasp-test itself must still parse, and must pass the flag through.
 bash -n "$TK_DIR/vasp_test.sh" 2>/dev/null \

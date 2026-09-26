@@ -12,14 +12,14 @@
   [32m[ OK ][0m --safety below 1 is refused
   [32m[ OK ][0m nothing was submitted by any refusal
   [32m[ OK ][0m chunk 1's step is extrapolated from vasp-test: 8 done + 3 to EDIFF + 2 = 13 steps, 28 s (rc=0)
-  [32m[ OK ][0m and chunk 1 asks 7 min: 66 s x 1.15 + 5 min
+  [32m[ OK ][0m and chunk 1 asks 7 min: 66 s x 1.25 + 5 min
   [32m[ OK ][0m a completed chunk's directory is filed as 001
-  [32m[ OK ][0m chunk 2 asks 6 min, from chunk 1's measured steps (35 s x 1.15 + 5 min) (got 00:06:00)
+  [32m[ OK ][0m chunk 2 asks 6 min, from chunk 1's measured steps (35 s x 1.25 + 5 min) (got 00:06:00)
   [32m[ OK ][0m chunk 2 starts from chunk 1's CONTCAR (x = 0.7520: NSW = 2 moved the ions once)
   [32m[ OK ][0m the folder's POSCAR is untouched; its CONTCAR is the latest geometry
   [32m[ OK ][0m VASP's 'reached required accuracy' ends the chain as converged
   [32m[ OK ][0m 3 chunks of NSW = 2: 2 + 1 + 1 = 4 distinct geometries (each chunk's first step repeats), 3 jobs
-  [32m[ OK ][0m each chunk ran in its own directory, from the geometry the last one reached
+  [32m[ OK ][0m each chunk ran in its own directory, from the geometry the last one reached, with its WAVECAR (the default)
   [32m[ OK ][0m relax_progress.txt: one row per chunk -- electronic steps per ionic step, the estimates (steps, time), the walltime asked
   [32m[ OK ][0m and says how the chain ended and where NSW came from
   [32m[ OK ][0m only the latest completed chunk keeps its WAVECAR
@@ -28,7 +28,7 @@
   [32m[ OK ][0m try 2 starts from the original POSCAR (0.7500), not the failed attempt's CONTCAR (0.7520)
   [32m[ OK ][0m try 2 asks at least 1.5 x the walltime that ran out: 11 min (got 00:11:00)
   [32m[ OK ][0m try 2 completes chunk 1
-  [32m[ OK ][0m a slower step than measured: the retry is re-estimated from its own 20-s steps, 16 min (got 00:16:00)
+  [32m[ OK ][0m a slower step than measured: the retry is re-estimated from its own 20-s steps, 17 min (got 00:17:00)
   [32m[ OK ][0m --max-retries 1: after two walltime kills the chain stops (retries_exhausted), no third job
   [32m[ OK ][0m a retry of chunk 2 starts from chunk 1's CONTCAR (0.7520), not its own failed one (0.7540)
   [32m[ OK ][0m an OOM kill: try 2 at 1.5 x 2000 = 3000 MB/cpu, same walltime
@@ -42,8 +42,18 @@
   [32m[ OK ][0m chunk 2's INCAR has NSW = 4; the folder's INCAR is untouched
   [32m[ OK ][0m and after the two jobs of the list, it stops (steps_done)
   [32m[ OK ][0m no NSW in the INCAR: 2, and it says so
-  [32m[ OK ][0m --carry-wavecar: chunk 2 starts with chunk 1's WAVECAR
-  [32m[ OK ][0m without it, chunk 2 starts with none
+  [32m[ OK ][0m by default chunk 2 starts with chunk 1's WAVECAR, and the launch says so
+  [32m[ OK ][0m and the default walltime factor is 1.25
+  [32m[ OK ][0m --carry-wavecar says the same explicitly
+  [32m[ OK ][0m --no-carry-wavecar: chunk 2 starts with none
+  [32m[ OK ][0m carrying: chunk 3's first step is estimated as a cold start, 11 steps, not chunk 2's 2 (got 11)
+  [32m[ OK ][0m not carrying: it is chunk 2's own first step, 2 (got 2)
+  [32m[ OK ][0m LWAVE = .FALSE. and no flag: the chain runs without carrying, and says why (rc=0)
+  [32m[ OK ][0m the INCAR's LWAVE is left as it is
+  [32m[ OK ][0m ISTART = 0 and ICHARG = 2: the launch says VASP will read neither carried file (rc=0)
+  [32m[ OK ][0m and both tags are left as they are
   [32m[ OK ][0m --stop: chunk 1 completes and is filed, no chunk 2 is submitted
   [32m[ OK ][0m --resume submits chunk 2, sized from chunk 1 (6 min) (rc=0)
   [32m[ OK ][0m --status shows the progress file
+  [32m[ OK ][0m two processes writing chain.env at once: all 40 keys kept, and each writer's last value (got 40 keys)
+  [32m[ OK ][0m no error, no temporary file or lock left behind

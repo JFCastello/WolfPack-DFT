@@ -49,11 +49,12 @@ About 1 s. No VASP, no scheduler: the fixtures hold the real runs' numbers
 | `RMM:` and `CG :` lines | read like `DAV:` |
 | chunk 1 from vasp-test: 13 steps × 2.0 s + 2.0 s for the forces, NSW = 2, start-up 10 s | 10 + 28 + 28 = **66 s**; walltime 66 × 1.15 → 2 min + 5 = **7 min** |
 | the next chunk from the real silicon run (LOOP+ 28.24, 14.93, 14.53, 10.13, 8.21, 5.87 s; wall 84 s) | start-up 84 − 81.91 = 2.1 s; 2.1 + 28.24 + 10.7 = **41.0 s**; "reached required accuracy" seen |
+| the same, when the next chunk carries a WAVECAR (a cold start took 11 steps) | the first step as a cold start: 11 × 2.0 + 10.331 (the median of LOOP+ − ΣLOOP) = **32.3 s**; **45.1 s** in all |
 | a retry: one step completed (16.8 s), the next cut after 3 | the completed one measured, the cut one extrapolated (3 + 3 + 2 = 8 steps × 2 s + 0.8 s); 5 + 16.8 + 16.8 = **38.6 s** |
 
 ## 5. Obtained results
 
-All twelve as expected. Silicon cut at 8, 9, 10: 13, 14, 14 (it took 11). Iron cut
+All thirteen as expected. Silicon cut at 8, 9, 10: 13, 14, 14 (it took 11). Iron cut
 at 8 … 14: 14, 16, 15, 15, 15, 16, 17 (it took 15): at worst 1 step short.
 
 **Why a margin of 2 steps.** Chosen on 46 cut-off points of 10 real VASP runs in
@@ -66,7 +67,7 @@ at least 3 self-consistent steps):
 | **+ 2 steps** | **3 of 46** | **−2 steps (−22 %)** | **+24 %** |
 
 The fit window (the last 3, 4, 5 points, or all) changed little; the margin
-changed a lot. What is left is covered by the walltime's × 1.15 and 5 minutes, and
+changed a lot. What is left is covered by the walltime's × 1.25 (the default) and 5 minutes, and
 past that by the retry. These are small systems. A hard SCF (a large magnetic
 oxide, a slab) may converge less regularly; the live test (test_33) and the
 progress file's estimate/used columns are where that would show.
@@ -77,7 +78,7 @@ Exact: step counts, seconds, minutes. Iron: at most 2 steps under.
 
 ## 7. Verdict
 
-**PASSED** — 12 assertions, 0 failed. See `logs/run.log`.
+**PASSED** — 13 assertions, 0 failed. See `logs/run.log`.
 
 ## Sources
 

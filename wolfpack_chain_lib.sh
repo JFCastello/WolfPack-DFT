@@ -60,9 +60,30 @@ _wp_require(){
 state_load(){ [[ -f "$CH_ENV" ]] && { set -a; # shellcheck source=/dev/null
     source "$CH_ENV"; set +a; }; return 0; }
 
+# A lock around the read-merge-write. A chunk that completes submits the next
+# one and goes on writing; the scheduler may start the next one at once, and
+# it writes too. With no lock, and one shared temporary file, each truncated
+# the other's copy: a live chain lost chain_carry, chain_safety and a dozen
+# more, and two writers in a test lost all 40 keys of 40.
+# The lock is a file created by bash itself with noclobber (open with O_EXCL:
+# atomic in the kernel, and on NFSv3+). Not mkdir: /usr/bin/mkdir can be the
+# Rust uutils (Ubuntu 26.04 ships it), whose mkdir let two processes "create"
+# the same directory. Not flock: across hosts on shared scratch it is not
+# always honoured. A live holder keeps it for milliseconds; a lock older than
+# a minute belongs to one that died, and only then is it removed.
+_state_lock(){ local l="$CH_ENV.lock" born
+    until ( set -C; echo "${BASHPID:-$$} ${HOSTNAME:-host}" > "$l" ) 2>/dev/null; do
+        born=$(stat -c %Y "$l" 2>/dev/null) || born=$(date +%s)
+        (( $(date +%s) - born > 60 )) && rm -f "$l"
+        sleep 0.05
+    done; }
+_state_unlock(){ rm -f "$CH_ENV.lock"; return 0; }
+
 state_set(){   # state_set key value [key value ...]
-    local tmp="$CH_ENV.new" k v
+    local tmp k v
     mkdir -p "$CHDIR"
+    _state_lock
+    tmp="$CH_ENV.new.${BASHPID:-$$}.${HOSTNAME:-host}"
     : > "$tmp"
     {
         echo "# WolfPack-DFT chunked-run state -- written by $(basename "$0")"
@@ -80,6 +101,7 @@ state_set(){   # state_set key value [key value ...]
         done < "$CH_ENV"
     fi
     mv -f "$tmp" "$CH_ENV"
+    _state_unlock
 }
 
 

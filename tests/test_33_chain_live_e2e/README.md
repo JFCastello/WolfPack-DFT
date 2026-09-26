@@ -31,8 +31,7 @@ tests/run_all.sh test_33_chain_live_e2e
 
 Needs VASP, the Si POTCAR (`$WP_POTCAR_DIR`) and the testbed; skips without them.
 Si, 2 atoms, atom 2 at (0.77, 0.76, 0.75), 6×6×6 k-points, IBRION = 2,
-EDIFFG = −0.01, 4 ranks (as the reference; on this 4-core laptop 8 ranks are
-5× slower per step). About 20 minutes.
+EDIFFG = −0.01, 4 ranks, as the reference. A few minutes.
 
 ## 4. Expected results
 
@@ -48,38 +47,58 @@ EDIFFG = −0.01, 4 ranks (as the reference; on this 4-core laptop 8 ranks are
 
 ## 5. Obtained results
 
+With the defaults since 2026-09-26 (the WAVECAR carried, × 1.25 + 5 min) and
+VASP on 4 real MPI ranks:
+
 ```
   chunk try NSW  ionic geoms  e-steps/ionic    est.e   estimate  asked      used     energy (eV)  max|F|  result
-      1   1   2      2     2  11 6                11    0:02:23   0:08   0:01:48      -10.806882  0.5881  ok
-      2   1   2      2     3  11 6                11    0:01:48   0:08   0:01:35      -10.819998  0.1471  ok
-      3   1   2      2     4  11 4                11    0:01:35   0:07   0:01:51      -10.820686  0.0490  ok
-      4   1   2      2     5  11 3                11    0:01:51   0:08   0:01:30      -10.820764  0.0150  ok
-      5   1   2      2     6  11 2                11    0:01:30   0:07   0:00:43      -10.820772  0.0047  CONVERGED
+      1   1   2      2     2  11 6                11    0:00:30   0:06   0:00:28      -10.806882  0.5881  ok
+      2   1   2      2     3  2 6                 11    0:00:29   0:06   0:00:17      -10.819997  0.1471  ok
+      3   1   2      2     4  2 4                 11    0:00:32   0:06   0:00:15      -10.820685  0.0491  ok
+      4   1   2      2     5  2 3                 11    0:00:34   0:06   0:00:15      -10.820764  0.0151  ok
+      5   1   2      2     6  7 2                 11    0:00:30   0:06   0:00:15      -10.820772  0.0048  CONVERGED
 ```
 
 - **The answer:** \|ΔE\| = 1×10⁻⁶ eV, max \|Δr\| = 0.0003 Å against the direct run.
 - **The cost:** the direct run took 6 ionic steps. The chain computed 6 distinct
   geometries in 5 chunks, 10 SCF runs, because each chunk's first step repeats
   the last geometry. In this case NSW = 2 did not add ionic steps.
-- **The electronic-step estimate was exact:** 11 estimated, 11 taken, for every
-  chunk's first ionic step.
-- **The time estimate** is that count times the seconds per electronic step, and
-  this laptop does not repeat itself. VASP's own LOOP lines give **2.5 to 9.4 s
-  per electronic step** across the chunks for the same work. Used/estimate went
-  from 0.48 to 1.17. The walltime's × 1.15 + 5 min absorbed it: no chunk ran
-  out. On an earlier run the spread was 4.4 to 17.1 s and the worst chunk used
-  1.55 × its estimate, absorbed the same way. An estimate from the chunk before
-  can be no more precise than the machine is repeatable. On a cluster with
-  dedicated nodes this should be much tighter, but it was not measured here.
-- **vasp-test's start-up: 8.7 s.** It is the benchmark's wall time minus the
+- **The carried WAVECAR** made a chunk's first ionic step 2 electronic steps,
+  three chunks running, then 7 (11 without it). The 7 came from a WAVECAR that
+  VASP wrote for the very CONTCAR the chunk started from; reproduced by hand,
+  the same 7. So a carried chunk's first step is estimated as a cold start
+  (11, chunk 1's): never short, and those chunks used about half their
+  estimate. Estimating it from the chunk before, as the first run with the new
+  default did, fell 5 steps short at chunk 5.
+- **The time:** VASP's LOOP lines give 0.9 to 3.0 s per electronic step across
+  the chunks. Chunk 1, the only one estimated from vasp-test, used 0.93 of its
+  estimate.
+- **vasp-test's start-up: 1.6 s.** It is the benchmark's wall time minus the
   steps VASP timed, so it includes the step VASP was in when it was stopped: an
   upper bound, never below the real start-up.
 
-**A package bug this test found on its second run.** The start-up came out
-0.0 s. vasp-test measured the benchmark's wall time with a one-second clock:
-90 s, against 90.26 s of steps in the OUTCAR, so the difference was −0.26 s and
-was clamped to 0. The first run had passed by luck of the rounding. The
-interval is now measured to the nanosecond.
+**What the earlier runs of this test measured was not this.** Until
+2026-09-26 the testbed's `slurm.conf` had no `MpiDefault`, and VASP here is
+Open MPI with PMIx: `srun` started 4 separate 1-rank copies of VASP, all writing
+one OUTCAR. The direct run, launched with `mpirun`, was right; every
+`srun`-launched one, vasp-test's benchmark and every chunk, was not. The
+answers still agreed, because each copy computed the same thing. But the
+"4.4 to 17.1 s per electronic step" once put down to this laptop was four
+copies sharing its cores, and a start-up that came out 0 was their interleaved
+OUTCAR lines summing to more than the wall time, not the one-second clock first
+blamed for it (the clock now reads nanoseconds anyway). The testbed sets
+`MpiDefault=pmix` now, and vasp-test fails a benchmark whose OUTCAR reports
+fewer ranks than `srun` started (test_28).
+
+**A package bug this test found on 2026-09-26.** The chain's state file
+(`chain.env`) lost keys: `chain_carry`, `chain_safety`, `chain_kind` and a
+dozen more. A chunk that completes submits the next and goes on writing it; on
+the testbed the next chunk starts at once and writes it too, and with no lock
+and one shared temporary file, each truncated the other's copy. Two writers in
+a test lost all 40 keys of 40. `state_set` now takes a lock (a file created
+with noclobber: `mkdir` is not exclusive on this laptop, whose `mkdir` is the
+Rust uutils 0.8.0), and each writer has its own temporary file. test_36
+checks it.
 
 The first version of this test asserted "used ≤ estimate × 1.15". It failed on
 chunk 1 because of the machine, not the method, and it now asserts what the

@@ -53,22 +53,22 @@ ok_if "[[ \$(ch_nsub '$d') == 0 ]]" "nothing was submitted by any refusal"
 # ===========================================================================
 # Chunk 1, from vasp-test (see chain_harness.sh): 13 electronic steps of 2.0 s
 # plus 2.0 s for the forces = 28 s per ionic step; start-up 10 s; NSW = 2:
-#   10 + 28 + 28 = 66 s  x 1.15 = 75.9 s -> 2 min + 5 = 7 min.
+#   10 + 28 + 28 = 66 s  x 1.25 = 82.5 s -> 2 min + 5 = 7 min.
 # Chunk 2, from chunk 1 as the fake writes it: step 1 = 11 x 2.0 + 0.5 = 22.5 s,
 # step 2 = 6 x 2.0 + 0.5 = 12.5 s, start-up = the chunk's wall - 35 s = 0 here:
-#   0 + 22.5 + 12.5 = 35 s  x 1.15 = 40.3 s -> 1 min + 5 = 6 min.
+#   0 + 22.5 + 12.5 = 35 s  x 1.25 = 43.8 s -> 1 min + 5 = 6 min.
 d=$(ch_setup conv)
 ch_plan "$d" "nel=11,6"; ch_plan "$d" "nel=9,5"; ch_plan "$d" "nel=9,4 conv_at=2"
 out=$(ch_run "$d" 2>&1); rc=$?
 ok_if "(( rc == 0 )) && grep -q 'first ionic step *28.0 s: 13 electronic steps (8 done + 3 to reach EDIFF=1e-06 at 1.00 decades/step + 2 margin)' <<<\"\$out\"" \
       "chunk 1's step is extrapolated from vasp-test: 8 done + 3 to EDIFF + 2 = 13 steps, 28 s (rc=$rc)"
 ok_if "grep -q 'NSW = 2: estimate 0:01:06 -> asks 7 min' <<<\"\$out\" && [[ \$(ch_job '$d' time) == 00:07:00 ]]" \
-      "and chunk 1 asks 7 min: 66 s x 1.15 + 5 min"
+      "and chunk 1 asks 7 min: 66 s x 1.25 + 5 min"
 ch_chunk "$d"
 ok_if "[[ -d '$d/wolfpack_chain/001' && ! -e '$d/wolfpack_chain/001.try1' ]]" \
       "a completed chunk's directory is filed as 001"
 ok_if "[[ \$(ch_job '$d' time) == 00:06:00 ]]" \
-      "chunk 2 asks 6 min, from chunk 1's measured steps (35 s x 1.15 + 5 min) (got $(ch_job "$d" time))"
+      "chunk 2 asks 6 min, from chunk 1's measured steps (35 s x 1.25 + 5 min) (got $(ch_job "$d" time))"
 ok_if "[[ \$(x2 '$d/wolfpack_chain/002.try1/POSCAR') == \$(x2 '$d/wolfpack_chain/001/CONTCAR') && \$(x2 '$d/wolfpack_chain/001/CONTCAR') == 0.7520 ]]" \
       "chunk 2 starts from chunk 1's CONTCAR (x = 0.7520: NSW = 2 moved the ions once)"
 ok_if "[[ \$(x2 '$d/POSCAR') == 0.7500 && \$(x2 '$d/CONTCAR') == 0.7520 ]]" \
@@ -78,8 +78,8 @@ ok_if "[[ \$(ch_state '$d' chain_state) == converged && -f '$d/wolfpack_chain/FI
       "VASP's 'reached required accuracy' ends the chain as converged"
 ok_if "[[ \$(ch_state '$d' geoms_done) == 4 && \$(ch_nsub '$d') == 3 ]]" \
       "3 chunks of NSW = 2: 2 + 1 + 1 = 4 distinct geometries (each chunk's first step repeats), 3 jobs"
-ok_if "[[ \$(ch_seen '$d' 1) == 'dir=001.try1 NSW=2 WAVECAR=0 x2=0.7500' && \$(ch_seen '$d' 3) == 'dir=003.try1 NSW=2 WAVECAR=0 x2=0.7540' ]]" \
-      "each chunk ran in its own directory, from the geometry the last one reached"
+ok_if "[[ \$(ch_seen '$d' 1) == 'dir=001.try1 NSW=2 WAVECAR=0 x2=0.7500' && \$(ch_seen '$d' 3) == 'dir=003.try1 NSW=2 WAVECAR=1 x2=0.7540' ]]" \
+      "each chunk ran in its own directory, from the geometry the last one reached, with its WAVECAR (the default)"
 p=$(cat "$d/relax_progress.txt")
 ok_if "grep -qE '^ +1 +1 +2 +2 +2 +11 6 +13 +0:01:06 +0:07 ' <<<\"\$p\" && grep -qE '^ +2 +1 +2 +2 +3 +9 5 +11 +0:00:35 +0:06 ' <<<\"\$p\" && grep -qE ' CONVERGED\$' <<<\"\$p\"" \
       "relax_progress.txt: one row per chunk -- electronic steps per ionic step, the estimates (steps, time), the walltime asked"
@@ -113,12 +113,12 @@ ok_if "[[ -d '$d/wolfpack_chain/001' && \$(ch_state '$d' chunk_ok) == 1 ]]" "try
 # 8 (5 delayed + 3 self-consistent: 5e-2, 5e-3, 5e-4, one decade a step).
 # Re-estimated from what it measured: 8 + 3 to EDIFF + 2 = 13 steps x 20 s,
 # + 20 s for the forces (none completed) = 280 s per ionic step;
-# 10 + 280 + 280 = 570 s x 1.15 = 655.5 s -> 11 min + 5 = 16 min, more than 1.5 x 7.
+# 10 + 280 + 280 = 570 s x 1.25 = 712.5 s -> 12 min + 5 = 17 min, more than 1.5 x 7.
 d=$(ch_setup slow)
 ch_plan "$d" "nel=11,6 t_e=20 stop_at=8"
 ch_run "$d" >/dev/null 2>&1; ch_chunk "$d"
-ok_if "[[ \$(ch_job '$d' time) == 00:16:00 ]]" \
-      "a slower step than measured: the retry is re-estimated from its own 20-s steps, 16 min (got $(ch_job "$d" time))"
+ok_if "[[ \$(ch_job '$d' time) == 00:17:00 ]]" \
+      "a slower step than measured: the retry is re-estimated from its own 20-s steps, 17 min (got $(ch_job "$d" time))"
 
 # Retries run out.
 d=$(ch_setup exhaust)
@@ -188,15 +188,59 @@ out=$(ch_run "$d" 2>&1)
 ok_if "grep -q 'NSW per chunk *2 (--nsw; the INCAR has none)' <<<\"\$out\" && [[ \$(awk -F'[=!]' '/^ *NSW/{print \$2+0; exit}' '$d/wolfpack_chain/001.try1/INCAR') == 2 ]]" \
       "no NSW in the INCAR: 2, and it says so"
 
+# Carrying the WAVECAR is the default (since 2026-09-26), as is --safety 1.25.
 d=$(ch_setup carry)
 ch_plan "$d" "nel=11,6"
+out=$(ch_run "$d" 2>&1); ch_chunk "$d"; ch_chunk "$d"
+ok_if "[[ \$(ch_seen '$d' 1 | grep -o 'WAVECAR=.') == WAVECAR=0 && \$(ch_seen '$d' 2 | grep -o 'WAVECAR=.') == WAVECAR=1 ]] && grep -qE 'WAVECAR carried +yes' <<<\"\$out\"" \
+      "by default chunk 2 starts with chunk 1's WAVECAR, and the launch says so"
+ok_if "grep -q 'asks 7 min (x 1.25 + 5 min)' <<<\"\$out\" && grep -q 'chain_safety=\"1.25\"' '$d/wolfpack_chain/chain.env'" \
+      "and the default walltime factor is 1.25"
+d=$(ch_setup carryflag)
+ch_plan "$d" "nel=11,6"
 ch_run "$d" --carry-wavecar >/dev/null 2>&1; ch_chunk "$d"; ch_chunk "$d"
-ok_if "[[ \$(ch_seen '$d' 1 | grep -o 'WAVECAR=.') == WAVECAR=0 && \$(ch_seen '$d' 2 | grep -o 'WAVECAR=.') == WAVECAR=1 ]]" \
-      "--carry-wavecar: chunk 2 starts with chunk 1's WAVECAR"
+ok_if "[[ \$(ch_seen '$d' 2 | grep -o 'WAVECAR=.') == WAVECAR=1 ]]" "--carry-wavecar says the same explicitly"
 d=$(ch_setup nocarry)
 ch_plan "$d" "nel=11,6"
-ch_run "$d" >/dev/null 2>&1; ch_chunk "$d"; ch_chunk "$d"
-ok_if "[[ \$(ch_seen '$d' 2 | grep -o 'WAVECAR=.') == WAVECAR=0 ]]" "without it, chunk 2 starts with none"
+out=$(ch_run "$d" --no-carry-wavecar 2>&1); ch_chunk "$d"; ch_chunk "$d"
+ok_if "[[ \$(ch_seen '$d' 2 | grep -o 'WAVECAR=.') == WAVECAR=0 ]] && grep -qE 'WAVECAR carried +no \(--no-carry-wavecar\)' <<<\"\$out\"" \
+      "--no-carry-wavecar: chunk 2 starts with none"
+# A carried WAVECAR can make a first step short (2 electronic steps here) and
+# the next one long: in the live Si chain, 2, 2, 2, then 7 from a WAVECAR VASP
+# wrote for that very CONTCAR (cold: 11). So when carrying, a chunk's first
+# step is estimated as a cold start -- chunk 1's 11 -- never as the last
+# chunk's 2. Without carrying, the last chunk's first step is the estimate.
+for c in coldest:"" coldnone:--no-carry-wavecar; do
+    d=$(ch_setup "${c%%:*}")
+    ch_plan "$d" "nel=11,6"; ch_plan "$d" "nel=2,5"; ch_plan "$d" "nel=7,4"
+    ch_run "$d" ${c#*:} >/dev/null 2>&1; ch_chunk "$d"; ch_chunk "$d"
+    eval "est_${c%%:*}=\$(ch_state '$d' cur_nel_est)"
+done
+ok_if "[[ '$est_coldest' == 11 ]]" \
+      "carrying: chunk 3's first step is estimated as a cold start, 11 steps, not chunk 2's 2 (got $est_coldest)"
+ok_if "[[ '$est_coldnone' == 2 ]]" \
+      "not carrying: it is chunk 2's own first step, 2 (got $est_coldnone)"
+
+# With LWAVE = .FALSE. there is no WAVECAR: the default does not carry one, and
+# says so. The explicit --carry-wavecar is refused (section 1).
+d=$(ch_setup nolwave)
+ch_plan "$d" "nel=11,6"
+echo "LWAVE = .FALSE." >> "$d/INCAR"
+out=$(ch_run "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'there is no WAVECAR to carry, so each chunk starts from the CONTCAR alone' <<<\"\$out\" && grep -qE 'WAVECAR carried +no \(LWAVE = .FALSE. in the INCAR\)' <<<\"\$out\"" \
+      "LWAVE = .FALSE. and no flag: the chain runs without carrying, and says why (rc=$rc)"
+ok_if "grep -q '^LWAVE = .FALSE.' '$d/wolfpack_chain/001.try1/INCAR'" "the INCAR's LWAVE is left as it is"
+# ISTART = 0 and ICHARG = 2: VASP would read neither carried file. Said, not
+# changed (vasp.at/wiki/ISTART: "begin from scratch"; ICHARG = 2: atomic
+# charge densities).
+d=$(ch_setup istart0)
+ch_plan "$d" "nel=11,6"
+printf 'ISTART = 0\nICHARG = 2\n' >> "$d/INCAR"
+out=$(ch_run "$d" 2>&1); rc=$?
+ok_if "(( rc == 0 )) && grep -q 'ISTART = 0 in the INCAR: VASP begins from scratch and does not read the carried WAVECAR' <<<\"\$out\" && grep -q 'ICHARG = 2 in the INCAR: VASP starts from atomic charge densities and does not read the carried CHGCAR' <<<\"\$out\"" \
+      "ISTART = 0 and ICHARG = 2: the launch says VASP will read neither carried file (rc=$rc)"
+ok_if "grep -q '^ISTART = 0' '$d/wolfpack_chain/001.try1/INCAR' && grep -q '^ICHARG = 2' '$d/wolfpack_chain/001.try1/INCAR'" \
+      "and both tags are left as they are"
 
 # --stop: the running chunk completes, nothing more is submitted; --resume goes on.
 d=$(ch_setup stop)
@@ -210,5 +254,29 @@ ok_if "(( rc == 0 )) && [[ \$(ch_state '$d' cur_chunk) == 2 && \$(ch_job '$d' ti
       "--resume submits chunk 2, sized from chunk 1 (6 min) (rc=$rc)"
 out=$(ch_run "$d" --status 2>&1)
 ok_if "grep -q 'queued: chunk 2' <<<\"\$out\"" "--status shows the progress file"
+
+# ===========================================================================
+# THE STATE FILE, WRITTEN BY TWO PROCESSES AT ONCE
+# ===========================================================================
+# A chunk that completes submits the next and goes on writing chain.env; the
+# scheduler may start the next one at once, and it writes too. On the live
+# testbed that lost chain_carry, chain_safety and a dozen more keys. Here: 40
+# keys, then two writers of 60 updates each, at the same time.
+r="$W/staterace"; rm -rf "$r"; mkdir -p "$r"
+cat > "$r/race.sh" <<EOS
+source "$TK_DIR/wolfpack_chain_lib.sh" 2>/dev/null
+CHDIR="$r/chain"; CH_ENV="\$CHDIR/chain.env"; mkdir -p "\$CHDIR"
+args=(); for i in \$(seq 1 40); do args+=("key_\$i" "v\$i"); done
+state_set "\${args[@]}"
+( for n in \$(seq 1 60); do state_set writer_a "\$n"; done ) &
+( for n in \$(seq 1 60); do state_set writer_b "\$n"; done ) &
+wait
+EOS
+bash "$r/race.sh" > "$r/out" 2>&1
+e="$r/chain/chain.env"
+ok_if "[[ \$(grep -c '^key_' '$e') == 40 && \$(grep -oP 'writer_a=\"\\K[0-9]+' '$e') == 60 && \$(grep -oP 'writer_b=\"\\K[0-9]+' '$e') == 60 ]]" \
+      "two processes writing chain.env at once: all 40 keys kept, and each writer's last value (got $(grep -c '^key_' "$e") keys)"
+ok_if "[[ ! -s '$r/out' && -z \"\$(ls '$r/chain' | grep -v '^chain.env\$')\" ]]" \
+      "no error, no temporary file or lock left behind"
 
 exit $(( FAIL_N > 0 ))

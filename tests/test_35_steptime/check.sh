@@ -112,6 +112,15 @@ ok_if "[[ \$(val startup_s '$o') == 2.1 && \$(val t1_s '$o') == 28.24 && \$(val 
       "the next chunk from a real run: 2.1 s start-up + 28.24 + 10.7 = 41.0 s (got $(val est_s "$o"))"
 ok_if "[[ \$(val reached '$o') == 1 ]]" "and it sees VASP's 'reached required accuracy'"
 
+# The next chunk carries a WAVECAR: its first step is taken as a cold start,
+# COLD_NEL = 11 electronic steps at this run's pace. t_e = 2.0 s; the overhead
+# per ionic step is the median of LOOP+ - sum(LOOP) = 26.237 12.934 12.532
+# 8.130 6.207 3.873 -> (8.130 + 12.532)/2 = 10.331 s. So 11 x 2.0 + 10.331 =
+# 32.3 s, and 2.1 + 32.3 + 10.7 = 45.1 s.
+o=$("$ST" next "$d/OUTCAR" "$d/OSZICAR" 2 84.0 11)
+ok_if "[[ \$(val t1_s '$o') == 32.3 && \$(val nel_first '$o') == 11 && \$(val est_s '$o') == 45.1 ]] && grep -q 'as a cold start: 11 electronic steps' <<<\"\$o\"" \
+      "carrying a WAVECAR: the first step as a cold start, 11 x 2.0 + 10.331 = 32.3 s; 45.1 s in all (got $(val est_s "$o"))"
+
 # A retry: one ionic step completed (8 steps of 2.0 s, LOOP+ 16.8 s), the next
 # cut after 3 (0.1, 0.01, 0.001): 3 + 3 + 2 = 8 steps x 2.0 + 0.8 = 16.8 s.
 d=$(mk retry -5 "1E+02 1E+02;1E+01 1E+01;1E+00 1E+00;1E-01 1E-01;1E-02 1E-02;1E-03 1E-03;1E-05 1E-05;1E-07 1E-07;0.1E+00 0.1E+00;0.1E-01 0.1E-01;0.1E-02 0.1E-02" 2.0 8)

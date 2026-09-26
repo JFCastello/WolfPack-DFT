@@ -50,6 +50,10 @@ SlurmdLogFile=$ROOT/log/slurmd-%n.log
 SlurmctldPidFile=$ROOT/slurmctld.pid
 SlurmdPidFile=$ROOT/slurmd-%n.pid
 ProctrackType=proctrack/pgid
+# srun must wire VASP's MPI (OpenMPI with PMIx). With the default, none, srun
+# started NTASKS separate 1-rank copies of VASP writing one OUTCAR -- every
+# srun-launched VASP in this suite ran that way until 2026-09-26.
+MpiDefault=pmix
 TaskPlugin=task/none
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
